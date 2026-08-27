@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 
 #include <charconv>
+#include <format>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -17,13 +18,47 @@ namespace {
 using namespace uee;
 
 s32 failures = 0;
+// Held until the case ends, because whether a mismatch is a failure depends on
+// which op produced it.
+std::vector<std::string> pending;
 
 template <typename... Args>
 void fail(spdlog::format_string_t<Args...> what, Args&&... args) {
-    if (failures < 25) {
-        spdlog::error(what, std::forward<Args>(args)...);
+    pending.push_back(std::vformat(what, std::make_format_args(args...)));
+}
+
+void settle(std::map<std::string, s32>& diverged, std::string_view op, bool divergent) {
+    for (const std::string& message : pending) {
+        if (divergent) {
+            ++diverged[std::string(op)];
+        } else {
+            if (failures < 25) {
+                spdlog::error("{}", message);
+            }
+            ++failures;
+        }
     }
-    ++failures;
+    pending.clear();
+}
+
+// These vectors come from the PCSX2 interpreter, which computes the FPU on the
+// host in place of the R5900's own rounding, so it disagrees with the hardware
+// the ps2autotests were captured on. Where the two conflict this runtime
+// follows the hardware, and a mismatch here is counted and reported rather than
+// failed. The ops are listed one by one so a mismatch anywhere else still
+// fails.
+bool oracleFollowsHost(Op op) {
+    switch (op) {
+        case Op::add_s: case Op::sub_s: case Op::mul_s: case Op::div_s:
+        case Op::sqrt_s: case Op::rsqrt_s:
+        case Op::adda_s: case Op::suba_s: case Op::mula_s:
+        case Op::madd_s: case Op::msub_s: case Op::madda_s: case Op::msuba_s:
+        case Op::c_eq_s: case Op::c_lt_s: case Op::c_le_s:
+        case Op::ctc1:
+            return true;
+        default:
+            return false;
+    }
 }
 
 std::vector<std::string_view> split(std::string_view text, char sep) {
@@ -284,6 +319,7 @@ int main(int argc, char** argv) {
 
     std::map<std::string, s32> unimplemented;
     std::map<std::string, s32> executed;
+    std::map<std::string, s32> diverged;
     s32 ran = 0;
     s32 flagsSkipped = 0;
     s32 pcUnrecorded = 0;
@@ -306,6 +342,7 @@ int main(int argc, char** argv) {
         }
         if (status == Status::Undecodable) {
             fail("{:08x}: no slot names this encoding", k.word);
+            settle(diverged, "", false);
             continue;
         }
         ++ran;
@@ -359,6 +396,9 @@ int main(int argc, char** argv) {
                 }
             }
         }
+
+        const Op op = decode(insn).op;
+        settle(diverged, lookupName(op), oracleFollowsHost(op));
     }
 
     s32 skipped = 0;
@@ -369,6 +409,17 @@ int main(int argc, char** argv) {
     if (flagsSkipped != 0) {
         spdlog::warn("{} VU flag assertions skipped: the status, MAC and clip "
                      "registers are not computed", flagsSkipped);
+    }
+    s32 divergences = 0;
+    for (const auto& [op, count] : diverged) {
+        divergences += count;
+    }
+    if (divergences != 0) {
+        spdlog::warn("{} cases follow the hardware where these vectors follow the host FPU:",
+                     divergences);
+        for (const auto& [op, count] : diverged) {
+            spdlog::warn("  {} ({} cases)", op, count);
+        }
     }
     if (pcUnrecorded != 0) {
         spdlog::warn("{} eret cases ran with the pc unchecked: no vector records EPC",
