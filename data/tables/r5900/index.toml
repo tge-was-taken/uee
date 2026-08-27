@@ -1,0 +1,32 @@
+table = [
+  { name = "root",     file = "root.toml",     select = "op[31:26]",                 slots = 64 },
+  { name = "SPECIAL",  file = "special.toml",  select = "funct[5:0]",                slots = 64 },
+  { name = "REGIMM",   file = "regimm.toml",   select = "rt[20:16]",                 slots = 32 },
+  { name = "COP0",     file = "cop0.toml",     select = "rs[25:21]",                 slots = 32 },
+  { name = "COP0.BC",  file = "cop0_bc.toml",  select = "rt[20:16]",                 slots = 32 },
+  { name = "COP0.CO",  file = "cop0_co.toml",  select = "funct[5:0]",                slots = 64 },
+  { name = "COP1",     file = "cop1.toml",     select = "rs[25:21]",                 slots = 32 },
+  { name = "COP1.BC",  file = "cop1_bc.toml",  select = "rt[20:16]",                 slots = 32 },
+  { name = "COP1.S",   file = "cop1_s.toml",   select = "funct[5:0]",                slots = 64 },
+  { name = "COP1.W",   file = "cop1_w.toml",   select = "funct[5:0]",                slots = 64 },
+  { name = "COP2",     file = "cop2.toml",     select = "rs[25:21]",                 slots = 32 },
+  { name = "COP2.BC",  file = "cop2_bc.toml",  select = "rt[20:16]",                 slots = 32 },
+  { name = "COP2.CO",  file = "cop2_co.toml",  select = "funct[5:0]",                slots = 64 },
+  { name = "COP2.V",   file = "cop2_v.toml",   select = "(sa[10:6]<<2)|funct[1:0]",  slots = 128 },
+  { name = "MMI",      file = "mmi.toml",      select = "funct[5:0]",                slots = 64 },
+  { name = "MMI0",     file = "mmi0.toml",     select = "sa[10:6]",                  slots = 32 },
+  { name = "MMI1",     file = "mmi1.toml",     select = "sa[10:6]",                  slots = 32 },
+  { name = "MMI2",     file = "mmi2.toml",     select = "sa[10:6]",                  slots = 32 },
+  { name = "MMI3",     file = "mmi3.toml",     select = "sa[10:6]",                  slots = 32 },
+  { name = "PMFHL",    file = "pmfhl.toml",    select = "sa[10:6]",                  slots = 32 },
+  { name = "PMTHL",    file = "pmthl.toml",    select = "sa[10:6]",                  slots = 32 },
+]
+
+[field]
+rs = "25:21"
+rt = "20:16"
+rd = "15:11"
+sa = "10:6"
+imm = "15:0"
+target = "25:0"
+dest = "24:21"

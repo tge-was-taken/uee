@@ -1,0 +1,39 @@
+[table]
+name = "MMI2"
+select = "sa[10:6]"
+slots = 32
+
+slot = [
+  { i = 0x00, op = "pmaddw", args = ["rd", "rs", "rt"] },
+  { i = 0x01 },
+  { i = 0x02, op = "psllvw", args = ["rd", "rt", "rs"] },
+  { i = 0x03, op = "psrlvw", args = ["rd", "rt", "rs"] },
+  { i = 0x04, op = "pmsubw", args = ["rd", "rs", "rt"] },
+  { i = 0x05 },
+  { i = 0x06 },
+  { i = 0x07 },
+  { i = 0x08, op = "pmfhi", args = ["rd"] },
+  { i = 0x09, op = "pmflo", args = ["rd"] },
+  { i = 0x0A, op = "pinth", args = ["rd", "rs", "rt"] },
+  { i = 0x0B },
+  { i = 0x0C, op = "pmultw", args = ["rd", "rs", "rt"] },
+  { i = 0x0D, op = "pdivw", args = ["rs", "rt"] },
+  { i = 0x0E, op = "pcpyld", args = ["rd", "rs", "rt"] },
+  { i = 0x0F },
+  { i = 0x10, op = "pmaddh", args = ["rd", "rs", "rt"] },
+  { i = 0x11, op = "phmadh", args = ["rd", "rs", "rt"] },
+  { i = 0x12, op = "pand", args = ["rd", "rs", "rt"] },
+  { i = 0x13, op = "pxor", args = ["rd", "rs", "rt"] },
+  { i = 0x14, op = "pmsubh", args = ["rd", "rs", "rt"] },
+  { i = 0x15, op = "phmsbh", args = ["rd", "rs", "rt"] },
+  { i = 0x16 },
+  { i = 0x17 },
+  { i = 0x18 },
+  { i = 0x19 },
+  { i = 0x1A, op = "pexeh", args = ["rd", "rt"] },
+  { i = 0x1B, op = "prevh", args = ["rd", "rt"] },
+  { i = 0x1C, op = "pmulth", args = ["rd", "rs", "rt"] },
+  { i = 0x1D, op = "pdivbw", args = ["rs", "rt"] },
+  { i = 0x1E, op = "pexew", args = ["rd", "rt"] },
+  { i = 0x1F, op = "prot3w", args = ["rd", "rt"] },
+]

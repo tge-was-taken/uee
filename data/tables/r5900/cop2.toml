@@ -1,0 +1,39 @@
+[table]
+name = "COP2"
+select = "rs[25:21]"
+slots = 32
+
+slot = [
+  { i = 0x00 },
+  { i = 0x01, op = "qmfc2.ni", args = ["rt", "rd"] },
+  { i = 0x02, op = "cfc2.ni", args = ["rt", "rd"] },
+  { i = 0x03 },
+  { i = 0x04 },
+  { i = 0x05, op = "qmtc2.ni", args = ["rt", "rd"] },
+  { i = 0x06, op = "ctc2.ni", args = ["rt", "rd"] },
+  { i = 0x07 },
+  { i = 0x08, sub = "cop2_bc" },
+  { i = 0x09 },
+  { i = 0x0A },
+  { i = 0x0B },
+  { i = 0x0C },
+  { i = 0x0D },
+  { i = 0x0E },
+  { i = 0x0F },
+  { i = 0x10, sub = "cop2_co" },
+  { i = 0x11, sub = "cop2_co" },
+  { i = 0x12, sub = "cop2_co" },
+  { i = 0x13, sub = "cop2_co" },
+  { i = 0x14, sub = "cop2_co" },
+  { i = 0x15, sub = "cop2_co" },
+  { i = 0x16, sub = "cop2_co" },
+  { i = 0x17, sub = "cop2_co" },
+  { i = 0x18, sub = "cop2_co" },
+  { i = 0x19, sub = "cop2_co" },
+  { i = 0x1A, sub = "cop2_co" },
+  { i = 0x1B, sub = "cop2_co" },
+  { i = 0x1C, sub = "cop2_co" },
+  { i = 0x1D, sub = "cop2_co" },
+  { i = 0x1E, sub = "cop2_co" },
+  { i = 0x1F, sub = "cop2_co" },
+]
