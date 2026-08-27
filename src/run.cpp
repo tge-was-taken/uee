@@ -1,6 +1,7 @@
 #include "run.h"
 
 #include "instruction.h"
+#include "timers.h"
 #include "translate.h"
 
 #include <minicoro.h>
@@ -23,6 +24,8 @@ constexpr u32 kNoHalt = 1;
 constexpr usize kThreadStackSize = 64 * 1024 * 1024;
 
 constexpr u64 kCallLimit = 1'000'000'000;
+
+constexpr u64 kIdleStep = kInstructionsPerHsync;
 
 struct Step {
     std::optional<Stop> stop;
@@ -64,6 +67,7 @@ Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) 
 }
 
 Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit);
+bool runIdle(Machine& machine, u64& executed, u64 instructionLimit);
 
 // A thread that gives up the processor part way through a call tree has to
 // resume there, which needs its host stack kept intact.
@@ -132,6 +136,10 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
     R5900& cpu = interpreter.ee.cpu;
 
     while (executed < instructionLimit) {
+        if (cpu.pc == kSyscallHandlerReturn && kernel.resumeFromSyscallHandler()) {
+            continue;
+        }
+
         if (cpu.pc == haltPc) {
             return Stop{StopReason::Returned, cpu.pc, {}};
         }
@@ -142,6 +150,16 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
                             std::format("touched {:08x}", *address)};
             }
             ++executed;
+            continue;
+        }
+
+        kernel.advanceClock(executed);
+        kernel.deliverInterrupts();
+
+        if (kernel.isIdle()) {
+            if (!runIdle(machine, executed, instructionLimit)) {
+                return Stop{StopReason::Deadlocked, cpu.pc, {}};
+            }
             continue;
         }
 
@@ -171,6 +189,8 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
             const EeContext caller = interpreter.ee;
             cpu.pc = call->function;
             cpu.write64(kArgumentRegister, call->argument);
+            cpu.write64(kArgumentRegister + 1, call->secondArgument);
+            cpu.write64(kArgumentRegister + 2, call->thirdArgument);
             cpu.write64(kReturnAddressRegister, kCallbackReturn);
 
             const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit);
@@ -182,6 +202,32 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
     }
 
     return Stop{StopReason::ReachedLimit, cpu.pc, {}};
+}
+
+bool runIdle(Machine& machine, u64& executed, u64 instructionLimit) {
+    Kernel& kernel = machine.kernel;
+    R5900& cpu = machine.ee().cpu;
+
+    while (kernel.isIdle() && executed < instructionLimit) {
+        executed += kIdleStep;
+        kernel.advanceClock(executed);
+        kernel.deliverInterrupts();
+
+        if (const std::optional<GuestCall> call = kernel.takePendingCall()) {
+            const EeContext caller = machine.ee();
+            cpu.pc = call->function;
+            cpu.write64(kArgumentRegister, call->argument);
+            cpu.write64(kArgumentRegister + 1, call->secondArgument);
+            cpu.write64(kArgumentRegister + 2, call->thirdArgument);
+            cpu.write64(kReturnAddressRegister, kCallbackReturn);
+            const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit);
+            machine.ee() = caller;
+            if (stop.reason != StopReason::Returned) {
+                return false;
+            }
+        }
+    }
+    return !kernel.isIdle();
 }
 
 std::string_view nameOf(StopReason reason) {
@@ -205,6 +251,29 @@ std::string describe(const Stop& stop) {
         return std::format("{} at {:08x}", nameOf(stop.reason), stop.pc);
     }
     return std::format("{} at {:08x}: {}", nameOf(stop.reason), stop.pc, stop.detail);
+}
+
+void syscall(Machine& machine, s32 number, u32 resumePc) {
+    Kernel& kernel = machine.kernel;
+    const usize self = kernel.currentThread();
+
+    machine.ee().cpu.pc = resumePc;
+    if (kernel.callSyscall(number) != SyscallResult::Handled) {
+        return;
+    }
+
+    u64 executed = 0;
+    while (kernel.isIdle()) {
+        if (!runIdle(machine, executed, kCallLimit)) {
+            return;
+        }
+    }
+    while (kernel.currentThread() != self) {
+        mco_yield(mco_running());
+    }
+    if (machine.ee().cpu.pc != resumePc) {
+        runUntil(machine, resumePc, executed, kCallLimit);
+    }
 }
 
 void step(Machine& machine, u32 pc) {
