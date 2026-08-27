@@ -25,6 +25,24 @@ std::string_view regName(u32 index) {
 }
 
 // Coprocessor and control registers index a different file, so they stay numeric.
+constexpr u32 kSyscallNumberRegister = 3;
+
+// The syscall number arrives in $v1 and every compiler loads it with a single
+// immediate right before the call, so only that shape is recognised.
+std::optional<s32> syscallNumberBefore(Instruction insn) {
+    const Op op = opOf(insn);
+    if (insn.rt() != kSyscallNumberRegister || insn.rs() != 0) {
+        return std::nullopt;
+    }
+    if (op == Op::addiu || op == Op::daddiu) {
+        return static_cast<s32>(insn.simm());
+    }
+    if (op == Op::ori) {
+        return static_cast<s32>(insn.imm());
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string> emitOne(Instruction insn) {
     const u32 rs = insn.rs();
     const u32 rt = insn.rt();
@@ -220,6 +238,9 @@ std::optional<std::string> emitOne(Instruction insn) {
         case Op::cache:
         case Op::pref:
         case Op::tlbwi:
+        case Op::tlbwr:
+        case Op::tlbr:
+        case Op::tlbp:
             return std::string{};
 
         default:
@@ -640,6 +661,20 @@ private:
             const ControlFlow cf = controlFlow(op, *insn, pc);
 
             if (cf.flow == Flow::Next || (cf.flow == Flow::Trap && op == Op::syscall)) {
+                if (op == Op::syscall) {
+                    const std::optional<Instruction> previous = fetch(pc - 4);
+                    const std::optional<s32> number =
+                        previous ? syscallNumberBefore(*previous) : std::nullopt;
+                    if (number) {
+                        out += annotate(std::format("syscall(m, {}, 0x{:08x}u);", *number, pc + 4),
+                                        pc, *insn, 1) + "\n";
+                        pc += 4;
+                        if (mLeaders.count(pc)) {
+                            return out + std::format("    {}\n", go(pc, function));
+                        }
+                        continue;
+                    }
+                }
                 const std::string statement = emitOneOr(*insn, pc);
                 if (!statement.empty()) {
                     out += annotate(statement, pc, *insn, 1) + "\n";

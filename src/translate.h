@@ -34,6 +34,8 @@ void step(Machine& machine, u32 pc);
 
 bool call(Machine& machine, u32 target, u32 returnTo);
 
+void syscall(Machine& machine, s32 number, u32 resumePc);
+
 std::string translate(Memory& memory, const Program& program);
 
 }  // namespace uee
