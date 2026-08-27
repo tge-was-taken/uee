@@ -12,6 +12,8 @@ constexpr u32 kScratchpadBase = 0x70000000;
 constexpr u32 kScratchpadSize = 16 * 1024;
 constexpr u32 kHardwareBase = 0x10000000;
 constexpr u32 kHardwareSize = 0x00010000;
+constexpr u32 kGsPrivBase = 0x12000000;
+constexpr u32 kGsPrivSize = 0x00002000;
 constexpr u32 kMirrorLimit = 0xC0000000;
 constexpr u32 kPhysicalMask = 0x1FFFFFFF;
 
@@ -32,9 +34,13 @@ struct SegmentMirror {
     }
 };
 
+class Hardware;
+
 class Memory {
 public:
     Memory(std::vector<Region> regions, SegmentMirror mirror);
+
+    void attach(Hardware* hardware) { mHardware = hardware; }
 
     std::optional<u32> fault() const { return mFault; }
 
@@ -54,6 +60,7 @@ private:
 
     std::vector<Region> mRegions;
     SegmentMirror mMirror;
+    Hardware* mHardware = nullptr;
     std::optional<u32> mFault;
 };
 

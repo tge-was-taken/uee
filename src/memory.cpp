@@ -1,5 +1,7 @@
 #include "memory.h"
 
+#include "hardware.h"
+
 #include <bit>
 #include <cstring>
 #include <utility>
@@ -60,12 +62,24 @@ u8* Memory::resolve(u32 address, u32 size) {
 
 u8 Memory::read8(u32 address) { return load<u8>(resolve(address, 1)); }
 u16 Memory::read16(u32 address) { return load<u16>(resolve(address, 2)); }
-u32 Memory::read32(u32 address) { return load<u32>(resolve(address, 4)); }
+u32 Memory::read32(u32 address) {
+    if (mHardware != nullptr) {
+        if (const std::optional<u32> value = mHardware->read(mMirror.apply(address))) {
+            return *value;
+        }
+    }
+    return load<u32>(resolve(address, 4));
+}
 u64 Memory::read64(u32 address) { return load<u64>(resolve(address, 8)); }
 
 void Memory::write8(u32 address, u8 value) { store(resolve(address, 1), value); }
 void Memory::write16(u32 address, u16 value) { store(resolve(address, 2), value); }
-void Memory::write32(u32 address, u32 value) { store(resolve(address, 4), value); }
+void Memory::write32(u32 address, u32 value) {
+    if (mHardware != nullptr && mHardware->write(mMirror.apply(address), value)) {
+        return;
+    }
+    store(resolve(address, 4), value);
+}
 void Memory::write64(u32 address, u64 value) { store(resolve(address, 8), value); }
 
 Memory makeMainMemory() {
@@ -73,6 +87,7 @@ Memory makeMainMemory() {
     regions.push_back({0, std::vector<u8>(kMainRamSize)});
     regions.push_back({kHardwareBase, std::vector<u8>(kHardwareSize)});
     regions.push_back({kScratchpadBase, std::vector<u8>(kScratchpadSize)});
+    regions.push_back({kGsPrivBase, std::vector<u8>(kGsPrivSize)});
     return Memory{std::move(regions), {kMirrorLimit, kPhysicalMask}};
 }
 
