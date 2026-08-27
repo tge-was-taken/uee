@@ -3,6 +3,7 @@
 #include "kernel.h"
 #include "memory.h"
 #include "run.h"
+#include "translate.h"
 #include "types.h"
 
 #include <spdlog/spdlog.h>
@@ -61,11 +62,12 @@ int main(int argc, char** argv) {
 
     uee::Memory memory = uee::makeMainMemory();
     uee::Interpreter interpreter(memory);
-    uee::Kernel kernel(interpreter.machine, memory);
+    uee::Kernel kernel(interpreter.ee, memory);
 
-    interpreter.machine.cpu.pc = uee::loadElf(readFile(elfPath), memory);
+    interpreter.ee.cpu.pc = uee::loadElf(readFile(elfPath), memory).entry;
 
-    const uee::Stop stop = uee::run(interpreter, memory, kernel, kInstructionLimit);
+    uee::Machine machine{interpreter, memory, kernel, nullptr};
+    const uee::Stop stop = uee::run(machine, kInstructionLimit);
     const std::string& actual = kernel.readOutput();
     const std::string expected = readText(expectedPath);
 

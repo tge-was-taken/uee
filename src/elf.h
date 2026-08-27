@@ -7,6 +7,14 @@
 
 namespace uee {
 
-u32 loadElf(std::span<const u8> image, Memory& memory);
+struct Program {
+    u32 entry = 0;
+    u32 codeStart = 0;
+    u32 codeEnd = 0;
+    u32 imageStart = 0;
+    u32 imageEnd = 0;
+};
+
+Program loadElf(std::span<const u8> image, Memory& memory);
 
 }  // namespace uee
