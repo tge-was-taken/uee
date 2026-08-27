@@ -30,40 +30,50 @@ constexpr u64 kIdleStep = kInstructionsPerHsync;
 struct Step {
     std::optional<Stop> stop;
     bool hasDelaySlot = false;
+    bool tookBranch = false;
 };
 
+// A stop leaves the pc on the instruction that caused it. The interpreter
+// commits to the next pc before it knows whether it can run the op, so without
+// this a caller could not tell a failed instruction from a completed one.
+Step stopAt(R5900& cpu, Stop stop) {
+    cpu.pc = stop.pc;
+    return {std::move(stop)};
+}
+
 Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) {
+    R5900& cpu = interpreter.ee.cpu;
     const Instruction insn{memory.read32(pc)};
     if (auto address = memory.fault()) {
-        return {Stop{StopReason::UnmappedAccess, pc, std::format("fetch from {:08x}", *address)}};
+        return stopAt(cpu, {StopReason::UnmappedAccess, pc,
+                            std::format("fetch from {:08x}", *address)});
     }
 
     if (opOf(insn) == Op::syscall) {
-        interpreter.ee.cpu.pc = pc + 4;
+        cpu.pc = pc + 4;
         switch (kernel.handleSyscall()) {
             case SyscallResult::Handled: return {};
-            case SyscallResult::Exited: return {Stop{StopReason::Exited, pc, {}}};
-            case SyscallResult::Deadlocked: return {Stop{StopReason::Deadlocked, pc, {}}};
+            case SyscallResult::Exited: return stopAt(cpu, {StopReason::Exited, pc, {}});
+            case SyscallResult::Deadlocked: return stopAt(cpu, {StopReason::Deadlocked, pc, {}});
             case SyscallResult::Unknown:
-                return {Stop{StopReason::UnknownSyscall, pc,
-                             std::format("{}", static_cast<s32>(
-                                                   interpreter.ee.cpu.gpr[3].lo))}};
+                return stopAt(cpu, {StopReason::UnknownSyscall, pc,
+                                    std::format("{}", static_cast<s32>(cpu.gpr[3].lo))});
         }
     }
 
     switch (interpreter.execute(insn)) {
         case Status::Executed: break;
         case Status::Unimplemented:
-            return {Stop{StopReason::Unimplemented, pc, std::format("{}", insn)}};
+            return stopAt(cpu, {StopReason::Unimplemented, pc, std::format("{}", insn)});
         case Status::Undecodable:
-            return {Stop{StopReason::Undecodable, pc, std::format("{:08x}", insn.word)}};
+            return stopAt(cpu, {StopReason::Undecodable, pc, std::format("{:08x}", insn.word)});
     }
 
     if (auto address = memory.fault()) {
-        return {Stop{StopReason::UnmappedAccess, pc,
-                     std::format("{} touched {:08x}", insn, *address)}};
+        return stopAt(cpu, {StopReason::UnmappedAccess, pc,
+                            std::format("{} touched {:08x}", insn, *address)});
     }
-    return {std::nullopt, interpreter.hasDelaySlot()};
+    return {std::nullopt, interpreter.hasDelaySlot(), interpreter.tookBranch()};
 }
 
 Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit);
@@ -129,6 +139,20 @@ private:
     bool mStopped = false;
 };
 
+// One instruction run as a delay slot, with the pending transfer already in pc.
+// A slot that transfers control replaces it: a branch here is not valid MIPS,
+// and the R5900 lets the second transfer win rather than queueing both.
+Step runDelaySlot(Machine& machine, u32 pc) {
+    R5900& cpu = machine.ee().cpu;
+    const u32 pending = cpu.pc;
+    cpu.pc = pc;
+    const Step step = stepOnce(machine.interpreter, machine.memory, machine.kernel, pc);
+    if (!step.tookBranch) {
+        cpu.pc = pending;
+    }
+    return step;
+}
+
 Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit) {
     Interpreter& interpreter = machine.interpreter;
     Memory& memory = machine.memory;
@@ -175,14 +199,11 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
         }
 
         if (step.hasDelaySlot) {
-            const u32 resume = cpu.pc;
-            cpu.pc = pc + 4;
-            const Step delayed = stepOnce(interpreter, memory, kernel, pc + 4);
+            const Step delayed = runDelaySlot(machine, pc + 4);
             if (delayed.stop) {
                 return *delayed.stop;
             }
             ++executed;
-            cpu.pc = resume;
         }
 
         if (auto call = kernel.takePendingCall()) {
@@ -253,19 +274,23 @@ std::string describe(const Stop& stop) {
     return std::format("{} at {:08x}: {}", nameOf(stop.reason), stop.pc, stop.detail);
 }
 
-void syscall(Machine& machine, s32 number, u32 resumePc) {
+// False once the guest is not to carry on: the pc is left on the syscall so the
+// driver re-runs it and reports the stop, rather than emitted code running past
+// an exit into whatever follows it.
+bool syscall(Machine& machine, s32 number, u32 resumePc) {
     Kernel& kernel = machine.kernel;
     const usize self = kernel.currentThread();
 
     machine.ee().cpu.pc = resumePc;
     if (kernel.callSyscall(number) != SyscallResult::Handled) {
-        return;
+        machine.ee().cpu.pc = resumePc - 4;
+        return false;
     }
 
     u64 executed = 0;
     while (kernel.isIdle()) {
         if (!runIdle(machine, executed, kCallLimit)) {
-            return;
+            return false;
         }
     }
     while (kernel.currentThread() != self) {
@@ -274,6 +299,11 @@ void syscall(Machine& machine, s32 number, u32 resumePc) {
     if (machine.ee().cpu.pc != resumePc) {
         runUntil(machine, resumePc, executed, kCallLimit);
     }
+    return true;
+}
+
+void stepDelaySlot(Machine& machine, u32 pc) {
+    runDelaySlot(machine, pc);
 }
 
 void step(Machine& machine, u32 pc) {
