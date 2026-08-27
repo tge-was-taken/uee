@@ -1,0 +1,14 @@
+-- TEST BEGIN
+cop0 config readable: 1
+after set ICE: 1
+after clear ICE: 0
+after set BPE: 1
+after clear BPE: 0
+vint handler 3: 3
+vint handler 9: -1
+vcommon handler 9: 9
+vcommon handler 2: -1
+imr: 7f00
+vsync flag: 1
+alarm count still: 0
+-- TEST END

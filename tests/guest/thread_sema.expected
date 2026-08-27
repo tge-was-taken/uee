@@ -1,0 +1,12 @@
+-- TEST BEGIN
+self: id valid 1
+self status: status 01
+sema: created 1
+poll empty: -1
+queued: ace
+sema waiters: 3
+released: acebdf
+wait bad id: 999
+delete sema: 1
+refer deleted: -1
+-- TEST END

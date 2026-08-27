@@ -1,0 +1,10 @@
+-- TEST BEGIN
+empty: count 0
+set: id 0, count 1
+set again: id 1, count 2
+release: elapsed 1, count 1
+release again: -1
+release bad id: -1
+fired: id 0, common matches 1
+after firing: count 0
+-- TEST END

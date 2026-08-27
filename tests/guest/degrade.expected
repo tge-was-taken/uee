@@ -1,0 +1,8 @@
+-- TEST BEGIN
+SetGsCrt: 0
+LoadExecPS2: -1
+ExecOSD: -1
+Deci2Call: -1
+undefined slot 86: 0
+still running after all of them
+-- TEST END
