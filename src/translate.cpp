@@ -43,7 +43,33 @@ std::optional<s32> syscallNumberBefore(Instruction insn) {
     return std::nullopt;
 }
 
+std::string_view vuHandlerName(VuKind kind, bool toAcc) {
+    switch (kind) {
+        case VuKind::Add: return toAcc ? "vadda" : "vadd";
+        case VuKind::Sub: return toAcc ? "vsuba" : "vsub";
+        case VuKind::Mul: return toAcc ? "vmula" : "vmul";
+        case VuKind::Max: return "vmax";
+        case VuKind::Mini: return "vmini";
+        case VuKind::Madd: return toAcc ? "vmadda" : "vmadd";
+        case VuKind::Msub: return toAcc ? "vmsuba" : "vmsub";
+    }
+    return {};
+}
+
+std::string_view vuSourceName(VuSource source) {
+    switch (source) {
+        case VuSource::X: return "X";
+        case VuSource::Y: return "Y";
+        case VuSource::Z: return "Z";
+        case VuSource::W: return "W";
+        case VuSource::Q: return "Q";
+        case VuSource::I: return "I";
+        default: return "Vt";
+    }
+}
+
 std::optional<std::string> emitOne(Instruction insn) {
+    const Op op = opOf(insn);
     const u32 rs = insn.rs();
     const u32 rt = insn.rt();
     const u32 rd = insn.rd();
@@ -81,8 +107,26 @@ std::optional<std::string> emitOne(Instruction insn) {
     const auto halfPipe = [&](const char* name, u32 a, bool one) {
         return std::format("{}(ee.cpu, {}, {});", name, r(a), one);
     };
+    const auto fpu3 = [&](const char* name, u32 a, u32 b, u32 c) {
+        return std::format("{}(ee.fpu, {}, {}, {});", name, a, b, c);
+    };
+    const auto fpu2 = [&](const char* name, u32 a, u32 b) {
+        return std::format("{}(ee.fpu, {}, {});", name, a, b);
+    };
+    const auto vu2 = [&](const char* name, u32 a, u32 b) {
+        return std::format("{}(ee.vu0, {}, {});", name, a, b);
+    };
+    const auto vu3 = [&](const char* name, u32 a, u32 b, u32 c) {
+        return std::format("{}(ee.vu0, {}, {}, {});", name, a, b, c);
+    };
+    const auto vuField = [&](const char* name, u32 field, u32 a, u32 b) {
+        return std::format("{}(ee.vu0, 0x{:x}u, {}, {});", name, field, a, b);
+    };
+    const auto vuAccess = [&](const char* name, u32 field, u32 a, u32 b) {
+        return std::format("{}(ee.vu0, mem, 0x{:x}u, {}, {});", name, field, a, b);
+    };
 
-    switch (opOf(insn)) {
+    switch (op) {
         case Op::sll: return shift("sll", rd, rt, sa);
         case Op::srl: return shift("srl", rd, rt, sa);
         case Op::sra: return shift("sra", rd, rt, sa);
@@ -300,6 +344,57 @@ std::optional<std::string> emitOne(Instruction insn) {
         case Op::sqc2:
             return std::format("sqc2(ee.cpu, ee.vu0, mem, {}, {}, {});", rt, r(rs), simm);
 
+        case Op::add_s: return fpu3("add_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::sub_s: return fpu3("sub_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::mul_s: return fpu3("mul_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::div_s: return fpu3("div_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::madd_s: return fpu3("madd_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::msub_s: return fpu3("msub_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::max_s: return fpu3("max_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::min_s: return fpu3("min_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::rsqrt_s: return fpu3("rsqrt_s", insn.fd(), insn.fs(), insn.ft());
+        case Op::adda_s: return fpu2("adda_s", insn.fs(), insn.ft());
+        case Op::suba_s: return fpu2("suba_s", insn.fs(), insn.ft());
+        case Op::mula_s: return fpu2("mula_s", insn.fs(), insn.ft());
+        case Op::madda_s: return fpu2("madda_s", insn.fs(), insn.ft());
+        case Op::msuba_s: return fpu2("msuba_s", insn.fs(), insn.ft());
+        case Op::sqrt_s: return fpu2("sqrt_s", insn.fd(), insn.ft());
+        case Op::abs_s: return fpu2("abs_s", insn.fd(), insn.fs());
+        case Op::neg_s: return fpu2("neg_s", insn.fd(), insn.fs());
+        case Op::mov_s: return fpu2("mov_s", insn.fd(), insn.fs());
+        case Op::cvt_w_s: return fpu2("cvt_w_s", insn.fd(), insn.fs());
+        case Op::cvt_s_w: return fpu2("cvt_s_w", insn.fd(), insn.fs());
+        case Op::c_f_s: return std::string{"c_f_s(ee.fpu);"};
+        case Op::c_eq_s: return fpu2("c_eq_s", insn.fs(), insn.ft());
+        case Op::c_lt_s: return fpu2("c_lt_s", insn.fs(), insn.ft());
+        case Op::c_le_s: return fpu2("c_le_s", insn.fs(), insn.ft());
+
+        case Op::vmove: return vuField("vmove", insn.dest(), insn.vt(), insn.vs());
+        case Op::vabs: return vuField("vabs", insn.dest(), insn.vt(), insn.vs());
+        case Op::vitof0: return vuField("vitof0", insn.dest(), insn.vt(), insn.vs());
+        case Op::vftoi0: return vuField("vftoi0", insn.dest(), insn.vt(), insn.vs());
+        case Op::viadd: return vu3("viadd", insn.vid(), insn.vis(), insn.vit());
+        case Op::visub: return vu3("visub", insn.vid(), insn.vis(), insn.vit());
+        case Op::viand: return vu3("viand", insn.vid(), insn.vis(), insn.vit());
+        case Op::vior: return vu3("vior", insn.vid(), insn.vis(), insn.vit());
+        case Op::viaddi:
+            return std::format("viaddi(ee.vu0, {}, {}, {});", insn.vit(), insn.vis(),
+                               insn.imm5());
+        case Op::vilwr: return vuAccess("vilwr", insn.dest(), insn.vit(), insn.vis());
+        case Op::viswr: return vuAccess("viswr", insn.dest(), insn.vit(), insn.vis());
+        case Op::vsqi: return vuAccess("vsqi", insn.dest(), insn.vs(), insn.vit());
+        case Op::vsqrt: return vu2("vsqrt", insn.vt(), insn.ftf());
+        case Op::vrsqrt:
+            return std::format("vrsqrt(ee.vu0, {}, {}, {}, {});", insn.vs(), insn.fsf(),
+                               insn.vt(), insn.ftf());
+        case Op::vopmula:
+            return vuField("vopmula", insn.dest(), insn.vs(), insn.vt());
+        case Op::vopmsub:
+            return std::format("vopmsub(ee.vu0, 0x{:x}u, {}, {}, {});", insn.dest(), insn.vd(),
+                               insn.vs(), insn.vt());
+
+        case Op::vnop:
+        case Op::vwaitq:
         case Op::sync_p:
         case Op::cache:
         case Op::pref:
@@ -309,8 +404,20 @@ std::optional<std::string> emitOne(Instruction insn) {
         case Op::tlbp:
             return std::string{};
 
-        default:
-            return std::nullopt;
+        default: {
+            VuForm form;
+            if (!vuFormOf(op, form)) {
+                return std::nullopt;
+            }
+            const std::string_view name = vuHandlerName(form.kind, form.toAcc);
+            const std::string_view from = vuSourceName(form.source);
+            if (form.toAcc) {
+                return std::format("{}(ee.vu0, VuSource::{}, 0x{:x}u, {}, {});", name, from,
+                                   insn.dest(), insn.vs(), insn.vt());
+            }
+            return std::format("{}(ee.vu0, VuSource::{}, 0x{:x}u, {}, {}, {});", name, from,
+                               insn.dest(), insn.vd(), insn.vs(), insn.vt());
+        }
     }
 }
 
