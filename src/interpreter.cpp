@@ -215,6 +215,19 @@ Status Interpreter::execute(Instruction insn) {
         case Op::bc0fl: branchLikelyIf(!cpu.cop0condition); break;
         case Op::bc0t: branchIf(cpu.cop0condition); break;
         case Op::bc0tl: branchLikelyIf(cpu.cop0condition); break;
+        case Op::teq: if (teqTaken(cpu, rs, rt)) return Status::Unimplemented; break;
+        case Op::tne: if (tneTaken(cpu, rs, rt)) return Status::Unimplemented; break;
+        case Op::tge: if (tgeTaken(cpu, rs, rt)) return Status::Unimplemented; break;
+        case Op::tgeu: if (tgeuTaken(cpu, rs, rt)) return Status::Unimplemented; break;
+        case Op::tlt: if (tltTaken(cpu, rs, rt)) return Status::Unimplemented; break;
+        case Op::tltu: if (tltuTaken(cpu, rs, rt)) return Status::Unimplemented; break;
+        case Op::teqi: if (teqiTaken(cpu, rs, insn.simm())) return Status::Unimplemented; break;
+        case Op::tnei: if (tneiTaken(cpu, rs, insn.simm())) return Status::Unimplemented; break;
+        case Op::tgei: if (tgeiTaken(cpu, rs, insn.simm())) return Status::Unimplemented; break;
+        case Op::tgeiu: if (tgeiuTaken(cpu, rs, insn.simm())) return Status::Unimplemented; break;
+        case Op::tlti: if (tltiTaken(cpu, rs, insn.simm())) return Status::Unimplemented; break;
+        case Op::tltiu: if (tltiuTaken(cpu, rs, insn.simm())) return Status::Unimplemented; break;
+
         case Op::syscall: raiseException(cpu, pc, cop0::kSystemCall); break;
         case Op::break_: raiseException(cpu, pc, cop0::kBreakpoint); break;
         case Op::eret: returnFromException(cpu); break;
@@ -224,6 +237,9 @@ Status Interpreter::execute(Instruction insn) {
         case Op::cache:
         case Op::pref:
         case Op::tlbwi:
+        case Op::tlbwr:
+        case Op::tlbr:
+        case Op::tlbp:
             break;
 
         case Op::mfc1: mfc1(cpu, ee.fpu, rt, insn.fs()); break;

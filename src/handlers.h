@@ -408,6 +408,56 @@ inline void ei(R5900& cpu) {
 
 // EPC keeps the address of the first exception, so a fault inside a handler
 // does not lose where the handler was entered from.
+// The trap family. A taken trap is an exception this runtime has no handler
+// for, so the caller reports it rather than inventing a recovery.
+inline bool teqTaken(const R5900& cpu, u32 rs, u32 rt) {
+    return cpu.gpr[rs].lo == cpu.gpr[rt].lo;
+}
+
+inline bool tneTaken(const R5900& cpu, u32 rs, u32 rt) {
+    return cpu.gpr[rs].lo != cpu.gpr[rt].lo;
+}
+
+inline bool tgeTaken(const R5900& cpu, u32 rs, u32 rt) {
+    return signed64(cpu.gpr[rs]) >= signed64(cpu.gpr[rt]);
+}
+
+inline bool tgeuTaken(const R5900& cpu, u32 rs, u32 rt) {
+    return cpu.gpr[rs].lo >= cpu.gpr[rt].lo;
+}
+
+inline bool tltTaken(const R5900& cpu, u32 rs, u32 rt) {
+    return signed64(cpu.gpr[rs]) < signed64(cpu.gpr[rt]);
+}
+
+inline bool tltuTaken(const R5900& cpu, u32 rs, u32 rt) {
+    return cpu.gpr[rs].lo < cpu.gpr[rt].lo;
+}
+
+inline bool teqiTaken(const R5900& cpu, u32 rs, s32 imm) {
+    return signed64(cpu.gpr[rs]) == imm;
+}
+
+inline bool tneiTaken(const R5900& cpu, u32 rs, s32 imm) {
+    return signed64(cpu.gpr[rs]) != imm;
+}
+
+inline bool tgeiTaken(const R5900& cpu, u32 rs, s32 imm) {
+    return signed64(cpu.gpr[rs]) >= imm;
+}
+
+inline bool tgeiuTaken(const R5900& cpu, u32 rs, s32 imm) {
+    return cpu.gpr[rs].lo >= static_cast<u64>(static_cast<s64>(imm));
+}
+
+inline bool tltiTaken(const R5900& cpu, u32 rs, s32 imm) {
+    return signed64(cpu.gpr[rs]) < imm;
+}
+
+inline bool tltiuTaken(const R5900& cpu, u32 rs, s32 imm) {
+    return cpu.gpr[rs].lo < static_cast<u64>(static_cast<s64>(imm));
+}
+
 inline void raiseException(R5900& cpu, u32 pc, u32 code) {
     u32& status = cpu.cop0[cop0::kStatus];
     u32& cause = cpu.cop0[cop0::kCause];
