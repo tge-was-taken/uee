@@ -1,0 +1,39 @@
+#pragma once
+
+#include "elf.h"
+#include "interpreter.h"
+#include "kernel.h"
+#include "memory.h"
+#include "ee_context.h"
+#include "types.h"
+
+#include <string>
+
+namespace uee {
+
+struct Machine;
+using FunctionRunner = bool (*)(Machine& machine, u32 pc);
+
+struct Machine {
+    Interpreter& interpreter;
+    Memory& memory;
+    Kernel& kernel;
+    FunctionRunner functions = nullptr;
+
+    EeContext& ee() const { return interpreter.ee; }
+};
+
+inline bool leave(EeContext& ee, u32 pc, u32 returnTo) {
+    ee.cpu.pc = pc;
+    return pc == returnTo;
+}
+
+// Comes back with the pc already past the instruction, so emitted code can
+// carry straight on.
+void step(Machine& machine, u32 pc);
+
+bool call(Machine& machine, u32 target, u32 returnTo);
+
+std::string translate(Memory& memory, const Program& program);
+
+}  // namespace uee
