@@ -50,7 +50,35 @@ inline Op opOf(Instruction insn) {
     return decode(insn).op;
 }
 
+constexpr u32 branchTarget(Instruction insn, u32 pc) {
+    return pc + 4 + (static_cast<u32>(insn.simm()) << 2);
+}
+
+constexpr u32 jumpTarget(Instruction insn, u32 pc) {
+    return ((pc + 4) & 0xF0000000u) | (insn.target() << 2);
+}
+
+enum class Flow : u8 {
+    Next,          // falls through to pc + 4
+    Branch,        // conditional; the delay slot runs either way
+    BranchLikely,  // conditional; the delay slot runs only when taken
+    Jump,          // unconditional, target known from the encoding
+    JumpRegister,  // unconditional, target read from a register
+    Trap,          // syscall, break and eret resolve the pc themselves
+};
+
+struct ControlFlow {
+    Flow flow = Flow::Next;
+    u32 target = 0;  // Branch, BranchLikely and Jump
+    u32 source = 0;  // JumpRegister: the register holding the target
+    // Zero means no link, which is also what linking to r0 would do.
+    u32 link = 0;
+};
+
+ControlFlow controlFlow(Op op, Instruction insn, u32 pc);
+
 std::string disassemble(Instruction insn);
+std::string disassemble(Instruction insn, u32 pc);
 std::ostream& operator<<(std::ostream& out, Instruction insn);
 
 }  // namespace uee
