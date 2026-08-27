@@ -60,6 +60,10 @@ constexpr Reg128 fromBytes(const u8 b[16]) {
 }
 
 namespace cop0 {
+constexpr u32 kPerformance = 25;
+constexpr u32 kPerformanceControlMask = 0x000FFBFEu;
+constexpr u32 kProcessorCycleEvent = 1;
+
 constexpr u32 kStatus = 12;
 constexpr u32 kCause = 13;
 constexpr u32 kEpc = 14;
@@ -84,6 +88,8 @@ struct R5900 {
     Reg128 hi{};
     Reg128 lo{};
     u32 cop0[32]{};
+    u32 performance[2]{};
+    u32 performanceControl = 0;
     u32 sa = 0;
     u32 pc = 0;
     // CPCOND0, which bc0f reads. The DMA controller drives it; nothing does yet.

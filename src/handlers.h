@@ -7,6 +7,8 @@
 #include "vu0.h"
 
 #include <bit>
+#include <limits>
+#include <utility>
 
 namespace uee {
 
@@ -18,6 +20,45 @@ constexpr u32 s0 = 16, s1 = 17, s2 = 18, s3 = 19, s4 = 20, s5 = 21, s6 = 22, s7 
 constexpr u32 t8 = 24, t9 = 25, k0 = 26, k1 = 27;
 constexpr u32 gp = 28, sp = 29, fp = 30, ra = 31;
 }  // namespace reg
+
+
+// The MMI unit is the same operation repeated across a register at one of three
+// widths, so the lane walk is written once and the op supplies the arithmetic.
+template <typename F>
+inline Reg128 eachByte(const Reg128& a, const Reg128& b, F combine) {
+    u8 out[16];
+    for (s32 i = 0; i < 16; ++i) {
+        out[i] = combine(byte(a, i), byte(b, i));
+    }
+    return fromBytes(out);
+}
+template <typename F>
+inline Reg128 eachHalf(const Reg128& a, const Reg128& b, F combine) {
+    u16 out[8];
+    for (s32 i = 0; i < 8; ++i) {
+        out[i] = combine(half(a, i), half(b, i));
+    }
+    return fromHalves(out);
+}
+template <typename F>
+inline Reg128 eachWord(const Reg128& a, const Reg128& b, F combine) {
+    u32 out[4];
+    for (s32 i = 0; i < 4; ++i) {
+        out[i] = combine(a.word(i), b.word(i));
+    }
+    return lanes(out[0], out[1], out[2], out[3]);
+}
+
+template <typename T>
+constexpr T saturate(s64 value) {
+    constexpr s64 low = std::numeric_limits<T>::min();
+    constexpr s64 high = std::numeric_limits<T>::max();
+    return static_cast<T>(value < low ? low : (value > high ? high : value));
+}
+
+constexpr u8 mask8(bool set) { return set ? 0xFFu : 0u; }
+constexpr u16 mask16(bool set) { return set ? 0xFFFFu : 0u; }
+constexpr u32 mask32(bool set) { return set ? 0xFFFFFFFFu : 0u; }
 
 // The R5900 puts the low word in rd as well as in LO.
 inline void setMultiplyResult(R5900& cpu, u32 rd, u64 product, bool pipeline1) {
@@ -47,29 +88,42 @@ inline void setDivideResult(R5900& cpu, u32 quotient, u32 remainder, bool pipeli
     }
 }
 
-// HI and LO each hold a sign-extended 32-bit half of the accumulator.
-constexpr u64 multiplyAccumulator(const R5900& cpu) {
-    return (static_cast<u64>(cpu.hi.word(0)) << 32) | cpu.lo.word(0);
+// HI and LO each hold a sign-extended 32-bit half of the accumulator, and the
+// second pipeline keeps its own pair in the upper doubleword.
+constexpr u64 multiplyAccumulator(const R5900& cpu, bool pipeline1) {
+    const s32 lane = pipeline1 ? 2 : 0;
+    return (static_cast<u64>(cpu.hi.word(lane)) << 32) | cpu.lo.word(lane);
 }
 
-// MIPS leaves signed division by zero and INT_MIN / -1 undefined; the reference
-// produces these, so they are reproduced rather than guessed at.
-inline void divideSigned(R5900& cpu, s32 a, s32 b, bool pipeline1) {
+struct Quotient {
+    u32 quotient;
+    u32 remainder;
+};
+
+// MIPS leaves signed division by zero and INT_MIN / -1 undefined; these are
+// what the hardware produces rather than a guess.
+constexpr Quotient divideSigned(s32 a, s32 b) {
     if (b == 0) {
-        setDivideResult(cpu, a < 0 ? 1u : 0xFFFFFFFFu, static_cast<u32>(a), pipeline1);
-    } else if (b == -1 && a == static_cast<s32>(0x80000000)) {
-        setDivideResult(cpu, 0x80000000u, 0, pipeline1);
-    } else {
-        setDivideResult(cpu, static_cast<u32>(a / b), static_cast<u32>(a % b), pipeline1);
+        return {a < 0 ? 1u : 0xFFFFFFFFu, static_cast<u32>(a)};
     }
+    if (b == -1 && a == static_cast<s32>(0x80000000)) {
+        return {0x80000000u, 0};
+    }
+    return {static_cast<u32>(a / b), static_cast<u32>(a % b)};
+}
+
+constexpr Quotient divideUnsigned(u32 a, u32 b) {
+    return (b == 0) ? Quotient{0xFFFFFFFFu, a} : Quotient{a / b, a % b};
+}
+
+inline void divideSigned(R5900& cpu, s32 a, s32 b, bool pipeline1) {
+    const Quotient result = divideSigned(a, b);
+    setDivideResult(cpu, result.quotient, result.remainder, pipeline1);
 }
 
 inline void divideUnsigned(R5900& cpu, u32 a, u32 b, bool pipeline1) {
-    if (b == 0) {
-        setDivideResult(cpu, 0xFFFFFFFFu, a, pipeline1);
-    } else {
-        setDivideResult(cpu, a / b, a % b, pipeline1);
-    }
+    const Quotient result = divideUnsigned(a, b);
+    setDivideResult(cpu, result.quotient, result.remainder, pipeline1);
 }
 
 inline u32 effectiveAddress(const R5900& cpu, u32 base, s32 offset) {
@@ -326,6 +380,195 @@ inline void plzcw(R5900& cpu, u32 rd, u32 rs) {
     cpu.write64(rd, static_cast<u64>(words[0]) | (static_cast<u64>(words[1]) << 32));
 }
 
+
+inline void paddb(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachByte(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u8 x, u8 y) { return static_cast<u8>(x + y); }));
+}
+inline void paddh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u16 x, u16 y) { return static_cast<u16>(x + y); }));
+}
+inline void psubh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u16 x, u16 y) { return static_cast<u16>(x - y); }));
+}
+
+inline void paddsb(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachByte(cpu.gpr[rs], cpu.gpr[rt], [](u8 x, u8 y) {
+        return static_cast<u8>(saturate<s8>(s64{static_cast<s8>(x)} + static_cast<s8>(y)));
+    }));
+}
+inline void paddsh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt], [](u16 x, u16 y) {
+        return static_cast<u16>(saturate<s16>(s64{static_cast<s16>(x)} + static_cast<s16>(y)));
+    }));
+}
+inline void paddsw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rs], cpu.gpr[rt], [](u32 x, u32 y) {
+        return static_cast<u32>(saturate<s32>(s64{static_cast<s32>(x)} + static_cast<s32>(y)));
+    }));
+}
+inline void psubsb(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachByte(cpu.gpr[rs], cpu.gpr[rt], [](u8 x, u8 y) {
+        return static_cast<u8>(saturate<s8>(s64{static_cast<s8>(x)} - static_cast<s8>(y)));
+    }));
+}
+inline void psubsh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt], [](u16 x, u16 y) {
+        return static_cast<u16>(saturate<s16>(s64{static_cast<s16>(x)} - static_cast<s16>(y)));
+    }));
+}
+inline void psubsw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rs], cpu.gpr[rt], [](u32 x, u32 y) {
+        return static_cast<u32>(saturate<s32>(s64{static_cast<s32>(x)} - static_cast<s32>(y)));
+    }));
+}
+
+inline void padduh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt], [](u16 x, u16 y) {
+        const u32 sum = static_cast<u32>(x) + y;
+        return static_cast<u16>(sum > 0xFFFFu ? 0xFFFFu : sum);
+    }));
+}
+inline void psubub(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachByte(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u8 x, u8 y) { return static_cast<u8>(x < y ? 0 : x - y); }));
+}
+inline void psubuh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u16 x, u16 y) { return static_cast<u16>(x < y ? 0 : x - y); }));
+}
+inline void psubuw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u32 x, u32 y) { return x < y ? 0u : x - y; }));
+}
+
+inline void pmaxh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt], [](u16 x, u16 y) {
+        return static_cast<s16>(x) > static_cast<s16>(y) ? x : y;
+    }));
+}
+inline void pminh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt], [](u16 x, u16 y) {
+        return static_cast<s16>(x) < static_cast<s16>(y) ? x : y;
+    }));
+}
+inline void pmaxw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rs], cpu.gpr[rt], [](u32 x, u32 y) {
+        return static_cast<s32>(x) > static_cast<s32>(y) ? x : y;
+    }));
+}
+inline void pminw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rs], cpu.gpr[rt], [](u32 x, u32 y) {
+        return static_cast<s32>(x) < static_cast<s32>(y) ? x : y;
+    }));
+}
+
+inline void pabsh(R5900& cpu, u32 rd, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rt], cpu.gpr[rt], [](u16 x, u16) {
+        const s16 value = static_cast<s16>(x);
+        return static_cast<u16>(value < 0 ? saturate<s16>(-s64{value}) : value);
+    }));
+}
+inline void pabsw(R5900& cpu, u32 rd, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rt], cpu.gpr[rt], [](u32 x, u32) {
+        const s32 value = static_cast<s32>(x);
+        return static_cast<u32>(value < 0 ? saturate<s32>(-s64{value}) : value);
+    }));
+}
+
+inline void pceqb(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachByte(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u8 x, u8 y) { return mask8(x == y); }));
+}
+inline void pceqh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u16 x, u16 y) { return mask16(x == y); }));
+}
+inline void pceqw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rs], cpu.gpr[rt],
+                              [](u32 x, u32 y) { return mask32(x == y); }));
+}
+inline void pcgtb(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachByte(cpu.gpr[rs], cpu.gpr[rt], [](u8 x, u8 y) {
+        return mask8(static_cast<s8>(x) > static_cast<s8>(y));
+    }));
+}
+inline void pcgth(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachHalf(cpu.gpr[rs], cpu.gpr[rt], [](u16 x, u16 y) {
+        return mask16(static_cast<s16>(x) > static_cast<s16>(y));
+    }));
+}
+inline void pcgtw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    cpu.write128(rd, eachWord(cpu.gpr[rs], cpu.gpr[rt], [](u32 x, u32 y) {
+        return mask32(static_cast<s32>(x) > static_cast<s32>(y));
+    }));
+}
+
+inline void psllh(R5900& cpu, u32 rd, u32 rt, u32 sa) {
+    const u32 shift = sa & 15u;
+    cpu.write128(rd, eachHalf(cpu.gpr[rt], cpu.gpr[rt],
+                              [shift](u16 x, u16) { return static_cast<u16>(x << shift); }));
+}
+inline void psrlh(R5900& cpu, u32 rd, u32 rt, u32 sa) {
+    const u32 shift = sa & 15u;
+    cpu.write128(rd, eachHalf(cpu.gpr[rt], cpu.gpr[rt],
+                              [shift](u16 x, u16) { return static_cast<u16>(x >> shift); }));
+}
+inline void psrah(R5900& cpu, u32 rd, u32 rt, u32 sa) {
+    const u32 shift = sa & 15u;
+    cpu.write128(rd, eachHalf(cpu.gpr[rt], cpu.gpr[rt], [shift](u16 x, u16) {
+        return static_cast<u16>(static_cast<s16>(x) >> shift);
+    }));
+}
+inline void psllw(R5900& cpu, u32 rd, u32 rt, u32 sa) {
+    cpu.write128(rd, eachWord(cpu.gpr[rt], cpu.gpr[rt], [sa](u32 x, u32) { return x << sa; }));
+}
+inline void psrlw(R5900& cpu, u32 rd, u32 rt, u32 sa) {
+    cpu.write128(rd, eachWord(cpu.gpr[rt], cpu.gpr[rt], [sa](u32 x, u32) { return x >> sa; }));
+}
+inline void psraw(R5900& cpu, u32 rd, u32 rt, u32 sa) {
+    cpu.write128(rd, eachWord(cpu.gpr[rt], cpu.gpr[rt], [sa](u32 x, u32) {
+        return static_cast<u32>(static_cast<s32>(x) >> sa);
+    }));
+}
+
+// The variable-shift forms work on one word of each doubleword, take their
+// shift from the matching word of rs, and sign-extend each result back across
+// the whole doubleword.
+template <typename F>
+inline void shiftEachDoubleword(R5900& cpu, u32 rd, u32 rt, u32 rs, F shift) {
+    const Reg128 a = cpu.gpr[rt], b = cpu.gpr[rs];
+    const u32 first = shift(a.word(0), b.word(0) & 31u);
+    const u32 second = shift(a.word(2), b.word(2) & 31u);
+    cpu.write128(rd, Reg128{static_cast<u64>(static_cast<s64>(static_cast<s32>(first))),
+                            static_cast<u64>(static_cast<s64>(static_cast<s32>(second)))});
+}
+inline void psllvw(R5900& cpu, u32 rd, u32 rt, u32 rs) {
+    shiftEachDoubleword(cpu, rd, rt, rs, [](u32 x, u32 by) { return x << by; });
+}
+inline void psrlvw(R5900& cpu, u32 rd, u32 rt, u32 rs) {
+    shiftEachDoubleword(cpu, rd, rt, rs, [](u32 x, u32 by) { return x >> by; });
+}
+inline void psravw(R5900& cpu, u32 rd, u32 rt, u32 rs) {
+    shiftEachDoubleword(cpu, rd, rt, rs, [](u32 x, u32 by) {
+        return static_cast<u32>(static_cast<s32>(x) >> by);
+    });
+}
+
+// SA counts bytes, so the pair shifts by whole bytes out of a 256-bit value
+// with rs above rt.
+inline void qfsrv(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const u32 shift = cpu.sa & 15u;
+    u8 out[16];
+    for (s32 i = 0; i < 16; ++i) {
+        const s32 source = i + static_cast<s32>(shift);
+        out[i] = (source < 16) ? byte(cpu.gpr[rt], source) : byte(cpu.gpr[rs], source - 16);
+    }
+    cpu.write128(rd, fromBytes(out));
+}
+
 inline void mult(R5900& cpu, u32 rd, u32 rs, u32 rt, bool pipeline1) {
     setMultiplyResult(cpu, rd,
                       static_cast<u64>(static_cast<s64>(static_cast<s32>(low(cpu.gpr[rs]))) *
@@ -339,11 +582,309 @@ inline void multu(R5900& cpu, u32 rd, u32 rs, u32 rt, bool pipeline1) {
 }
 inline void madd(R5900& cpu, u32 rd, u32 rs, u32 rt, bool pipeline1) {
     setMultiplyResult(cpu, rd,
-                      multiplyAccumulator(cpu) +
+                      multiplyAccumulator(cpu, pipeline1) +
                           static_cast<u64>(static_cast<s64>(static_cast<s32>(low(cpu.gpr[rs]))) *
                                            static_cast<s64>(static_cast<s32>(low(cpu.gpr[rt])))),
                       pipeline1);
 }
+
+// The wide multiplies fill HI and LO a word at a time; the low half of each
+// 64-bit product also lands in rd, the same way mult does.
+inline void setWideResult(R5900& cpu, u32 rd, const s64 products[2]) {
+    for (s32 i = 0; i < 2; ++i) {
+        const u32 lowWord = static_cast<u32>(products[i]);
+        const u32 highWord = static_cast<u32>(static_cast<u64>(products[i]) >> 32);
+        (i == 0 ? cpu.lo.lo : cpu.lo.hi) =
+            static_cast<u64>(static_cast<s64>(static_cast<s32>(lowWord)));
+        (i == 0 ? cpu.hi.lo : cpu.hi.hi) =
+            static_cast<u64>(static_cast<s64>(static_cast<s32>(highWord)));
+    }
+    cpu.write128(rd, Reg128{static_cast<u64>(products[0]), static_cast<u64>(products[1])});
+}
+
+inline void pmultw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    const s64 products[2] = {s64{static_cast<s32>(a.word(0))} * static_cast<s32>(b.word(0)),
+                             s64{static_cast<s32>(a.word(2))} * static_cast<s32>(b.word(2))};
+    setWideResult(cpu, rd, products);
+}
+inline void pmultuw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    const s64 products[2] = {
+        static_cast<s64>(u64{a.word(0)} * b.word(0)),
+        static_cast<s64>(u64{a.word(2)} * b.word(2))};
+    setWideResult(cpu, rd, products);
+}
+inline void pmaddw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    const s64 products[2] = {
+        static_cast<s64>(multiplyAccumulator(cpu, false)) +
+            s64{static_cast<s32>(a.word(0))} * static_cast<s32>(b.word(0)),
+        static_cast<s64>(multiplyAccumulator(cpu, true)) +
+            s64{static_cast<s32>(a.word(2))} * static_cast<s32>(b.word(2))};
+    setWideResult(cpu, rd, products);
+}
+inline void pmadduw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    const s64 products[2] = {
+        static_cast<s64>(multiplyAccumulator(cpu, false) + u64{a.word(0)} * b.word(0)),
+        static_cast<s64>(multiplyAccumulator(cpu, true) + u64{a.word(2)} * b.word(2))};
+    setWideResult(cpu, rd, products);
+}
+inline void pmsubw(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    const s64 products[2] = {
+        static_cast<s64>(multiplyAccumulator(cpu, false)) -
+            s64{static_cast<s32>(a.word(0))} * static_cast<s32>(b.word(0)),
+        static_cast<s64>(multiplyAccumulator(cpu, true)) -
+            s64{static_cast<s32>(a.word(2))} * static_cast<s32>(b.word(2))};
+    setWideResult(cpu, rd, products);
+}
+
+inline void pdivw(R5900& cpu, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    divideSigned(cpu, static_cast<s32>(a.word(0)), static_cast<s32>(b.word(0)), false);
+    divideSigned(cpu, static_cast<s32>(a.word(2)), static_cast<s32>(b.word(2)), true);
+}
+inline void pdivuw(R5900& cpu, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    divideUnsigned(cpu, a.word(0), b.word(0), false);
+    divideUnsigned(cpu, a.word(2), b.word(2), true);
+}
+
+// Every word of rs is divided by the same halfword of rt, and the four
+// quotients and remainders pack into LO and HI as halfwords.
+inline void pdivbw(R5900& cpu, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs];
+    const s16 divisor = static_cast<s16>(half(cpu.gpr[rt], 0));
+    u32 quotients[4];
+    u32 remainders[4];
+    for (s32 i = 0; i < 4; ++i) {
+        const Quotient result = divideSigned(static_cast<s32>(a.word(i)), divisor);
+        quotients[i] = result.quotient;
+        remainders[i] = result.remainder;
+    }
+    cpu.lo = lanes(quotients[0], quotients[1], quotients[2], quotients[3]);
+    cpu.hi = lanes(remainders[0], remainders[1], remainders[2], remainders[3]);
+}
+
+// The halfword multiplies spread eight 32-bit products over HI and LO, and rd
+// takes the same four of them that pmfhl.lw would read back.
+inline void spreadHalfProducts(R5900& cpu, u32 rd, const u32 products[8]) {
+    cpu.lo = lanes(products[0], products[1], products[4], products[5]);
+    cpu.hi = lanes(products[2], products[3], products[6], products[7]);
+    cpu.write128(rd, lanes(products[0], products[2], products[4], products[6]));
+}
+
+inline void pmulth(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    u32 products[8];
+    for (s32 i = 0; i < 8; ++i) {
+        products[i] = static_cast<u32>(s32{static_cast<s16>(half(a, i))} *
+                                       static_cast<s16>(half(b, i)));
+    }
+    spreadHalfProducts(cpu, rd, products);
+}
+inline void pmaddh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    const u32 accumulator[8] = {cpu.lo.word(0), cpu.lo.word(1), cpu.hi.word(0), cpu.hi.word(1),
+                                cpu.lo.word(2), cpu.lo.word(3), cpu.hi.word(2), cpu.hi.word(3)};
+    u32 products[8];
+    for (s32 i = 0; i < 8; ++i) {
+        products[i] = accumulator[i] + static_cast<u32>(s32{static_cast<s16>(half(a, i))} *
+                                                        static_cast<s16>(half(b, i)));
+    }
+    spreadHalfProducts(cpu, rd, products);
+}
+inline void pmsubh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    const u32 accumulator[8] = {cpu.lo.word(0), cpu.lo.word(1), cpu.hi.word(0), cpu.hi.word(1),
+                                cpu.lo.word(2), cpu.lo.word(3), cpu.hi.word(2), cpu.hi.word(3)};
+    u32 products[8];
+    for (s32 i = 0; i < 8; ++i) {
+        products[i] = accumulator[i] - static_cast<u32>(s32{static_cast<s16>(half(a, i))} *
+                                                        static_cast<s16>(half(b, i)));
+    }
+    spreadHalfProducts(cpu, rd, products);
+}
+
+// Each neighbouring pair of products collapses into one sum. Only the four
+// sums reach rd; HI and LO keep the sum alongside the upper product it came
+// from, LO taking the even pairs and HI the odd ones. The subtracting form
+// stores that product as it enters the adder, which is one's complement.
+inline void horizontalHalfMultiply(R5900& cpu, u32 rd, u32 rs, u32 rt, bool subtract) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    u32 sums[4];
+    u32 upper[4];
+    for (s32 i = 0; i < 4; ++i) {
+        const s32 high = s32{static_cast<s16>(half(a, 2 * i + 1))} *
+                         static_cast<s16>(half(b, 2 * i + 1));
+        const s32 low32 = s32{static_cast<s16>(half(a, 2 * i))} * static_cast<s16>(half(b, 2 * i));
+        sums[i] = static_cast<u32>(subtract ? (high - low32) : (high + low32));
+        upper[i] = subtract ? ~static_cast<u32>(high) : static_cast<u32>(high);
+    }
+    cpu.lo = lanes(sums[0], upper[0], sums[2], upper[2]);
+    cpu.hi = lanes(sums[1], upper[1], sums[3], upper[3]);
+    cpu.write128(rd, lanes(sums[0], sums[1], sums[2], sums[3]));
+}
+inline void phmadh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    horizontalHalfMultiply(cpu, rd, rs, rt, false);
+}
+inline void phmsbh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    horizontalHalfMultiply(cpu, rd, rs, rt, true);
+}
+
+inline void pmfhl_uw(R5900& cpu, u32 rd) {
+    cpu.write128(rd, lanes(cpu.lo.word(1), cpu.hi.word(1), cpu.lo.word(3), cpu.hi.word(3)));
+}
+inline void pmfhl_slw(R5900& cpu, u32 rd) {
+    const s64 first = static_cast<s64>((u64{cpu.hi.word(0)} << 32) | cpu.lo.word(0));
+    const s64 second = static_cast<s64>((u64{cpu.hi.word(2)} << 32) | cpu.lo.word(2));
+    cpu.write128(rd, Reg128{static_cast<u64>(s64{saturate<s32>(first)}),
+                            static_cast<u64>(s64{saturate<s32>(second)})});
+}
+// The even halfwords of each doubleword of LO and HI, LO first within each.
+inline void pmfhl_lh(R5900& cpu, u32 rd) {
+    u16 out[8];
+    for (s32 i = 0; i < 2; ++i) {
+        out[4 * i + 0] = half(cpu.lo, 4 * i + 0);
+        out[4 * i + 1] = half(cpu.lo, 4 * i + 2);
+        out[4 * i + 2] = half(cpu.hi, 4 * i + 0);
+        out[4 * i + 3] = half(cpu.hi, 4 * i + 2);
+    }
+    cpu.write128(rd, fromHalves(out));
+}
+// The same grouping pmfhl.lh uses, but each whole word saturates into a
+// halfword instead of the even half being taken.
+inline void pmfhl_sh(R5900& cpu, u32 rd) {
+    const auto narrow = [](u32 word) {
+        return static_cast<u16>(saturate<s16>(static_cast<s32>(word)));
+    };
+    u16 out[8];
+    for (s32 i = 0; i < 2; ++i) {
+        out[4 * i + 0] = narrow(cpu.lo.word(2 * i + 0));
+        out[4 * i + 1] = narrow(cpu.lo.word(2 * i + 1));
+        out[4 * i + 2] = narrow(cpu.hi.word(2 * i + 0));
+        out[4 * i + 3] = narrow(cpu.hi.word(2 * i + 1));
+    }
+    cpu.write128(rd, fromHalves(out));
+}
+inline void pmthl_lw(R5900& cpu, u32 rs) {
+    const Reg128 a = cpu.gpr[rs];
+    cpu.lo.setWord(0, a.word(0));
+    cpu.lo.setWord(2, a.word(2));
+    cpu.hi.setWord(0, a.word(1));
+    cpu.hi.setWord(2, a.word(3));
+}
+
+inline void pextub(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    u8 out[16];
+    for (s32 i = 0; i < 8; ++i) {
+        out[2 * i] = byte(b, i + 8);
+        out[2 * i + 1] = byte(a, i + 8);
+    }
+    cpu.write128(rd, fromBytes(out));
+}
+inline void pextuh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    u16 out[8];
+    for (s32 i = 0; i < 4; ++i) {
+        out[2 * i] = half(b, i + 4);
+        out[2 * i + 1] = half(a, i + 4);
+    }
+    cpu.write128(rd, fromHalves(out));
+}
+inline void pinth(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    u16 out[8];
+    for (s32 i = 0; i < 4; ++i) {
+        out[2 * i] = half(b, i);
+        out[2 * i + 1] = half(a, i + 4);
+    }
+    cpu.write128(rd, fromHalves(out));
+}
+inline void pinteh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    u16 out[8];
+    for (s32 i = 0; i < 4; ++i) {
+        out[2 * i] = half(b, 2 * i);
+        out[2 * i + 1] = half(a, 2 * i);
+    }
+    cpu.write128(rd, fromHalves(out));
+}
+inline void prevh(R5900& cpu, u32 rd, u32 rt) {
+    const Reg128 b = cpu.gpr[rt];
+    u16 out[8];
+    for (s32 i = 0; i < 4; ++i) {
+        out[i] = half(b, 3 - i);
+        out[i + 4] = half(b, 7 - i);
+    }
+    cpu.write128(rd, fromHalves(out));
+}
+// Both exchange a pair of halfwords inside each doubleword and leave the other
+// two alone: the outer pair for pexeh, the inner pair for pexch.
+inline void exchangeHalves(R5900& cpu, u32 rd, u32 rt, s32 first, s32 second) {
+    const Reg128 b = cpu.gpr[rt];
+    u16 out[8];
+    for (s32 i = 0; i < 8; ++i) {
+        out[i] = half(b, i);
+    }
+    std::swap(out[first], out[second]);
+    std::swap(out[first + 4], out[second + 4]);
+    cpu.write128(rd, fromHalves(out));
+}
+inline void pexeh(R5900& cpu, u32 rd, u32 rt) {
+    exchangeHalves(cpu, rd, rt, 0, 2);
+}
+inline void pexch(R5900& cpu, u32 rd, u32 rt) {
+    exchangeHalves(cpu, rd, rt, 1, 2);
+}
+inline void pexcw(R5900& cpu, u32 rd, u32 rt) {
+    const Reg128 b = cpu.gpr[rt];
+    cpu.write128(rd, lanes(b.word(0), b.word(2), b.word(1), b.word(3)));
+}
+
+// The 16-bit colour forms move between one packed 1555 pixel per word and one
+// unpacked 8888 pixel per word.
+inline void pext5(R5900& cpu, u32 rd, u32 rt) {
+    const Reg128 b = cpu.gpr[rt];
+    u32 out[4];
+    for (s32 i = 0; i < 4; ++i) {
+        const u32 pixel = b.word(i);
+        out[i] = ((pixel & 0x1Fu) << 3) | (((pixel >> 5) & 0x1Fu) << 11) |
+                 (((pixel >> 10) & 0x1Fu) << 19) | (((pixel >> 15) & 0x1u) << 31);
+    }
+    cpu.write128(rd, lanes(out[0], out[1], out[2], out[3]));
+}
+inline void ppac5(R5900& cpu, u32 rd, u32 rt) {
+    const Reg128 b = cpu.gpr[rt];
+    u32 out[4];
+    for (s32 i = 0; i < 4; ++i) {
+        const u32 pixel = b.word(i);
+        out[i] = ((pixel >> 3) & 0x1Fu) | (((pixel >> 11) & 0x1Fu) << 5) |
+                 (((pixel >> 19) & 0x1Fu) << 10) | (((pixel >> 31) & 0x1u) << 15);
+    }
+    cpu.write128(rd, lanes(out[0], out[1], out[2], out[3]));
+}
+
+// The lower four halfwords subtract and the upper four add.
+inline void padsbh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
+    const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
+    u16 out[8];
+    for (s32 i = 0; i < 8; ++i) {
+        out[i] = static_cast<u16>(i < 4 ? half(a, i) - half(b, i) : half(a, i) + half(b, i));
+    }
+    cpu.write128(rd, fromHalves(out));
+}
+
+inline void maddu(R5900& cpu, u32 rd, u32 rs, u32 rt, bool pipeline1) {
+    setMultiplyResult(cpu, rd,
+                      multiplyAccumulator(cpu, pipeline1) +
+                          static_cast<u64>(low(cpu.gpr[rs])) * low(cpu.gpr[rt]),
+                      pipeline1);
+}
+
 inline void div(R5900& cpu, u32 rs, u32 rt, bool pipeline1) {
     divideSigned(cpu, static_cast<s32>(low(cpu.gpr[rs])), static_cast<s32>(low(cpu.gpr[rt])),
                  pipeline1);
@@ -383,21 +924,58 @@ inline void pmtlo(R5900& cpu, u32 rs) {
 inline void mfsa(R5900& cpu, u32 rd) {
     cpu.write64(rd, cpu.sa);
 }
+// SA holds a byte offset, so only its low four bits survive whichever way it
+// is written.
 inline void mtsa(R5900& cpu, u32 rs) {
-    cpu.sa = low(cpu.gpr[rs]);
+    cpu.sa = low(cpu.gpr[rs]) & 0xFu;
 }
 inline void mtsab(R5900& cpu, u32 rs, u32 imm) {
-    cpu.sa = ((low(cpu.gpr[rs]) & 0xF) ^ (imm & 0xF)) * 8;
+    cpu.sa = (low(cpu.gpr[rs]) ^ imm) & 0xFu;
 }
 inline void mtsah(R5900& cpu, u32 rs, u32 imm) {
-    cpu.sa = ((low(cpu.gpr[rs]) & 0x7) ^ (imm & 0x7)) * 16;
+    cpu.sa = ((low(cpu.gpr[rs]) ^ imm) & 0x7u) * 2u;
 }
 
-inline void mfc0(R5900& cpu, u32 rt, u32 rd) {
-    cpu.write32(rt, cpu.cop0[rd]);
+// COP0 register 25 is a window onto the performance registers rather than a
+// register of its own. The low bit of the instruction picks a counter over the
+// control register, and the bit above it picks which of the two counters; every
+// wider specifier folds back onto the same pair.
+inline u32 readPerformance(const R5900& cpu, u32 selector) {
+    return (selector & 1u) ? cpu.performance[(selector >> 1) & 1u] : cpu.performanceControl;
 }
-inline void mtc0(R5900& cpu, u32 rt, u32 rd) {
-    cpu.cop0[rd] = low(cpu.gpr[rt]);
+
+inline void writePerformance(R5900& cpu, u32 selector, u32 value) {
+    if (selector & 1u) {
+        cpu.performance[(selector >> 1) & 1u] = value;
+    } else if (selector == 0) {
+        cpu.performanceControl = value & cop0::kPerformanceControlMask;
+    }
+}
+
+// One instruction stands in for one processor cycle. A counter asked for any
+// other event stays still rather than reporting a number this runtime has no
+// way to know. Translated code passes a whole block at once, so both backends
+// reach the same total.
+inline void countPerformanceEvents(R5900& cpu, u32 instructions) {
+    for (u32 i = 0; i < 2; ++i) {
+        const u32 shift = 10u * i;
+        const bool counting = ((cpu.performanceControl >> (1 + shift)) & 0xFu) != 0;
+        const u32 event = (cpu.performanceControl >> (5 + shift)) & 0x1Fu;
+        if (counting && event == cop0::kProcessorCycleEvent) {
+            cpu.performance[i] += instructions;
+        }
+    }
+}
+
+inline void mfc0(R5900& cpu, u32 rt, u32 rd, u32 selector) {
+    cpu.write32(rt, (rd == cop0::kPerformance) ? readPerformance(cpu, selector) : cpu.cop0[rd]);
+}
+inline void mtc0(R5900& cpu, u32 rt, u32 rd, u32 selector) {
+    if (rd == cop0::kPerformance) {
+        writePerformance(cpu, selector, low(cpu.gpr[rt]));
+    } else {
+        cpu.cop0[rd] = low(cpu.gpr[rt]);
+    }
 }
 inline void di(R5900& cpu) {
     cpu.cop0[cop0::kStatus] &= ~(1u << 16);
@@ -457,7 +1035,6 @@ inline bool tltiTaken(const R5900& cpu, u32 rs, s32 imm) {
 inline bool tltiuTaken(const R5900& cpu, u32 rs, s32 imm) {
     return cpu.gpr[rs].lo < static_cast<u64>(static_cast<s64>(imm));
 }
-
 inline void raiseException(R5900& cpu, u32 pc, u32 code) {
     u32& status = cpu.cop0[cop0::kStatus];
     u32& cause = cpu.cop0[cop0::kCause];
@@ -483,11 +1060,11 @@ inline void mfc1(R5900& cpu, const Fpu& fpu, u32 rt, u32 fs) {
 inline void mtc1(R5900& cpu, Fpu& fpu, u32 rt, u32 fs) {
     fpu.fpr[fs] = low(cpu.gpr[rt]);
 }
-inline void cfc1(R5900& cpu, const Fpu& fpu, u32 rt) {
-    cpu.write32(rt, fpu.fcr31);
+inline void cfc1(R5900& cpu, const Fpu& fpu, u32 rt, u32 fs) {
+    cpu.write32(rt, fpu.readControl(fs));
 }
-inline void ctc1(R5900& cpu, Fpu& fpu, u32 rt) {
-    fpu.fcr31 = low(cpu.gpr[rt]);
+inline void ctc1(R5900& cpu, Fpu& fpu, u32 rt, u32 fs) {
+    fpu.writeControl(fs, low(cpu.gpr[rt]));
 }
 
 inline void qmfc2(R5900& cpu, const Vu0& vu0, u32 rt, u32 vs) {
@@ -573,12 +1150,18 @@ inline void lwl(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
     const u32 keep = (shift == 0) ? 0u : (low(cpu.gpr[rt]) & ((1u << shift) - 1u));
     cpu.write32(rt, (word << shift) | keep);
 }
+// Only the aligned case loads a whole word, and only then does the result
+// sign-extend; a partial merge leaves the upper half of the register alone.
 inline void lwr(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
     const u32 address = effectiveAddress(cpu, base, offset);
     const u32 shift = 8u * (address & 3u);
     const u32 word = memory.read32(address & ~3u);
-    const u32 keep = (shift == 0) ? 0u : (low(cpu.gpr[rt]) & ~((1u << (32 - shift)) - 1u));
-    cpu.write32(rt, (word >> shift) | keep);
+    if (shift == 0) {
+        cpu.write32(rt, word);
+        return;
+    }
+    const u32 merged = (word >> shift) | (low(cpu.gpr[rt]) & ~((1u << (32 - shift)) - 1u));
+    cpu.write64(rt, (cpu.gpr[rt].lo & 0xFFFFFFFF00000000ull) | merged);
 }
 inline void ldl(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
     const u32 address = effectiveAddress(cpu, base, offset);

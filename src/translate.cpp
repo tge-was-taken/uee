@@ -156,6 +156,74 @@ std::optional<std::string> emitOne(Instruction insn) {
         case Op::mult1: return pipe("mult", rd, rs, rt, true);
         case Op::multu1: return pipe("multu", rd, rs, rt, true);
         case Op::madd: return pipe("madd", rd, rs, rt, false);
+
+        case Op::paddb: return gpr3("paddb", rd, rs, rt);
+        case Op::paddh: return gpr3("paddh", rd, rs, rt);
+        case Op::psubh: return gpr3("psubh", rd, rs, rt);
+        case Op::paddsb: return gpr3("paddsb", rd, rs, rt);
+        case Op::paddsh: return gpr3("paddsh", rd, rs, rt);
+        case Op::paddsw: return gpr3("paddsw", rd, rs, rt);
+        case Op::psubsb: return gpr3("psubsb", rd, rs, rt);
+        case Op::psubsh: return gpr3("psubsh", rd, rs, rt);
+        case Op::psubsw: return gpr3("psubsw", rd, rs, rt);
+        case Op::padduh: return gpr3("padduh", rd, rs, rt);
+        case Op::psubub: return gpr3("psubub", rd, rs, rt);
+        case Op::psubuh: return gpr3("psubuh", rd, rs, rt);
+        case Op::psubuw: return gpr3("psubuw", rd, rs, rt);
+        case Op::pmaxh: return gpr3("pmaxh", rd, rs, rt);
+        case Op::pminh: return gpr3("pminh", rd, rs, rt);
+        case Op::pmaxw: return gpr3("pmaxw", rd, rs, rt);
+        case Op::pminw: return gpr3("pminw", rd, rs, rt);
+        case Op::pceqb: return gpr3("pceqb", rd, rs, rt);
+        case Op::pceqh: return gpr3("pceqh", rd, rs, rt);
+        case Op::pceqw: return gpr3("pceqw", rd, rs, rt);
+        case Op::pcgtb: return gpr3("pcgtb", rd, rs, rt);
+        case Op::pcgth: return gpr3("pcgth", rd, rs, rt);
+        case Op::pcgtw: return gpr3("pcgtw", rd, rs, rt);
+        case Op::pextub: return gpr3("pextub", rd, rs, rt);
+        case Op::pextuh: return gpr3("pextuh", rd, rs, rt);
+        case Op::pinth: return gpr3("pinth", rd, rs, rt);
+        case Op::pinteh: return gpr3("pinteh", rd, rs, rt);
+        case Op::padsbh: return gpr3("padsbh", rd, rs, rt);
+        case Op::qfsrv: return gpr3("qfsrv", rd, rs, rt);
+        case Op::pmultw: return gpr3("pmultw", rd, rs, rt);
+        case Op::pmultuw: return gpr3("pmultuw", rd, rs, rt);
+        case Op::pmaddw: return gpr3("pmaddw", rd, rs, rt);
+        case Op::pmadduw: return gpr3("pmadduw", rd, rs, rt);
+        case Op::pmsubw: return gpr3("pmsubw", rd, rs, rt);
+        case Op::pmulth: return gpr3("pmulth", rd, rs, rt);
+        case Op::pmaddh: return gpr3("pmaddh", rd, rs, rt);
+        case Op::pmsubh: return gpr3("pmsubh", rd, rs, rt);
+        case Op::phmadh: return gpr3("phmadh", rd, rs, rt);
+        case Op::phmsbh: return gpr3("phmsbh", rd, rs, rt);
+        case Op::pabsh: return gpr2("pabsh", rd, rt);
+        case Op::pabsw: return gpr2("pabsw", rd, rt);
+        case Op::prevh: return gpr2("prevh", rd, rt);
+        case Op::pexeh: return gpr2("pexeh", rd, rt);
+        case Op::pexch: return gpr2("pexch", rd, rt);
+        case Op::pexcw: return gpr2("pexcw", rd, rt);
+        case Op::pext5: return gpr2("pext5", rd, rt);
+        case Op::ppac5: return gpr2("ppac5", rd, rt);
+        case Op::psllh: return std::format("psllh(ee.cpu, {}, {}, {});", r(rd), r(rt), sa);
+        case Op::psrlh: return std::format("psrlh(ee.cpu, {}, {}, {});", r(rd), r(rt), sa);
+        case Op::psrah: return std::format("psrah(ee.cpu, {}, {}, {});", r(rd), r(rt), sa);
+        case Op::psllw: return std::format("psllw(ee.cpu, {}, {}, {});", r(rd), r(rt), sa);
+        case Op::psrlw: return std::format("psrlw(ee.cpu, {}, {}, {});", r(rd), r(rt), sa);
+        case Op::psraw: return std::format("psraw(ee.cpu, {}, {}, {});", r(rd), r(rt), sa);
+        case Op::psllvw: return gpr3("psllvw", rd, rt, rs);
+        case Op::psrlvw: return gpr3("psrlvw", rd, rt, rs);
+        case Op::psravw: return gpr3("psravw", rd, rt, rs);
+        case Op::pdivw: return std::format("pdivw(ee.cpu, {}, {});", r(rs), r(rt));
+        case Op::pdivuw: return std::format("pdivuw(ee.cpu, {}, {});", r(rs), r(rt));
+        case Op::pdivbw: return std::format("pdivbw(ee.cpu, {}, {});", r(rs), r(rt));
+        case Op::pmfhl_uw: return std::format("pmfhl_uw(ee.cpu, {});", r(rd));
+        case Op::pmfhl_slw: return std::format("pmfhl_slw(ee.cpu, {});", r(rd));
+        case Op::pmfhl_lh: return std::format("pmfhl_lh(ee.cpu, {});", r(rd));
+        case Op::pmfhl_sh: return std::format("pmfhl_sh(ee.cpu, {});", r(rd));
+        case Op::pmthl_lw: return std::format("pmthl_lw(ee.cpu, {});", r(rs));
+        case Op::madd1: return pipe("madd", rd, rs, rt, true);
+        case Op::maddu: return pipe("maddu", rd, rs, rt, false);
+        case Op::maddu1: return pipe("maddu", rd, rs, rt, true);
         case Op::div: return std::format("div(ee.cpu, {}, {}, false);", r(rs), r(rt));
         case Op::divu: return std::format("divu(ee.cpu, {}, {}, false);", r(rs), r(rt));
         case Op::div1: return std::format("div(ee.cpu, {}, {}, true);", r(rs), r(rt));
@@ -180,21 +248,19 @@ std::optional<std::string> emitOne(Instruction insn) {
         case Op::mtsab: return std::format("mtsab(ee.cpu, {}, {});", r(rs), imm);
         case Op::mtsah: return std::format("mtsah(ee.cpu, {}, {});", r(rs), imm);
 
-        case Op::mfc0: return std::format("mfc0(ee.cpu, {}, {});", r(rt), rd);
-        case Op::mtc0: return std::format("mtc0(ee.cpu, {}, {});", r(rt), rd);
+        case Op::mfc0:
+            return std::format("mfc0(ee.cpu, {}, {}, {});", r(rt), rd, insn.word & 0x3Fu);
+        case Op::mtc0:
+            return std::format("mtc0(ee.cpu, {}, {}, {});", r(rt), rd, insn.word & 0x3Fu);
         case Op::di: return "di(ee.cpu);";
         case Op::ei: return "ei(ee.cpu);";
 
         case Op::mfc1: return std::format("mfc1(ee.cpu, ee.fpu, {}, {});", r(rt), insn.fs());
         case Op::mtc1: return std::format("mtc1(ee.cpu, ee.fpu, {}, {});", r(rt), insn.fs());
         case Op::cfc1:
-            return insn.fs() == 31
-                       ? std::optional(std::format("cfc1(ee.cpu, ee.fpu, {});", r(rt)))
-                       : std::nullopt;
+            return std::format("cfc1(ee.cpu, ee.fpu, {}, {});", r(rt), insn.fs());
         case Op::ctc1:
-            return insn.fs() == 31
-                       ? std::optional(std::format("ctc1(ee.cpu, ee.fpu, {});", r(rt)))
-                       : std::nullopt;
+            return std::format("ctc1(ee.cpu, ee.fpu, {}, {});", r(rt), insn.fs());
 
         case Op::qmfc2_ni:
             return std::format("qmfc2(ee.cpu, ee.vu0, {}, {});", r(rt), insn.vs());
@@ -642,20 +708,54 @@ private:
                            disassemble(insn, pc));
     }
 
-    std::string emitOneOr(Instruction insn, u32 pc) {
-        if (std::optional<std::string> statement = emitOne(insn)) {
-            return *statement;
+    // An interpreted instruction that did not land on the next one never
+    // completed: it was unimplemented, faulted, or transferred control. Emitted
+    // code cannot carry on past any of those.
+    static std::string stepAt(u32 pc, s32 depth) {
+        const std::string indent(4 * static_cast<usize>(depth), ' ');
+        return std::format("{}step(m, 0x{:08x}u);\n{}if (ee.cpu.pc != 0x{:08x}u) {{\n"
+                           "{}    return leave(ee, ee.cpu.pc, returnTo);\n{}}}\n",
+                           indent, pc, indent, pc + 4, indent, indent);
+    }
+
+    // A delay slot that can transfer control of its own resolves the pc rather
+    // than falling through, so emitted code cannot carry on to a target it
+    // picked before the slot ran.
+    bool delaySlotTransfers(u32 pc) {
+        const std::optional<Instruction> delayed = fetch(pc + 4);
+        return delayed && controlFlow(opOf(*delayed), *delayed, pc + 4).flow != Flow::Next;
+    }
+
+    // Hands the slot to the driver with the pending transfer already in pc, the
+    // same way the interpreter resolves the pair.
+    static std::string emitTransferringSlot(const std::string& pending, u32 pc, s32 depth) {
+        const std::string indent(4 * static_cast<usize>(depth), ' ');
+        return std::format("{}ee.cpu.pc = {};\n{}stepDelaySlot(m, 0x{:08x}u);\n"
+                           "{}return leave(ee, ee.cpu.pc, returnTo);\n",
+                           indent, pending, indent, pc + 4, indent);
+    }
+
+    // The performance counters advance a block at a time here where the
+    // interpreter advances one instruction at a time; the totals agree at every
+    // block boundary. Instructions handed to step or call are left out because
+    // the interpreter counts those itself.
+    std::string counted(const std::string& body) const {
+        if (mInlineInstructions == 0) {
+            return body;
         }
-        return std::format("step(m, 0x{:08x}u);", pc);
+        return std::format("    countPerformanceEvents(ee.cpu, {});\n", mInlineInstructions) +
+               body;
     }
 
     std::string emitBlock(u32 leader, u32 function) {
         std::string out;
+        mInlineInstructions = 0;
         u32 pc = leader;
         for (;;) {
             const std::optional<Instruction> insn = fetch(pc);
             if (!insn) {
-                return out + std::format("    return leave(ee, 0x{:08x}u, returnTo);\n", pc);
+                return counted(out +
+                               std::format("    return leave(ee, 0x{:08x}u, returnTo);\n", pc));
             }
             const Op op = opOf(*insn);
             const ControlFlow cf = controlFlow(op, *insn, pc);
@@ -666,22 +766,31 @@ private:
                     const std::optional<s32> number =
                         previous ? syscallNumberBefore(*previous) : std::nullopt;
                     if (number) {
-                        out += annotate(std::format("syscall(m, {}, 0x{:08x}u);", *number, pc + 4),
-                                        pc, *insn, 1) + "\n";
+                        out += annotate(
+                                   std::format("if (!syscall(m, {}, 0x{:08x}u)) return false;",
+                                               *number, pc + 4), pc, *insn, 1) + "\n";
+                        ++mInlineInstructions;
                         pc += 4;
                         if (mLeaders.count(pc)) {
-                            return out + std::format("    {}\n", go(pc, function));
+                            return counted(out + std::format("    {}\n", go(pc, function)));
                         }
                         continue;
                     }
                 }
-                const std::string statement = emitOneOr(*insn, pc);
-                if (!statement.empty()) {
-                    out += annotate(statement, pc, *insn, 1) + "\n";
+                if (const std::optional<std::string> statement = emitOne(*insn)) {
+                    ++mInlineInstructions;
+                    if (!statement->empty()) {
+                        out += annotate(*statement, pc, *insn, 1) + "\n";
+                    }
+                } else {
+                    out += annotate(std::format("step(m, 0x{:08x}u);", pc), pc, *insn, 1) + "\n";
+                    out += std::format("    if (ee.cpu.pc != 0x{:08x}u) {{\n"
+                                       "        return leave(ee, ee.cpu.pc, returnTo);\n    }}\n",
+                                       pc + 4);
                 }
                 pc += 4;
                 if (mLeaders.count(pc)) {
-                    return out + std::format("    {}\n", go(pc, function));
+                    return counted(out + std::format("    {}\n", go(pc, function)));
                 }
                 continue;
             }
@@ -689,30 +798,56 @@ private:
                 out += annotate(std::format("step(m, 0x{:08x}u);", pc), pc, *insn, 1) + "\n";
                 out += "    call(m, ee.cpu.pc, low(ee.cpu.gpr[ra]));\n";
                 out += "    return leave(ee, ee.cpu.pc, returnTo);\n";
-                return out;
+                return counted(out);
             }
-            return out + emitExit(cf, op, *insn, pc, function);
+            return counted(out + emitExit(cf, op, *insn, pc, function));
         }
     }
 
     // Both orders matter: a program may name the same register twice.
     std::string emitExit(const ControlFlow& cf, Op op, Instruction insn, u32 pc, u32 function) {
         const std::optional<Instruction> delayed = fetch(pc + 4);
-        const std::string slot =
-            delayed ? emitOneOr(*delayed, pc + 4) : std::format("step(m, 0x{:08x}u);", pc + 4);
+        const std::optional<std::string> inlineSlot = delayed ? emitOne(*delayed) : std::nullopt;
         const auto slotAt = [&](s32 depth) {
-            return slot.empty() ? std::string{} : annotate(slot, pc + 4, *delayed, depth) + "\n";
+            if (!inlineSlot) {
+                return stepAt(pc + 4, depth);
+            }
+            return inlineSlot->empty() ? std::string{}
+                                       : annotate(*inlineSlot, pc + 4, *delayed, depth) + "\n";
+        };
+        const bool slotTransfers = delaySlotTransfers(pc);
+
+        // The transfer runs whatever happens. Its delay slot runs too unless a
+        // likely branch nullifies it, which is only known at run time, so that
+        // one is counted where it actually executes.
+        ++mInlineInstructions;
+        const bool slotAlwaysRuns = cf.flow != Flow::BranchLikely;
+        if (inlineSlot && slotAlwaysRuns) {
+            ++mInlineInstructions;
+        }
+        const std::string countSlot =
+            (inlineSlot && !slotAlwaysRuns) ? "            countPerformanceEvents(ee.cpu, 1);\n"
+                                            : std::string{};
+
+        // The link register is written after the target and the condition have
+        // been read, because a program may name the same register twice.
+        const auto linkAt = [&](s32 depth) {
+            return cf.link == 0 ? std::string{}
+                                : std::format("{}ee.cpu.write64({}, 0x{:08x}u);\n",
+                                              std::string(4 * static_cast<usize>(depth), ' '),
+                                              regName(cf.link), pc + 8);
         };
 
         std::string out;
-        if (cf.link != 0) {
-            out += std::format("    ee.cpu.write64({}, 0x{:08x}u);\n", regName(cf.link), pc + 8);
-        }
 
         if (cf.flow == Flow::JumpRegister) {
             out += "    {\n";
             out += annotate(std::format("const u32 destination = low(ee.cpu.gpr[{}]);",
                                         regName(cf.source)), pc, insn, 2) + "\n";
+            out += linkAt(2);
+            if (slotTransfers) {
+                return out + emitTransferringSlot("destination", pc, 2) + "    }\n";
+            }
             out += slotAt(2);
             if (cf.link != 0) {
                 out += "        ee.cpu.pc = destination;\n";
@@ -742,6 +877,10 @@ private:
         }
 
         if (cf.flow == Flow::Jump) {
+            if (slotTransfers && cf.link == 0) {
+                return out + emitTransferringSlot(std::format("0x{:08x}u", cf.target), pc, 1);
+            }
+            out += linkAt(1);
             out += slotAt(1);
             if (cf.link == 0) {
                 out += annotate(go(cf.target, function), pc, insn, 1) + "\n";
@@ -759,6 +898,9 @@ private:
         }
 
         if (alwaysBranches(op, insn)) {
+            if (slotTransfers) {
+                return out + emitTransferringSlot(std::format("0x{:08x}u", cf.target), pc, 1);
+            }
             out += slotAt(1);
             out += annotate(go(cf.target, function), pc, insn, 1) + "\n";
             return out;
@@ -768,12 +910,24 @@ private:
         out += "    {\n";
         out += annotate(std::format("const bool taken = {};", condition ? *condition : "false"),
                         pc, insn, 2) + "\n";
+        out += linkAt(2);
         if (cf.flow == Flow::BranchLikely) {
             out += "        if (taken) {\n";
+            if (slotTransfers) {
+                out += emitTransferringSlot(std::format("0x{:08x}u", cf.target), pc, 3);
+                out += std::format("        }}\n    }}\n    {}\n", go(pc + 8, function));
+                return out;
+            }
+            out += countSlot;
             out += slotAt(3);
             out += std::format("            {}\n        }}\n    }}\n", go(cf.target, function));
             out += std::format("    {}\n", go(pc + 8, function));
             return out;
+        }
+        if (slotTransfers) {
+            out += emitTransferringSlot(
+                std::format("taken ? 0x{:08x}u : 0x{:08x}u", cf.target, pc + 8), pc, 2);
+            return out + "    }\n";
         }
         out += slotAt(2);
         out += std::format("        if (taken) {{\n            {}\n        }}\n    }}\n",
@@ -867,6 +1021,7 @@ private:
     std::set<u32> mTableWords;
     std::set<u32> mWalked;
     std::vector<u32> mSeeds;
+    u32 mInlineInstructions = 0;
 };
 
 }  // namespace
