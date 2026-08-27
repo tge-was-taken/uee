@@ -21,6 +21,44 @@ struct Reg128 {
     friend constexpr bool operator==(const Reg128&, const Reg128&) = default;
 };
 
+constexpr u32 low(const Reg128& r) {
+    return static_cast<u32>(r.lo);
+}
+
+constexpr s64 signed64(const Reg128& r) {
+    return static_cast<s64>(r.lo);
+}
+
+constexpr u16 half(const Reg128& r, s32 i) {
+    return static_cast<u16>(r.word(i / 2) >> (16 * (i & 1)));
+}
+
+constexpr u8 byte(const Reg128& r, s32 i) {
+    return static_cast<u8>(r.word(i / 4) >> (8 * (i & 3)));
+}
+
+constexpr Reg128 lanes(u32 w0, u32 w1, u32 w2, u32 w3) {
+    return Reg128{(static_cast<u64>(w1) << 32) | w0, (static_cast<u64>(w3) << 32) | w2};
+}
+
+constexpr Reg128 fromHalves(const u16 h[8]) {
+    Reg128 r{};
+    for (s32 i = 0; i < 4; ++i) {
+        r.setWord(i, static_cast<u32>(h[2 * i]) | (static_cast<u32>(h[2 * i + 1]) << 16));
+    }
+    return r;
+}
+
+constexpr Reg128 fromBytes(const u8 b[16]) {
+    Reg128 r{};
+    for (s32 i = 0; i < 4; ++i) {
+        r.setWord(i, static_cast<u32>(b[4 * i]) | (static_cast<u32>(b[4 * i + 1]) << 8) |
+                         (static_cast<u32>(b[4 * i + 2]) << 16) |
+                         (static_cast<u32>(b[4 * i + 3]) << 24));
+    }
+    return r;
+}
+
 namespace cop0 {
 constexpr u32 kStatus = 12;
 constexpr u32 kCause = 13;
