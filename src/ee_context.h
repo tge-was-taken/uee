@@ -6,7 +6,7 @@
 
 namespace uee {
 
-struct EmotionEngine {
+struct EeContext {
     R5900 cpu;
     Fpu fpu;
     Vu0 vu0;

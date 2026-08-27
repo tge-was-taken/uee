@@ -1,9 +1,9 @@
 #pragma once
 
-#include "emotion_engine.h"
 #include "fpu_interpreter.h"
 #include "instruction.h"
 #include "memory.h"
+#include "ee_context.h"
 #include "vu0_interpreter.h"
 
 namespace uee {
@@ -17,13 +17,13 @@ enum class Status {
 class Interpreter {
 public:
     explicit Interpreter(Memory& memory)
-        : mMemory(memory), mFpu(machine.fpu), mVu0(machine.vu0) {}
+        : mMemory(memory), mFpu(ee.fpu), mVu0(ee.vu0) {}
 
     Status execute(Instruction insn);
 
     bool hasDelaySlot() const { return mDelaySlot; }
 
-    EmotionEngine machine;
+    EeContext ee;
 
 private:
     Memory& mMemory;

@@ -162,100 +162,100 @@ std::vector<Case> readCases(const std::filesystem::path& path) {
     return cases;
 }
 
-Reg128 read(const EmotionEngine& machine, std::string_view file, u32 index) {
+Reg128 read(const EeContext& ee, std::string_view file, u32 index) {
     if (file == "gpr") {
-        return machine.cpu.gpr[index & 31];
+        return ee.cpu.gpr[index & 31];
     }
     if (file == "hi") {
-        return machine.cpu.hi;
+        return ee.cpu.hi;
     }
     if (file == "lo") {
-        return machine.cpu.lo;
+        return ee.cpu.lo;
     }
     if (file == "fpr") {
-        return Reg128{machine.fpu.fpr[index & 31], 0};
+        return Reg128{ee.fpu.fpr[index & 31], 0};
     }
     if (file == "fcr31") {
-        return Reg128{machine.fpu.fcr31, 0};
+        return Reg128{ee.fpu.fcr31, 0};
     }
     if (file == "facc") {
-        return Reg128{machine.fpu.acc, 0};
+        return Reg128{ee.fpu.acc, 0};
     }
     if (file == "vf") {
-        return machine.vu0.vf[index & 31];
+        return ee.vu0.vf[index & 31];
     }
     if (file == "vi") {
-        return Reg128{machine.vu0.vi[index & 31], 0};
+        return Reg128{ee.vu0.vi[index & 31], 0};
     }
     if (file == "acc") {
-        return machine.vu0.acc;
+        return ee.vu0.acc;
     }
     if (file == "q") {
-        return Reg128{machine.vu0.vi[Vu0::kQ], 0};
+        return Reg128{ee.vu0.vi[Vu0::kQ], 0};
     }
     if (file == "sa") {
-        return Reg128{machine.cpu.sa, 0};
+        return Reg128{ee.cpu.sa, 0};
     }
     return Reg128{};
 }
 
-Reg128 read(const EmotionEngine& machine, const std::string& key) {
+Reg128 read(const EeContext& ee, const std::string& key) {
     const usize colon = key.find(':');
-    return read(machine, std::string_view(key).substr(0, colon),
+    return read(ee, std::string_view(key).substr(0, colon),
                 decimal(std::string_view(key).substr(colon + 1)));
 }
 
-void setUp(EmotionEngine& machine, const Case& k) {
-    machine = EmotionEngine{};
+void setUp(EeContext& ee, const Case& k) {
+    ee = EeContext{};
     const Instruction insn{k.word};
-    machine.cpu.pc = k.pc;
-    machine.cpu.gpr[k.rs] = k.rsValue;
-    machine.cpu.gpr[k.rt] = k.rtValue;
-    machine.cpu.gpr[0] = Reg128{};
-    machine.cpu.hi = k.hi;
-    machine.cpu.lo = k.lo;
-    machine.cpu.sa = k.sa;
-    machine.cpu.cop0[cop0::kStatus] = k.cop0status;
-    machine.fpu.fpr[k.fs] = k.fsValue;
-    machine.fpu.fpr[k.ft] = k.ftValue;
-    machine.fpu.fcr31 = k.fcr31;
-    machine.fpu.acc = k.facc;
-    machine.vu0.acc = k.acc;
-    machine.vu0.vi[Vu0::kQ] = k.q;
-    machine.vu0.vi[Vu0::kP] = k.p;
-    machine.vu0.vi[Vu0::kStatus] = k.vstatus;
-    machine.vu0.vi[Vu0::kMac] = k.vmac;
-    machine.vu0.vi[Vu0::kClip] = k.vclip;
-    machine.vu0.vf[insn.rd()] = k.vfs;
-    machine.vu0.vf[insn.rt()] = k.vft;
-    machine.vu0.vf[k.fd & 31] = k.vfd;
+    ee.cpu.pc = k.pc;
+    ee.cpu.gpr[k.rs] = k.rsValue;
+    ee.cpu.gpr[k.rt] = k.rtValue;
+    ee.cpu.gpr[0] = Reg128{};
+    ee.cpu.hi = k.hi;
+    ee.cpu.lo = k.lo;
+    ee.cpu.sa = k.sa;
+    ee.cpu.cop0[cop0::kStatus] = k.cop0status;
+    ee.fpu.fpr[k.fs] = k.fsValue;
+    ee.fpu.fpr[k.ft] = k.ftValue;
+    ee.fpu.fcr31 = k.fcr31;
+    ee.fpu.acc = k.facc;
+    ee.vu0.acc = k.acc;
+    ee.vu0.vi[Vu0::kQ] = k.q;
+    ee.vu0.vi[Vu0::kP] = k.p;
+    ee.vu0.vi[Vu0::kStatus] = k.vstatus;
+    ee.vu0.vi[Vu0::kMac] = k.vmac;
+    ee.vu0.vi[Vu0::kClip] = k.vclip;
+    ee.vu0.vf[insn.rd()] = k.vfs;
+    ee.vu0.vf[insn.rt()] = k.vft;
+    ee.vu0.vf[k.fd & 31] = k.vfd;
     // vis and vit hold whatever the addressed register held, control registers
     // included, so they land after the file-wide snapshot above and win.
-    machine.vu0.vi[insn.rd()] = k.vis;
-    machine.vu0.vi[insn.rt()] = k.vit;
+    ee.vu0.vi[insn.rd()] = k.vis;
+    ee.vu0.vi[insn.rt()] = k.vit;
     for (const Change& ch : k.changes) {
         if (ch.file == "gpr") {
-            machine.cpu.gpr[ch.index & 31] = ch.before;
+            ee.cpu.gpr[ch.index & 31] = ch.before;
         } else if (ch.file == "hi") {
-            machine.cpu.hi = ch.before;
+            ee.cpu.hi = ch.before;
         } else if (ch.file == "lo") {
-            machine.cpu.lo = ch.before;
+            ee.cpu.lo = ch.before;
         } else if (ch.file == "fpr") {
-            machine.fpu.fpr[ch.index & 31] = static_cast<u32>(ch.before.lo);
+            ee.fpu.fpr[ch.index & 31] = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "fcr31") {
-            machine.fpu.fcr31 = static_cast<u32>(ch.before.lo);
+            ee.fpu.fcr31 = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "facc") {
-            machine.fpu.acc = static_cast<u32>(ch.before.lo);
+            ee.fpu.acc = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "vf") {
-            machine.vu0.vf[ch.index & 31] = ch.before;
+            ee.vu0.vf[ch.index & 31] = ch.before;
         } else if (ch.file == "vi") {
-            machine.vu0.vi[ch.index & 31] = static_cast<u32>(ch.before.lo);
+            ee.vu0.vi[ch.index & 31] = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "acc") {
-            machine.vu0.acc = ch.before;
+            ee.vu0.acc = ch.before;
         } else if (ch.file == "q") {
-            machine.vu0.vi[Vu0::kQ] = static_cast<u32>(ch.before.lo);
+            ee.vu0.vi[Vu0::kQ] = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "sa") {
-            machine.cpu.sa = static_cast<u32>(ch.before.lo);
+            ee.cpu.sa = static_cast<u32>(ch.before.lo);
         }
     }
 }
@@ -292,11 +292,11 @@ int main(int argc, char** argv) {
         const Instruction insn{k.word};
         Memory window = makeWindow(k.window, k.before);
         Interpreter interpreter(window);
-        EmotionEngine& machine = interpreter.machine;
-        setUp(machine, k);
+        EeContext& ee = interpreter.ee;
+        setUp(ee, k);
         std::map<std::string, Reg128> before;
         for (const std::string& key : pinned(k)) {
-            before[key] = read(machine, key);
+            before[key] = read(ee, key);
         }
 
         const Status status = interpreter.execute(insn);
@@ -323,27 +323,27 @@ int main(int argc, char** argv) {
                 ++flagsSkipped;
                 continue;
             }
-            const Reg128 got = read(machine, key);
+            const Reg128 got = read(ee, key);
             if (got != want) {
                 fail("{:08x} {}: {} is {:016x}{:016x}, expected {:016x}{:016x}", k.word,
                      disassemble(insn), key, got.hi, got.lo, want.hi, want.lo);
             }
         }
         for (const auto& [key, was] : before) {
-            if (expected.count(key) == 0 && read(machine, key) != was) {
+            if (expected.count(key) == 0 && read(ee, key) != was) {
                 fail("{:08x} {}: wrote {}, which the case pinned and the run left alone",
                      k.word, disassemble(insn), key);
             }
         }
         const bool hasDelaySlot = decode(insn).op != Op::Invalid && !k.nested &&
-                                  k.pcAfter == k.pc + 4 && machine.cpu.pc != k.pc + 4;
+                                  k.pcAfter == k.pc + 4 && ee.cpu.pc != k.pc + 4;
         // eret jumps to EPC, and no vector captures the COP0 registers, so
         // nothing here establishes where it should land.
         if (decode(insn).op == Op::eret) {
             ++pcUnrecorded;
-        } else if (!hasDelaySlot && machine.cpu.pc != k.pcAfter) {
+        } else if (!hasDelaySlot && ee.cpu.pc != k.pcAfter) {
             fail("{:08x} {}: pc is {:08x}, expected {:08x}", k.word, disassemble(insn),
-                 machine.cpu.pc, k.pcAfter);
+                 ee.cpu.pc, k.pcAfter);
         }
         if (k.hasMemory) {
             if (window.fault()) {

@@ -36,7 +36,6 @@ class Memory {
 public:
     Memory(std::vector<Region> regions, SegmentMirror mirror);
 
-    // The first address that resolved to nothing.
     std::optional<u32> fault() const { return mFault; }
 
     u8 read8(u32 address);
