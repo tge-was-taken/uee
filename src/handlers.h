@@ -1,10 +1,12 @@
 #pragma once
 
 #include "fpu.h"
+#include "fpu_handlers.h"
 #include "memory.h"
 #include "r5900.h"
 #include "types.h"
 #include "vu0.h"
+#include "vu0_handlers.h"
 
 #include <bit>
 #include <limits>

@@ -287,7 +287,7 @@ Status Interpreter::execute(Instruction insn) {
         case Op::c_f_s: case Op::c_eq_s: case Op::c_lt_s: case Op::c_le_s:
         case Op::adda_s: case Op::suba_s: case Op::mula_s:
         case Op::madda_s: case Op::msuba_s: case Op::madd_s: case Op::msub_s:
-            if (!mFpu.execute(slot.op, insn)) {
+            if (!executeFpu(ee.fpu, slot.op, insn)) {
                 return Status::Unimplemented;
             }
             break;
@@ -338,7 +338,7 @@ Status Interpreter::execute(Instruction insn) {
         case Op::ctc2_ni: ctc2(cpu, ee.vu0, rt, rd); break;
 
         default:
-            if (!mVu0.execute(slot.op, insn)) {
+            if (!executeVu0(ee.vu0, memory, slot.op, insn)) {
                 return Status::Unimplemented;
             }
             break;

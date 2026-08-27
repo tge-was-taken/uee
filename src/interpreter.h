@@ -16,8 +16,7 @@ enum class Status {
 
 class Interpreter {
 public:
-    explicit Interpreter(Memory& memory)
-        : mMemory(memory), mFpu(ee.fpu), mVu0(ee.vu0, memory) {}
+    explicit Interpreter(Memory& memory) : mMemory(memory) {}
 
     Status execute(Instruction insn);
 
@@ -28,8 +27,6 @@ public:
 
 private:
     Memory& mMemory;
-    FpuInterpreter mFpu;
-    Vu0Interpreter mVu0;
     bool mDelaySlot = false;
     bool mBranchTaken = false;
 };
