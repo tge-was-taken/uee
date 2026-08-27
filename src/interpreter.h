@@ -17,11 +17,12 @@ enum class Status {
 class Interpreter {
 public:
     explicit Interpreter(Memory& memory)
-        : mMemory(memory), mFpu(ee.fpu), mVu0(ee.vu0) {}
+        : mMemory(memory), mFpu(ee.fpu), mVu0(ee.vu0, memory) {}
 
     Status execute(Instruction insn);
 
     bool hasDelaySlot() const { return mDelaySlot; }
+    bool tookBranch() const { return mBranchTaken; }
 
     EeContext ee;
 
@@ -30,6 +31,7 @@ private:
     FpuInterpreter mFpu;
     Vu0Interpreter mVu0;
     bool mDelaySlot = false;
+    bool mBranchTaken = false;
 };
 
 }  // namespace uee

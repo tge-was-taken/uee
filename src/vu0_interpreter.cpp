@@ -17,12 +17,24 @@ struct Form {
     bool toAcc;
 };
 
-f32 lane(const Reg128& r, s32 i) {
-    return single::toFloat(r.word(i));
+f64 lane(const Reg128& r, s32 i) {
+    return single::widen(r.word(i));
 }
 
 f64 squareRoot(const Reg128& vt, u32 field) {
-    return std::sqrt(std::abs(f64{lane(vt, static_cast<s32>(field))}));
+    return std::sqrt(std::abs(lane(vt, static_cast<s32>(field))));
+}
+
+u32 round(single::Wide exact) {
+    return single::clampToVu(single::truncate(exact).bits);
+}
+
+u32 round(f64 exact) {
+    return round(single::Wide{exact, 0});
+}
+
+s32 signedImmediate5(Instruction insn) {
+    return static_cast<s32>(insn.sa() << 27) >> 27;
 }
 
 bool formOf(Op op, Form& form) {
@@ -134,10 +146,10 @@ bool Vu0Interpreter::execute(Op op, Instruction insn) {
             switch (op) {
                 case Op::vabs: out[i] = vs.word(i) & ~single::kSignMask; break;
                 case Op::vitof0:
-                    out[i] = single::toBits(static_cast<f32>(static_cast<s32>(vs.word(i))));
+                    out[i] = single::fromInt32(static_cast<s32>(vs.word(i)));
                     break;
                 case Op::vftoi0:
-                    out[i] = static_cast<u32>(static_cast<s32>(lane(vs, i)));
+                    out[i] = static_cast<u32>(single::toInt32(vs.word(i)));
                     break;
                 default: out[i] = vs.word(i); break;
             }
@@ -155,14 +167,47 @@ bool Vu0Interpreter::execute(Op op, Instruction insn) {
     case Op::viadd:
         mState.writeVi(insn.vid(), mState.readVi(insn.vis()) + mState.readVi(insn.vit()));
         break;
+    case Op::visub:
+        mState.writeVi(insn.vid(), mState.readVi(insn.vis()) - mState.readVi(insn.vit()));
+        break;
+    case Op::viand:
+        mState.writeVi(insn.vid(), mState.readVi(insn.vis()) & mState.readVi(insn.vit()));
+        break;
+    case Op::vior:
+        mState.writeVi(insn.vid(), mState.readVi(insn.vis()) | mState.readVi(insn.vit()));
+        break;
+    case Op::viaddi:
+        mState.writeVi(insn.vit(),
+                       mState.readVi(insn.vis()) + static_cast<u32>(signedImmediate5(insn)));
+        break;
+
+    // The integer loads and stores name one lane of a quadword in VU0 data
+    // memory, addressed by quadword index.
+    case Op::vilwr:
+    case Op::viswr: {
+        const u32 address =
+            kVu0DataBase + (mState.readVi(insn.vis()) * 16u) % kVu0MemorySize;
+        for (s32 i = 0; i < 4; ++i) {
+            if (!Vu0::writes(insn.dest(), i)) {
+                continue;
+            }
+            const u32 lane = address + 4u * static_cast<u32>(i);
+            if (op == Op::vilwr) {
+                mState.writeVi(insn.vit(), mMemory.read32(lane));
+            } else {
+                mMemory.write32(lane, mState.readVi(insn.vit()));
+            }
+        }
+        break;
+    }
 
     case Op::vsqi: {
         const u32 pointer = mState.readVi(insn.vit());
         const Reg128 value = mState.readVf(insn.vs());
-        Reg128& cell = mState.memory[pointer % Vu0::kMemoryQuadwords];
+        const u32 address = kVu0DataBase + (pointer * 16u) % kVu0MemorySize;
         for (s32 i = 0; i < 4; ++i) {
             if (Vu0::writes(insn.dest(), i)) {
-                cell.setWord(i, value.word(i));
+                mMemory.write32(address + 4u * static_cast<u32>(i), value.word(i));
             }
         }
         mState.writeVi(insn.vit(), pointer + 1);
@@ -172,13 +217,12 @@ bool Vu0Interpreter::execute(Op op, Instruction insn) {
     // the divider truncates twice, once taking the root and once taking the
     // quotient, and no single rounding reproduces it
     case Op::vsqrt:
-        mState.vi[Vu0::kQ] = single::truncate(squareRoot(mState.readVf(insn.vt()), insn.ftf()));
+        mState.vi[Vu0::kQ] = round(squareRoot(mState.readVf(insn.vt()), insn.ftf()));
         break;
     case Op::vrsqrt: {
-        const f32 root = single::toFloat(
-            single::truncate(squareRoot(mState.readVf(insn.vt()), insn.ftf())));
-        mState.vi[Vu0::kQ] = single::truncate(
-            f64{lane(mState.readVf(insn.vs()), static_cast<s32>(insn.fsf()))} / root);
+        const f64 root = single::widen(round(squareRoot(mState.readVf(insn.vt()), insn.ftf())));
+        mState.vi[Vu0::kQ] =
+            round(lane(mState.readVf(insn.vs()), static_cast<s32>(insn.fsf())) / root);
         break;
     }
 
@@ -188,10 +232,10 @@ bool Vu0Interpreter::execute(Op op, Instruction insn) {
         const Reg128 vt = mState.readVf(insn.vt());
         u32 out[4]{};
         for (s32 i = 0; i < 3; ++i) {
-            const f64 product = f64{lane(vs, (i + 1) % 3)} * lane(vt, (i + 2) % 3);
+            const f64 product = lane(vs, (i + 1) % 3) * lane(vt, (i + 2) % 3);
             out[i] = (op == Op::vopmula)
-                         ? single::truncate(product)
-                         : single::truncate(single::addExact(lane(mState.acc, i), -product));
+                         ? round(product)
+                         : round(single::addExact(lane(mState.acc, i), -product));
         }
         // the outer product is defined on xyz alone, whatever the encoding says
         const u32 dest = insn.dest() & 0xEu;
@@ -219,8 +263,8 @@ bool Vu0Interpreter::execute(Op op, Instruction insn) {
                 case Source::Y: b = lane(vt, 1); break;
                 case Source::Z: b = lane(vt, 2); break;
                 case Source::W: b = lane(vt, 3); break;
-                case Source::Q: b = single::toFloat(mState.vi[Vu0::kQ]); break;
-                case Source::I: b = single::toFloat(mState.vi[Vu0::kI]); break;
+                case Source::Q: b = single::widen(mState.vi[Vu0::kQ]); break;
+                case Source::I: b = single::widen(mState.vi[Vu0::kI]); break;
                 default: b = lane(vt, i); break;
             }
             single::Wide value;
@@ -238,7 +282,7 @@ bool Vu0Interpreter::execute(Op op, Instruction insn) {
                     break;
                 }
             }
-            out[i] = single::truncate(value);
+            out[i] = round(value);
         }
         if (form.toAcc) {
             mState.writeAcc(insn.dest(), out);

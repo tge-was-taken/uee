@@ -87,6 +87,8 @@ Memory makeMainMemory() {
     regions.push_back({0, std::vector<u8>(kMainRamSize)});
     regions.push_back({kHardwareBase, std::vector<u8>(kHardwareSize)});
     regions.push_back({kScratchpadBase, std::vector<u8>(kScratchpadSize)});
+    regions.push_back({kVu0MicroBase, std::vector<u8>(kVu0MemorySize)});
+    regions.push_back({kVu0DataBase, std::vector<u8>(kVu0MemorySize)});
     regions.push_back({kGsPrivBase, std::vector<u8>(kGsPrivSize)});
     return Memory{std::move(regions), {kMirrorLimit, kPhysicalMask}};
 }
