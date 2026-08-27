@@ -3,12 +3,20 @@
 #include "memory.h"
 #include "sif.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <format>
-#include <stdexcept>
 #include <utility>
 
 namespace uee {
 namespace {
+
+// Unwinding out of a guest thread is not possible: its stack is a coroutine's,
+// with no return path to the one the unwinder expects.
+[[noreturn]] void fatal(const std::string& what) {
+    std::fprintf(stderr, "uee: %s\n", what.c_str());
+    std::abort();
+}
 
 constexpr u32 kStackReserve = 0x40;
 
@@ -91,8 +99,8 @@ enum class Syscall : s32 {
 
 }  // namespace
 
-Kernel::Kernel(EmotionEngine& machine, Memory& memory)
-    : mMachine(machine), mMemory(memory) {
+Kernel::Kernel(EeContext& ee, Memory& memory)
+    : mContext(ee), mMemory(memory) {
     Thread main;
     main.state = ThreadState::Ready;
     mThreads.push_back(main);
@@ -109,15 +117,21 @@ Kernel::Kernel(EmotionEngine& machine, Memory& memory)
 }
 
 u32 Kernel::readArgument(u32 index) const {
-    return static_cast<u32>(mMachine.cpu.gpr[kFirstArgument + index].lo);
+    return static_cast<u32>(mContext.cpu.gpr[kFirstArgument + index].lo);
 }
 
 void Kernel::returnValue(u32 value) {
-    mMachine.cpu.write32(kReturnRegister, value);
+    mContext.cpu.write32(kReturnRegister, value);
 }
 
 SyscallResult Kernel::handleSyscall() {
-    const s32 raw = static_cast<s32>(static_cast<u32>(mMachine.cpu.gpr[kSyscallRegister].lo));
+    const s32 raw = static_cast<s32>(static_cast<u32>(mContext.cpu.gpr[kSyscallRegister].lo));
+    if (std::getenv("UEE_TRACE") != nullptr) {
+        std::fprintf(stderr, "syscall %d pc=%08x a0=%08x a1=%08x ra=%08x sp=%08x\n", raw,
+                     mContext.cpu.pc, readArgument(0), readArgument(1),
+                     static_cast<u32>(mContext.cpu.gpr[31].lo),
+                     static_cast<u32>(mContext.cpu.gpr[29].lo));
+    }
     // A negative number reaches the same table entry as its absolute value; the
     // sign only tells the real kernel it was called from interrupt context.
     switch (static_cast<Syscall>(raw < 0 ? -raw : raw)) {
@@ -227,7 +241,7 @@ u32 Kernel::setupThread(u32 gp, u32 stack, u32 stackSize, u32 root) {
     mStackBottom = top - stackSize;
     mRootThread = root;
 
-    R5900& cpu = mMachine.cpu;
+    R5900& cpu = mContext.cpu;
     cpu.write64(kGlobalPointer, gp);
     cpu.write64(kStackPointer, top - kStackReserve);
     return top - kStackReserve;
@@ -286,7 +300,7 @@ s32 Kernel::createSemaphore(u32 param) {
 Kernel::Semaphore& Kernel::findSemaphore(s32 id) {
     const usize index = static_cast<usize>(id) - 1;
     if (id < 1 || index >= mSemaphores.size() || !mSemaphores[index].isAlive) {
-        throw std::runtime_error(std::format("semaphore {} does not exist", id));
+        fatal(std::format("semaphore {} does not exist", id));
     }
     return mSemaphores[index];
 }
@@ -342,9 +356,9 @@ void Kernel::switchTo(usize index) {
     if (index == mCurrent) {
         return;
     }
-    mThreads[mCurrent].context = mMachine;
+    mThreads[mCurrent].context = mContext;
     mCurrent = index;
-    mMachine = mThreads[mCurrent].context;
+    mContext = mThreads[mCurrent].context;
 }
 
 void Kernel::reschedule() {
@@ -374,8 +388,8 @@ u32 Kernel::sendSifDma(u32 transfers, u32 count) {
 
         case SifCommand::Call: {
             if (request.rpcNumber != kFileIoWrite) {
-                throw std::runtime_error(std::format(
-                    "fileio command {} is not implemented; only write is", request.rpcNumber));
+                fatal(std::format("fileio command {} is not implemented; only write is",
+                                  request.rpcNumber));
             }
             const s32 result = writeFile(request.sendBuffer);
             if (request.receiveSize >= 4) {
@@ -404,8 +418,7 @@ s32 Kernel::writeFile(u32 argument) {
     const u32 size = mMemory.read32(argument + kWriteSize);
 
     if (descriptor != kStandardOutput && descriptor != kStandardError) {
-        throw std::runtime_error(
-            std::format("write to file descriptor {}, which nothing backs", descriptor));
+        fatal(std::format("write to file descriptor {}, which nothing backs", descriptor));
     }
 
     mOutput.reserve(mOutput.size() + size);

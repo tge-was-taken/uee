@@ -3,6 +3,7 @@
 #include "interpreter.h"
 #include "kernel.h"
 #include "memory.h"
+#include "translate.h"
 #include "types.h"
 
 #include <string>
@@ -28,6 +29,6 @@ struct Stop {
 
 std::string describe(const Stop& stop);
 
-Stop run(Interpreter& interpreter, Memory& memory, Kernel& kernel, u64 instructionLimit);
+Stop run(Machine& machine, u64 instructionLimit);
 
 }  // namespace uee

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "emotion_engine.h"
 #include "memory.h"
+#include "ee_context.h"
 #include "types.h"
 
 #include <map>
@@ -25,13 +25,15 @@ struct GuestCall {
 
 class Kernel {
 public:
-    Kernel(EmotionEngine& machine, Memory& memory);
+    Kernel(EeContext& ee, Memory& memory);
 
     SyscallResult handleSyscall();
 
     // The guest callback an RPC reply owes its caller, which the run loop has
     // to execute before the guest resumes.
     std::optional<GuestCall> takePendingCall();
+
+    usize currentThread() const { return mCurrent; }
 
     const std::string& readOutput() const { return mOutput; }
 
@@ -44,7 +46,7 @@ private:
     };
 
     struct Thread {
-        EmotionEngine context;
+        EeContext context;
         ThreadState state = ThreadState::Dormant;
         s32 priority = 0;
         s32 waitingOn = 0;
@@ -79,7 +81,7 @@ private:
     void reschedule();
     Semaphore& findSemaphore(s32 id);
 
-    EmotionEngine& mMachine;
+    EeContext& mContext;
     Memory& mMemory;
 
     std::vector<Thread> mThreads;
