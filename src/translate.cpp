@@ -393,6 +393,9 @@ std::optional<std::string> emitOne(Instruction insn) {
             return std::format("vopmsub(ee.vu0, 0x{:x}u, {}, {}, {});", insn.dest(), insn.vd(),
                                insn.vs(), insn.vt());
 
+        case Op::vcallms: return std::format("vcallms({});", insn.imm15());
+        case Op::vcallmsr: return std::string{"vcallmsr(ee.vu0);"};
+
         case Op::vnop:
         case Op::vwaitq:
         case Op::sync_p:

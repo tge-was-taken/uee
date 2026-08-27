@@ -3,10 +3,12 @@
 #include "memory.h"
 #include "opcodes.h"
 #include "single.h"
+#include "syscall_stubs.h"
 #include "types.h"
 #include "vu0.h"
 
 #include <cmath>
+#include <format>
 
 namespace uee {
 
@@ -218,6 +220,15 @@ inline void vopmsub(Vu0& vu0, u32 dest, u32 vd, u32 vs, u32 vt) {
         out[i] = vuRound(single::addExact(vuLane(vu0.acc, i), -product));
     }
     vu0.writeVf(vd, dest & kOuterProductDest, out);
+}
+
+// Micro mode is not modelled, so a microprogram runs as nothing at all and the
+// vector file is left as the guest set it up.
+inline void vcallms(u32 program) {
+    reportStub(std::format("vu0 microprogram at {:04x}", program * 8));
+}
+inline void vcallmsr(const Vu0& vu0) {
+    vcallms(vu0.vi[Vu0::kCmsar0]);
 }
 
 inline bool vuFormOf(Op op, VuForm& form) {

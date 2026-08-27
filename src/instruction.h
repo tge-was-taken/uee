@@ -35,6 +35,7 @@ struct Instruction {
 
     constexpr u32 dest() const { return (word >> 21) & 0x0Fu; }
     constexpr s32 imm5() const { return static_cast<s32>(sa() << 27) >> 27; }
+    constexpr u32 imm15() const { return (word >> 6) & 0x7FFFu; }
     constexpr u32 fsf() const { return (word >> 21) & 0x3u; }
     constexpr u32 ftf() const { return (word >> 23) & 0x3u; }
 

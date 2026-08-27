@@ -15,6 +15,7 @@ struct Vu0 {
     static constexpr u32 kI = 21;
     static constexpr u32 kQ = 22;
     static constexpr u32 kP = 23;
+    static constexpr u32 kCmsar0 = 27;
 
     Reg128 vf[32]{};
     u32 vi[32]{};

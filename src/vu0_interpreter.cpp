@@ -31,6 +31,9 @@ bool executeVu0(Vu0& vu0, Memory& memory, Op op, Instruction insn) {
     case Op::vsqrt: vsqrt(vu0, insn.vt(), insn.ftf()); break;
     case Op::vrsqrt: vrsqrt(vu0, insn.vs(), insn.fsf(), insn.vt(), insn.ftf()); break;
 
+    case Op::vcallms: vcallms(insn.imm15()); break;
+    case Op::vcallmsr: vcallmsr(vu0); break;
+
     case Op::vopmula: vopmula(vu0, dest, insn.vs(), insn.vt()); break;
     case Op::vopmsub: vopmsub(vu0, dest, insn.vd(), insn.vs(), insn.vt()); break;
 
