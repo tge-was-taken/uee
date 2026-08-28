@@ -1,0 +1,11 @@
+-- TEST BEGIN
+handover: wait 1, alarm id 0, time nonzero 1
+handover: alarms 0, count 0
+pending: 3
+order: abc
+pool: first 0, last 63, overflow -1, count 64
+release mid: 1
+reuse: 7
+drained: count 0
+release twice: -1
+-- TEST END

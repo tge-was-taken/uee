@@ -1,7 +1,10 @@
 #pragma once
 
+#include "mmio.h"
 #include "types.h"
 
+#include <bit>
+#include <cstring>
 #include <optional>
 #include <vector>
 
@@ -37,33 +40,88 @@ struct SegmentMirror {
     }
 };
 
-class Hardware;
-
 class Memory {
 public:
     Memory(std::vector<Region> regions, SegmentMirror mirror);
 
-    void attach(Hardware* hardware) { mHardware = hardware; }
+    void attach(Mmio* mmio) { mMmio = mmio; }
 
     std::optional<u32> fault() const { return mFault; }
 
-    u8 read8(u32 address);
-    u16 read16(u32 address);
-    u32 read32(u32 address);
-    u64 read64(u32 address);
+    // Translated code reaches these on nearly every guest instruction.
+    u8 read8(u32 address) { return load<u8>(resolve(address, 1)); }
+    u16 read16(u32 address) { return load<u16>(resolve(address, 2)); }
+    u64 read64(u32 address) { return load<u64>(resolve(address, 8)); }
 
-    void write8(u32 address, u8 value);
-    void write16(u32 address, u16 value);
-    void write32(u32 address, u32 value);
-    void write64(u32 address, u64 value);
+    u32 read32(u32 address) {
+        if (mMmio != nullptr) {
+            if (const std::optional<u32> value = mMmio->read(mMirror.apply(address))) {
+                return *value;
+            }
+        }
+        return load<u32>(resolve(address, 4));
+    }
+
+    void write8(u32 address, u8 value) { store(resolve(address, 1), value); }
+    void write16(u32 address, u16 value) { store(resolve(address, 2), value); }
+    void write64(u32 address, u64 value) { store(resolve(address, 8), value); }
+
+    void write32(u32 address, u32 value) {
+        if (mMmio != nullptr && mMmio->write(mMirror.apply(address), value)) {
+            return;
+        }
+        store(resolve(address, 4), value);
+    }
 
 private:
-    u8* resolve(u32 address, u32 size);
-    u8* find(u32 address, u32 size);
+    template <typename T>
+    static T load(const u8* p) {
+        T value = 0;
+        if (p != nullptr) {
+            std::memcpy(&value, p, sizeof(T));
+        }
+        return value;
+    }
+
+    template <typename T>
+    static void store(u8* p, T value) {
+        if (p != nullptr) {
+            std::memcpy(p, &value, sizeof(T));
+        }
+    }
+
+    // The raw address decodes before the mirrored one, so the scratchpad still
+    // reaches itself where the mask would fold it onto the hardware window.
+    u8* resolve(u32 address, u32 size) {
+        if (u8* p = find(address, size)) {
+            return p;
+        }
+        if (u8* p = find(mMirror.apply(address), size)) {
+            return p;
+        }
+        if (!mFault) {
+            mFault = address;
+        }
+        return nullptr;
+    }
+
+    u8* find(u32 address, u32 size) {
+        for (Region& region : mRegions) {
+            if (address < region.base) {
+                continue;
+            }
+            const u32 offset = address - region.base;
+            const u32 limit = static_cast<u32>(region.bytes.size());
+            if (offset < limit && limit - offset >= size) {
+                return region.bytes.data() + offset;
+            }
+        }
+        return nullptr;
+    }
 
     std::vector<Region> mRegions;
     SegmentMirror mMirror;
-    Hardware* mHardware = nullptr;
+    Mmio* mMmio = nullptr;
     std::optional<u32> mFault;
 };
 

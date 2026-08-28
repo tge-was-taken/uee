@@ -76,8 +76,14 @@ Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) 
     return {std::nullopt, interpreter.hasDelaySlot(), interpreter.tookBranch()};
 }
 
-Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit);
-bool runIdle(Machine& machine, u64& executed, u64 instructionLimit);
+// An interrupt handler runs on the context it interrupted, so while one is on
+// the stack the run loop must keep stepping rather than idle: nothing can make
+// a thread ready until the handler returns.
+enum class Idling { Allowed, Blocked };
+
+Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
+              Idling idling);
+std::optional<Stop> runIdle(Machine& machine, u64& executed, u64 instructionLimit);
 
 // A thread that gives up the processor part way through a call tree has to
 // resume there, which needs its host stack kept intact.
@@ -115,7 +121,7 @@ private:
     }
 
     void runThread() {
-        mStop = runUntil(mMachine, kNoHalt, mExecuted, mInstructionLimit);
+        mStop = runUntil(mMachine, kNoHalt, mExecuted, mInstructionLimit, Idling::Allowed);
         mStopped = true;
     }
 
@@ -153,7 +159,8 @@ Step runDelaySlot(Machine& machine, u32 pc) {
     return step;
 }
 
-Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit) {
+Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
+              Idling idling) {
     Interpreter& interpreter = machine.interpreter;
     Memory& memory = machine.memory;
     Kernel& kernel = machine.kernel;
@@ -180,9 +187,9 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
         kernel.advanceClock(executed);
         kernel.deliverInterrupts();
 
-        if (kernel.isIdle()) {
-            if (!runIdle(machine, executed, instructionLimit)) {
-                return Stop{StopReason::Deadlocked, cpu.pc, {}};
+        if (kernel.isIdle() && idling == Idling::Allowed) {
+            if (const std::optional<Stop> stop = runIdle(machine, executed, instructionLimit)) {
+                return *stop;
             }
             continue;
         }
@@ -214,7 +221,8 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
             cpu.write64(kArgumentRegister + 2, call->thirdArgument);
             cpu.write64(kReturnAddressRegister, kCallbackReturn);
 
-            const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit);
+            const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit,
+                                       Idling::Blocked);
             if (stop.reason != StopReason::Returned) {
                 return stop;
             }
@@ -225,7 +233,9 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit)
     return Stop{StopReason::ReachedLimit, cpu.pc, {}};
 }
 
-bool runIdle(Machine& machine, u64& executed, u64 instructionLimit) {
+// A stop here is the callback's own, not a deadlock; returning nothing means
+// the processor has work again.
+std::optional<Stop> runIdle(Machine& machine, u64& executed, u64 instructionLimit) {
     Kernel& kernel = machine.kernel;
     R5900& cpu = machine.ee().cpu;
 
@@ -241,14 +251,20 @@ bool runIdle(Machine& machine, u64& executed, u64 instructionLimit) {
             cpu.write64(kArgumentRegister + 1, call->secondArgument);
             cpu.write64(kArgumentRegister + 2, call->thirdArgument);
             cpu.write64(kReturnAddressRegister, kCallbackReturn);
-            const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit);
+            const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit,
+                                       Idling::Blocked);
             machine.ee() = caller;
             if (stop.reason != StopReason::Returned) {
-                return false;
+                return stop;
             }
+            kernel.dispatchAfterInterrupt();
         }
     }
-    return !kernel.isIdle();
+    if (kernel.isIdle()) {
+        kernel.reportNoActiveThreads();
+        return Stop{StopReason::ReachedLimit, cpu.pc, {}};
+    }
+    return std::nullopt;
 }
 
 std::string_view nameOf(StopReason reason) {
@@ -289,7 +305,7 @@ bool syscall(Machine& machine, s32 number, u32 resumePc) {
 
     u64 executed = 0;
     while (kernel.isIdle()) {
-        if (!runIdle(machine, executed, kCallLimit)) {
+        if (runIdle(machine, executed, kCallLimit)) {
             return false;
         }
     }
@@ -297,7 +313,7 @@ bool syscall(Machine& machine, s32 number, u32 resumePc) {
         mco_yield(mco_running());
     }
     if (machine.ee().cpu.pc != resumePc) {
-        runUntil(machine, resumePc, executed, kCallLimit);
+        runUntil(machine, resumePc, executed, kCallLimit, Idling::Allowed);
     }
     return true;
 }
@@ -314,7 +330,7 @@ void step(Machine& machine, u32 pc) {
     u64 executed = 0;
     // A syscall can queue a guest callback that has to run before the caller
     // carries on, and that callback needs a budget of its own.
-    runUntil(interpretOnly, pc + 4, executed, kCallLimit);
+    runUntil(interpretOnly, pc + 4, executed, kCallLimit, Idling::Allowed);
 }
 
 bool call(Machine& machine, u32 target, u32 returnTo) {
@@ -324,7 +340,7 @@ bool call(Machine& machine, u32 target, u32 returnTo) {
         // the guest stack does not have.
         Machine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
         u64 executed = 0;
-        runUntil(interpretOnly, returnTo, executed, kCallLimit);
+        runUntil(interpretOnly, returnTo, executed, kCallLimit, Idling::Allowed);
     }
     return machine.ee().cpu.pc == returnTo;
 }

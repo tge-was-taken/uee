@@ -1,0 +1,25 @@
+-- TEST BEGIN
+negative init: -1
+created: count 2, max 4, waiters 0
+refer returns id: 1
+sema count grew: 1
+poll: 1 1 -1
+poll bad id: -1
+poll deleted: -1
+refer deleted: -1
+refer out of range: -1
+queued: waiters 3, count 0
+after 1: 2 4 4
+handover keeps count: 0, waiters 2
+after 2: 10 2 4
+after 3: 10 10 2
+spare signal counts: 1
+released waiters saw: 1 1 1
+signalled saw id: 1
+deleted saw: -1
+both finished: 1
+wait bad id: 300
+signal bad id: -1
+delete twice: -1
+balanced: 0
+-- TEST END

@@ -1,0 +1,10 @@
+-- TEST BEGIN
+spare holds a rom stub: 1
+installed: 1
+guest handler: 42, calls 1
+again: 3, calls 2
+stub restored: 1
+live slot is rom: 1
+hooked: 4660
+unhooked: 1
+-- TEST END

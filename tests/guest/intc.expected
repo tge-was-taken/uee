@@ -1,0 +1,21 @@
+-- TEST BEGIN
+enable vblank: 1, again 0
+cause 15: -1
+cause 1 reserved: -1
+ids valid and distinct: 1
+pool grew by: 3
+chain order: cab
+disable middle: 1
+without it: cb
+enable middle: 1
+restored: cab
+remove head: 2
+after removal: ab
+remove twice: -1
+remove id 0: -1
+remove id 200: -1
+remove bad cause: -1
+drain: 1 0
+pool balanced: 0
+disable vblank: 1, again 0
+-- TEST END

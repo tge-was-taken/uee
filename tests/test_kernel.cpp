@@ -1,6 +1,9 @@
 #include "alarm.h"
+#include "ee_context.h"
 #include "interrupts.h"
+#include "kernel.h"
 #include "queue.h"
+#include "syscall_table.h"
 #include "timers.h"
 
 #include <spdlog/spdlog.h>
@@ -220,6 +223,96 @@ void checkSbusIsReservedForTheKernel() {
           "but accepts a kernel one");
 }
 
+
+// The dispatcher is transcribed from SyscallHandler @ 0x80000280 in KERNEL.elf
+// (md5 d3365049f363abad59102ec4d4e2b0af). These pin the four decisions that
+// listing makes, in its order.
+struct SyscallFixture {
+    uee::Memory memory = uee::makeMainMemory();
+    uee::EeContext context;
+    uee::Kernel kernel{context, memory};
+
+    void enter(s32 number) {
+        context.cpu.write64(3, static_cast<u64>(static_cast<s64>(number)));
+        context.cpu.pc = 0x00100000;
+    }
+};
+
+// bltzl $v1, negu $v1: the negated number selects the same slot, and the delay
+// slot only runs when the branch is taken, so a positive number is untouched.
+void checkNegativeSyscallSelectsTheSameSlot() {
+    SyscallFixture positive;
+    uee::writeSyscallHandler(positive.memory, 100, 0x00200000);
+    positive.enter(100);
+    check(positive.kernel.handleSyscall() == uee::SyscallResult::Handled,
+          "a positive number reaches its handler");
+    checkEqual(positive.context.cpu.pc, 0x00200000u, "and enters it");
+
+    SyscallFixture negative;
+    uee::writeSyscallHandler(negative.memory, 100, 0x00200000);
+    negative.enter(-100);
+    check(negative.kernel.handleSyscall() == uee::SyscallResult::Handled,
+          "the negated number reaches the same handler");
+    checkEqual(negative.context.cpu.pc, 0x00200000u, "and enters it");
+}
+
+// li $k0, 0x7C / bne $k0, $v1 sits after the fall-through, so only a positive
+// 124 skips the table.
+void checkDeci2BypassesTheTableOnlyWhenPositive() {
+    SyscallFixture positive;
+    uee::writeSyscallHandler(positive.memory, 124, 0x00200000);
+    positive.enter(124);
+    check(positive.kernel.handleSyscall() == uee::SyscallResult::Handled,
+          "a positive 124 is answered");
+    check(positive.context.cpu.pc != 0x00200000u, "without indexing the table");
+
+    SyscallFixture negative;
+    uee::writeSyscallHandler(negative.memory, 124, 0x00200000);
+    negative.enter(-124);
+    negative.kernel.handleSyscall();
+    checkEqual(negative.context.cpu.pc, 0x00200000u, "a negative 124 indexes the table");
+}
+
+// sll $v1, 2 / lw $k0, k_SyscallTable($v1) with no bound check, which is what
+// lets P3FES claim slot 131 for its own FindAddress scanner.
+void checkTheTableIndexIsUnchecked() {
+    SyscallFixture fixture;
+    uee::writeSyscallHandler(fixture.memory, 131, 0x0050d4c0);
+    checkEqual(fixture.memory.read32(uee::kSyscallTableBase + 131 * 4), 0x0050d4c0u,
+               "slot 131 lands one word past the ROM table");
+    fixture.enter(131);
+    check(fixture.kernel.handleSyscall() == uee::SyscallResult::Handled, "and dispatches");
+    checkEqual(fixture.context.cpu.pc, 0x0050d4c0u, "to the installed handler");
+}
+
+// jalr $k0: a guest handler is called and returns with jr $ra, so the caller's
+// return address has to survive the call.
+void checkGuestHandlersAreCalledNotEntered() {
+    SyscallFixture fixture;
+    uee::writeSyscallHandler(fixture.memory, 90, 0x0050cc20);
+    fixture.context.cpu.write64(31, 0x00104000);
+    fixture.enter(90);
+    fixture.kernel.handleSyscall();
+    checkEqual(fixture.context.cpu.pc, 0x0050cc20u, "the handler is entered by call");
+    checkEqual(static_cast<u32>(fixture.context.cpu.gpr[31].lo), uee::kSyscallHandlerReturn,
+               "with a return address the run loop recognises");
+
+    fixture.context.cpu.pc = uee::kSyscallHandlerReturn;
+    check(fixture.kernel.resumeFromSyscallHandler(), "returning resumes the caller");
+    checkEqual(static_cast<u32>(fixture.context.cpu.gpr[31].lo), 0x00104000u,
+               "with its own return address restored");
+    checkEqual(fixture.context.cpu.pc, 0x00100000u, "at the interrupted pc");
+}
+
+// Slot 0 holds UndefinedSyscall in ROM, so an unclaimed number is answered
+// rather than unknown.
+void checkUnclaimedSlotsAreUndefinedSyscall() {
+    SyscallFixture fixture;
+    fixture.enter(8);
+    check(fixture.kernel.handleSyscall() == uee::SyscallResult::Handled,
+          "a ROM-empty slot answers");
+}
+
 }  // namespace
 
 int main() {
@@ -238,6 +331,11 @@ int main() {
     checkDmacMaskLivesInTheUpperHalf();
     checkHandlerChainOrder();
     checkSbusIsReservedForTheKernel();
+    checkNegativeSyscallSelectsTheSameSlot();
+    checkDeci2BypassesTheTableOnlyWhenPositive();
+    checkTheTableIndexIsUnchecked();
+    checkGuestHandlersAreCalledNotEntered();
+    checkUnclaimedSlotsAreUndefinedSyscall();
 
     if (gFailures != 0) {
         spdlog::error("{} checks failed", gFailures);

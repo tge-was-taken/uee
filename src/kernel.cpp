@@ -11,8 +11,8 @@
 
 #include "kernel.h"
 
-#include "memory.h"
 #include "sif.h"
+#include "memory.h"
 #include "syscall_stubs.h"
 #include "syscall_table.h"
 
@@ -40,6 +40,9 @@ constexpr u32 kStatusMasterEnable = 1u << 16;
 constexpr u32 kGsImrRegister = 0x12001010;
 constexpr u32 kGsCsrRegister = 0x12001000;
 constexpr s32 kDeci2Call = 124;
+// KERNEL: Deci2CallHandler @ 0x8000ecc8 sends this one to KttyCall.
+constexpr u32 kKernelTty = 0x10;
+constexpr u32 kTtyLimit = 4096;
 constexpr u32 kSif0Chcr = 0x1000C000;
 constexpr u32 kSif0Qwc = 0x1000C020;
 
@@ -66,37 +69,26 @@ constexpr u32 kSemaphoreOption = 20;
 constexpr u32 kUnusedStack = 0xFFFFFFFFu;
 constexpr u32 kRestOfMemory = 0xFFFFFFFFu;
 
-constexpr u32 kWriteFileDescriptor = 0;
-constexpr u32 kWriteBuffer = 4;
-constexpr u32 kWriteSize = 8;
 
-constexpr s32 kStandardOutput = 1;
-constexpr s32 kStandardError = 2;
-constexpr s32 kFileIoWrite = 3;
-constexpr s32 kFileIoServer = static_cast<s32>(0x80000001);
 
 // The IOP address the fileio server would hand back at bind time. Nothing
 // dereferences it here, but the guest refuses to call an unbound server.
-constexpr u32 kFileIoServerBuffer = 0x00010000;
 
 
-enum class SifRegister : u32 {
-    SubAddress = 2,
-    MainToSubFlag = 3,
-    SubToMainFlag = 4,
-    SystemSubAddress = 0x80000000,
-    SystemMainAddress = 0x80000001,
-    SystemRpcInitialised = 0x80000002,
-};
-
-constexpr u32 kSifInitialised = 0x10000;
-constexpr u32 kCommandInitialised = 0x20000;
-constexpr u32 kBootFinished = 0x40000;
+// SifSetReg / SifGetReg reach the SBUS registers by these ids and everything
+// else through a 32 slot file in kernel memory.
+constexpr u32 kMainToSubCommand = 1;
+constexpr u32 kSubToMainCommand = 2;
+constexpr u32 kMainToSubFlag = 3;
+constexpr u32 kSubToMainFlag = 4;
+constexpr u32 kSoftwareRegister = 0x80000000;
+constexpr u32 kSoftwareRegisters = 0x20;
 
 }  // namespace
 
 Kernel::Kernel(EeContext& ctx, Memory& memory) : mContext(ctx), mMemory(memory) {
-    mMemory.attach(&mHardware);
+    mMemory.attach(&mMmio);
+    mMmio.attach(mMemory);
     installSyscallTable(mMemory);
 
     // The guest starts with the processor as the ROM's boot leaves it: taking
@@ -111,15 +103,6 @@ Kernel::Kernel(EeContext& ctx, Memory& memory) : mContext(ctx), mMemory(memory) 
     mThreads.at(static_cast<usize>(main)).status = status::kRun;
     mThreads.setCurrent(static_cast<usize>(main));
 
-    // SIF init spins until the IOP reports itself up, and there is no IOP here
-    // to report it. Both spins are skipped when the guest finds the SIF and RPC
-    // layers already initialised.
-    const u32 ready = kSifInitialised | kCommandInitialised | kBootFinished;
-    writeSifRegister(static_cast<u32>(SifRegister::MainToSubFlag), ready);
-    writeSifRegister(static_cast<u32>(SifRegister::SubToMainFlag), ready);
-    writeSifRegister(static_cast<u32>(SifRegister::SubAddress), kFileIoServerBuffer);
-    writeSifRegister(static_cast<u32>(SifRegister::SystemSubAddress), kFileIoServerBuffer);
-    writeSifRegister(static_cast<u32>(SifRegister::SystemRpcInitialised), 1);
 }
 
 u32 Kernel::readArgument(u32 index) const {
@@ -143,16 +126,15 @@ SyscallResult Kernel::handleSyscall() {
     const bool interruptContext = raw < 0;
     const s32 number = raw < 0 ? -raw : raw;
 
-    if (number >= kSyscallSlots) {
-        return SyscallResult::Unknown;
-    }
-
     // SyscallHandler jumps to the DECI2 manager on a positive 124 without ever
-    // indexing the table. There is no debug link here, so the call reports that
-    // nothing answered.
+    // indexing the table.
     if (!interruptContext && number == kDeci2Call) {
-        reportStub("Deci2Call");
-        returnValue(0xFFFFFFFFu);
+        const s32 requested = static_cast<s32>(readArgument(0));
+        // A negative function number skips the debug context save, and takes
+        // its argument block from the third register rather than the second.
+        returnValue(static_cast<u32>(
+            requested < 0 ? deci2Call(static_cast<u32>(-requested), readArgument(2))
+                          : deci2Call(static_cast<u32>(requested), readArgument(1))));
         return SyscallResult::Handled;
     }
 
@@ -368,12 +350,12 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             return SyscallResult::Handled;
 
         case Syscall::RemoveIntcHandler:
-            returnValue(static_cast<u32>(mHardware.interrupts().removeIntcHandler(
+            returnValue(static_cast<u32>(mMmio.interrupts().removeIntcHandler(
                 arg(0), static_cast<s32>(arg(1)))));
             return SyscallResult::Handled;
 
         case Syscall::RemoveDmacHandler:
-            returnValue(static_cast<u32>(mHardware.interrupts().removeDmacHandler(
+            returnValue(static_cast<u32>(mMmio.interrupts().removeDmacHandler(
                 arg(0), static_cast<s32>(arg(1)))));
             return SyscallResult::Handled;
 
@@ -395,18 +377,18 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
 
         case Syscall::EnableIntcHandler:
         case Syscall::EnableDmacHandler:
-            returnValue(static_cast<u32>(mHardware.interrupts().setHandlerState(
+            returnValue(static_cast<u32>(mMmio.interrupts().setHandlerState(
                 static_cast<s32>(arg(0)), handler_state::kUser)));
             return SyscallResult::Handled;
 
         case Syscall::DisableIntcHandler:
         case Syscall::DisableDmacHandler:
-            returnValue(static_cast<u32>(mHardware.interrupts().setHandlerState(
+            returnValue(static_cast<u32>(mMmio.interrupts().setHandlerState(
                 static_cast<s32>(arg(0)), 1)));
             return SyscallResult::Handled;
 
         case Syscall::GetIntrHandlerCount:
-            returnValue(static_cast<u32>(mHardware.interrupts().handlerCount()));
+            returnValue(static_cast<u32>(mMmio.interrupts().handlerCount()));
             return SyscallResult::Handled;
 
         // The dispatcher's own return path; the run loop has already restored
@@ -420,7 +402,7 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             return SyscallResult::Handled;
 
         case Syscall::SifSetReg:
-            writeSifRegister(arg(0), arg(1));
+            returnValue(writeSifRegister(arg(0), arg(1)));
             returnValue(0);
             return SyscallResult::Handled;
 
@@ -556,7 +538,7 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             return SyscallResult::Handled;
 
         case Syscall::RemoveSbusIntcHandler:
-            returnValue(static_cast<u32>(mHardware.interrupts().removeIntcHandler(
+            returnValue(static_cast<u32>(mMmio.interrupts().removeIntcHandler(
                 intc::kSbus, static_cast<s32>(arg(1)))));
             return SyscallResult::Handled;
 
@@ -672,12 +654,11 @@ s32 Kernel::createThread(u32 param) {
     thread.rootFunction = creator.rootFunction;
     thread.heapEnd = creator.heapEnd;
 
-    thread.saved = EeContext{};
-    R5900& cpu = thread.saved.cpu;
-    cpu.pc = entry;
-    cpu.write64(kStackPointer, stack + stackSize - kStackReserve);
-    cpu.write64(kGlobalPointer, gp);
-    cpu.write64(kReturnAddress, creator.rootFunction);
+    EeContext fresh{};
+    fresh.cpu.write64(kStackPointer, stack + stackSize - kStackReserve);
+    fresh.cpu.write64(kGlobalPointer, gp);
+    fresh.cpu.write64(kReturnAddress, creator.rootFunction);
+    thread.saved.saveFrom(fresh);
     return id;
 }
 
@@ -690,7 +671,7 @@ s32 Kernel::startThread(s32 id, u32 argument) {
     if (thread.status != status::kDormant) {
         return -1;
     }
-    thread.saved.cpu.write64(kFirstArgument, argument);
+    thread.saved.gpr[kFirstArgument].lo = argument;
     thread.argv = argument;
     makeReadyAndPreempt(static_cast<usize>(id));
     return id;
@@ -707,12 +688,11 @@ void Kernel::resetToDormant(usize id) {
     thread.context = top - kContextReserve;
     thread.currentPriority = thread.initialPriority;
 
-    thread.saved = EeContext{};
-    R5900& cpu = thread.saved.cpu;
-    cpu.pc = thread.entry;
-    cpu.write64(kStackPointer, top - kStackReserve);
-    cpu.write64(kGlobalPointer, thread.globalPointer);
-    cpu.write64(kReturnAddress, thread.rootFunction);
+    EeContext fresh{};
+    fresh.cpu.write64(kStackPointer, top - kStackReserve);
+    fresh.cpu.write64(kGlobalPointer, thread.globalPointer);
+    fresh.cpu.write64(kReturnAddress, thread.rootFunction);
+    thread.saved.saveFrom(fresh);
 }
 
 // KERNEL: DeleteThreadImpl @ 0x80003ef8
@@ -1092,13 +1072,13 @@ s32 Kernel::referSemaphoreStatus(s32 id, u32 info) {
 
 // KERNEL: AddIntcHandler @ 0x80001a30
 s32 Kernel::addIntcHandler(u32 cause, u32 func, s32 next, u32 argument) {
-    return mHardware.interrupts().addIntcHandler(cause, func, next, argument,
+    return mMmio.interrupts().addIntcHandler(cause, func, next, argument,
                                                  handler_state::kUser);
 }
 
 // KERNEL: AddDmacHandler @ 0x80001c78
 s32 Kernel::addDmacHandler(u32 channel, u32 func, s32 next, u32 argument) {
-    return mHardware.interrupts().addDmacHandler(channel, func, next, argument,
+    return mMmio.interrupts().addDmacHandler(channel, func, next, argument,
                                                  handler_state::kUser);
 }
 
@@ -1108,9 +1088,9 @@ s32 Kernel::addDmacHandler(u32 channel, u32 func, s32 next, u32 argument) {
 void Kernel::resetEE(u32 mask) {
     if ((mask & 0x01) != 0) {
         mOutput += "# Initialize DMAC ...\n";
-        mHardware.interrupts().write(kDStat, 0xFFFFFFFFu);
-        mHardware.interrupts().write(kDCtrl, 0);
-        mHardware.interrupts().write(kDPcr, 0);
+        mMmio.interrupts().write(kDStat, 0xFFFFFFFFu);
+        mMmio.interrupts().write(kDCtrl, 0);
+        mMmio.interrupts().write(kDPcr, 0);
     }
     if ((mask & 0x02) != 0) {
         mOutput += "# Initialize VU1 ...\n";
@@ -1132,7 +1112,7 @@ void Kernel::resetEE(u32 mask) {
     if ((mask & 0x40) != 0) {
         mOutput += "# Initialize IPU ...\n";
     }
-    mHardware.interrupts().write(kIntcStat, ~0xCu);
+    mMmio.interrupts().write(kIntcStat, ~0xCu);
 }
 
 // KERNEL: ExecPS2Internal @ 0x800057e0
@@ -1153,9 +1133,8 @@ u32 Kernel::execPS2(u32 entry, u32 argument, u32 argc, u32 argv) {
     }
 
     mSemaphores = SemaphoreTable{};
-    mHardware.interrupts() = Interrupts{};
+    mMmio.interrupts() = Interrupts{};
     mThreads.clearReschedule();
-    mDeferredSignals.clear();
     mPendingCalls.clear();
 
     ThreadControlBlock& thread = mThreads.at(self);
@@ -1236,7 +1215,7 @@ void Kernel::printKernel(u32 format) {
 
 // KERNEL: _EnableIntc and _DisableIntc @ 0x800008c0
 s32 Kernel::enableIntc(u32 cause, bool enable) {
-    Interrupts& interrupts = mHardware.interrupts();
+    Interrupts& interrupts = mMmio.interrupts();
     const u32 bit = 1u << cause;
     const bool already = (interrupts.read(kIntcMask).value_or(0) & bit) != 0;
     if (already == enable) {
@@ -1248,7 +1227,7 @@ s32 Kernel::enableIntc(u32 cause, bool enable) {
 
 // KERNEL: _EnableDmac and _DisableDmac @ 0x80000940
 s32 Kernel::enableDmac(u32 channel, bool enable) {
-    Interrupts& interrupts = mHardware.interrupts();
+    Interrupts& interrupts = mMmio.interrupts();
     const u32 bit = 0x10000u << channel;
     const bool already = (interrupts.read(kDStat).value_or(0) & bit) != 0;
     if (already == enable) {
@@ -1283,7 +1262,7 @@ void Kernel::deliverInterrupts() {
         return;
     }
 
-    Interrupts& interrupts = mHardware.interrupts();
+    Interrupts& interrupts = mMmio.interrupts();
     if ((status & kStatusIntc) != 0) {
         if (const std::optional<u32> cause = interrupts.pendingIntc()) {
             interrupts.acknowledgeIntc(*cause);
@@ -1302,35 +1281,37 @@ void Kernel::deliverInterrupts() {
 // KERNEL: _SetAlarm @ 0x800022d8
 s32 Kernel::setAlarm(u16 ticks, u32 callback, u32 argument) {
     const u32 gp = static_cast<u32>(mContext.cpu.gpr[kGlobalPointer].lo);
-    return mAlarms.set(ticks, callback, argument, gp, mHardware.timers().hsyncCount());
+    return mAlarms.set(ticks, callback, argument, gp, mMmio.timers().hsyncCount());
 }
 
 // KERNEL: _ReleaseAlarm @ 0x80002570
 s32 Kernel::releaseAlarm(s32 id) {
-    return mAlarms.release(id, mHardware.timers().hsyncCount());
+    return mAlarms.release(id, mMmio.timers().hsyncCount());
 }
 
 void Kernel::advanceClock(u64 retiredInstructions) {
-    if (!mHardware.timers().advanceTo(retiredInstructions)) {
+    if (!mMmio.timers().advanceTo(retiredInstructions)) {
         return;
     }
-    // A transfer completes on a later tick, so a guest that starts one and then
+    // A reply lands on a later tick, so a guest that starts a transfer and then
     // waits on its semaphore blocks first, as it would against real hardware.
-    deliverDeferredSignals();
+    if (mSif.advance(mMmio.timers().hsyncCount())) {
+        mMmio.interrupts().raiseDmac(dmac::kSif0);
+    }
     publishTimers();
     raiseFieldInterrupts();
 
     if (!mPendingCalls.empty()) {
         return;
     }
-    std::vector<ExpiredAlarm> expired = mAlarms.takeExpired(mHardware.timers().hsyncCount());
+    std::vector<ExpiredAlarm> expired = mAlarms.takeExpired(mMmio.timers().hsyncCount());
     if (expired.empty()) {
         return;
     }
 
     // Timer 3 compare is INTC cause 12, so a guest handler on that line sees
     // the same event the alarm callbacks come from.
-    mHardware.interrupts().raiseIntc(intc::kTimer3);
+    mMmio.interrupts().raiseIntc(intc::kTimer3);
     for (const ExpiredAlarm& alarm : expired) {
         mPendingCalls.push_back(GuestCall{alarm.callback, static_cast<u32>(alarm.id),
                                           alarm.target, alarm.argument});
@@ -1339,13 +1320,13 @@ void Kernel::advanceClock(u64 retiredInstructions) {
 
 // KERNEL: the VSync flag handling in DispatchIntcHandlers @ 0x80001630
 void Kernel::raiseFieldInterrupts() {
-    const u32 line = mHardware.timers().hsyncCount() % kHsyncPerField;
+    const u32 line = mMmio.timers().hsyncCount() % kHsyncPerField;
     const bool blanking = line >= kVisibleLines;
     if (blanking == mInVblank) {
         return;
     }
     mInVblank = blanking;
-    mHardware.interrupts().raiseIntc(blanking ? intc::kVblankStart : intc::kVblankEnd);
+    mMmio.interrupts().raiseIntc(blanking ? intc::kVblankStart : intc::kVblankEnd);
 
     // DispatchIntcHandlers satisfies a pending SetVSyncFlag at the start of the
     // blank, before it runs any handler, and clears both addresses.
@@ -1364,7 +1345,7 @@ void Kernel::raiseFieldInterrupts() {
 // can currently reprogram a timer.
 void Kernel::publishTimers() {
     for (usize i = 0; i < kTimerCount; ++i) {
-        const Timer& timer = mHardware.timers().at(i);
+        const Timer& timer = mMmio.timers().at(i);
         const u32 base = kTimerBase + static_cast<u32>(i) * kTimerStride;
         mMemory.write32(base + 0x00, timer.count);
         mMemory.write32(base + 0x10, timer.mode);
@@ -1376,7 +1357,6 @@ void Kernel::publishTimers() {
 // KERNEL: MakeThreadReady @ 0x80005a58
 void Kernel::makeReadyAndPreempt(usize id) {
     mThreads.makeReady(id);
-    mIdle = false;
     if (mThreads.at(id).currentPriority < mThreads.at(mThreads.current()).currentPriority) {
         mThreads.requestReschedule();
     }
@@ -1390,26 +1370,29 @@ void Kernel::blockCurrentAndDispatch(WaitType type) {
     dispatchNext();
 }
 
-bool Kernel::deliverDeferredSignals() {
-    if (mDeferredSignals.empty()) {
-        return false;
+// KERNEL: the k_RescheduleFlag check the interrupt return path makes. An i
+// variant called from a handler readies a thread without rescheduling, so an
+// idle processor has to look again once the handler has returned.
+// KERNEL: the kprintf in DispatchNextThread @ 0x80003940, reached when nothing
+// is runnable. The ROM says it once and exits; this runtime says it when it
+// stops waiting for an interrupt that would have made something runnable.
+void Kernel::reportNoActiveThreads() {
+    mOutput += "# <Thread> No active threads\n";
+}
+
+void Kernel::dispatchAfterInterrupt() {
+    if (mIdle) {
+        dispatchNext();
     }
-    const std::vector<s32> pending = std::exchange(mDeferredSignals, {});
-    for (const s32 semaphore : pending) {
-        signalSemaphore(semaphore, true);
-    }
-    return true;
 }
 
 // KERNEL: DispatchNextThread @ 0x80003940
 SyscallResult Kernel::dispatchNext() {
-    s32 next = mThreads.chooseNext();
-    if (next < 0 && deliverDeferredSignals()) {
-        next = mThreads.chooseNext();
-    }
+    const s32 next = mThreads.chooseNext();
     if (next < 0) {
-        // Nothing to run right now. An interrupt can still make a thread ready,
-        // so report this as idle rather than as a dead end.
+        // The ROM calls KExit here. This runtime takes interrupts outside any
+        // thread, so one can still make a thread ready, and the message is left
+        // to whoever gives up waiting for that.
         mIdle = true;
         return SyscallResult::Handled;
     }
@@ -1445,9 +1428,10 @@ void Kernel::loadThread(usize id) {
     // blocking call reports failure.
     if (incoming.waitType != 0) {
         incoming.waitType = 0;
-        incoming.saved.cpu.write32(kReturnRegister, 0xFFFFFFFFu);
+        incoming.saved.gpr[kReturnRegister].lo = static_cast<u64>(static_cast<s64>(-1));
     }
-    mContext = incoming.saved;
+    incoming.saved.loadInto(mContext);
+    mContext.cpu.pc = incoming.resumePc;
 }
 
 // KERNEL: SaveThreadContext and DispatchNextThread @ 0x80003680
@@ -1458,7 +1442,7 @@ void Kernel::switchTo(usize id) {
         return;
     }
     ThreadControlBlock& outgoing = mThreads.at(previous);
-    outgoing.saved = mContext;
+    outgoing.saved.saveFrom(mContext);
     outgoing.resumePc = mContext.cpu.pc;
     loadThread(id);
 }
@@ -1483,78 +1467,68 @@ std::optional<GuestCall> Kernel::takePendingCall() {
     return call;
 }
 
-// KERNEL: SifGetReg @ 0x80006cb8
-u32 Kernel::readSifRegister(u32 id) const {
-    const auto found = mSifRegisters.find(id);
-    return found == mSifRegisters.end() ? 0 : found->second;
+// KERNEL: Deci2CallHandler @ 0x8000ecc8. Only the kernel TTY is answered; the
+// rest of the manager talks to a host debugger over a link that is not here.
+s32 Kernel::deci2Call(u32 function, u32 arguments) {
+    if (function != kKernelTty) {
+        reportStub(std::format("Deci2Call {}", function));
+        return -1;
+    }
+    const u32 text = mMemory.read32(arguments);
+    for (u32 i = 0; i < kTtyLimit; ++i) {
+        const char letter = static_cast<char>(mMemory.read8(text + i));
+        if (letter == '\0') {
+            break;
+        }
+        mOutput.push_back(letter);
+    }
+    return 0;
 }
 
-// KERNEL: SifSetReg @ 0x80006c00
-void Kernel::writeSifRegister(u32 id, u32 value) {
-    mSifRegisters[id] = value;
+// KERNEL: SifGetReg @ 0x80006cb8
+u32 Kernel::readSifRegister(u32 id) const {
+    const auto sbusRegister = [this](u32 address) {
+        return mMmio.sbus().read(address).value_or(0);
+    };
+    switch (id) {
+        case kMainToSubCommand: return sbusRegister(sbus::kMainToSubCommand);
+        case kSubToMainCommand: return sbusRegister(sbus::kSubToMainCommand);
+        case kMainToSubFlag: return sbusRegister(sbus::kMainToSubFlag);
+        case kSubToMainFlag: return sbusRegister(sbus::kSubToMainFlag);
+        default: break;
+    }
+    if ((id & kSoftwareRegister) == 0 || (id & ~kSoftwareRegister) >= kSoftwareRegisters) {
+        return 0;
+    }
+    return mSifRegisters[id & (kSoftwareRegisters - 1)];
+}
+
+// KERNEL: SifSetReg @ 0x80006c00. The hardware writes answer with the register
+// read back, which is not the same as the value written for either flag word.
+u32 Kernel::writeSifRegister(u32 id, u32 value) {
+    switch (id) {
+        case kMainToSubCommand:
+            mMmio.sbus().write(sbus::kMainToSubCommand, value);
+            return readSifRegister(kMainToSubCommand);
+        case kMainToSubFlag:
+            mMmio.sbus().write(sbus::kMainToSubFlag, value);
+            return readSifRegister(kMainToSubFlag);
+        case kSubToMainFlag:
+            mMmio.sbus().write(sbus::kSubToMainFlag, value);
+            return readSifRegister(kSubToMainFlag);
+        default: break;
+    }
+    if ((id & kSoftwareRegister) == 0 || (id & ~kSoftwareRegister) >= kSoftwareRegisters) {
+        return 0;
+    }
+    mSifRegisters[id & (kSoftwareRegisters - 1)] = value;
+    return readArgument(2);
 }
 
 // KERNEL: SifSetDma @ 0x80006798
 u32 Kernel::sendSifDma(u32 transfers, u32 count) {
-    const SifRequest request = decodeSifDma(mMemory, transfers, count);
-
-    switch (request.command) {
-        case SifCommand::Bind:
-            // Every bind is answered so the guest can proceed, but only the
-            // fileio server is actually backed by anything.
-            if (request.serverId != kFileIoServer) {
-                reportStub(std::format("sif bind to server {:08x}",
-                                          static_cast<u32>(request.serverId)));
-            }
-            writeBindReply(mMemory, request.clientData, kFileIoServerBuffer);
-            break;
-
-        case SifCommand::Call: {
-            // Only fileio write is backed. Anything else answers with an error
-            // the guest can act on rather than ending the run.
-            s32 result = -1;
-            if (request.rpcNumber == kFileIoWrite) {
-                result = writeFile(request.sendBuffer);
-            } else {
-                reportStub(std::format("sif rpc {}", request.rpcNumber));
-            }
-            if (request.receiveSize >= 4) {
-                mMemory.write32(request.receiveBuffer, static_cast<u32>(result));
-            }
-            if (request.endFunction != 0) {
-                mPendingCalls.push_back(GuestCall{request.endFunction, request.endParameter, 0, 0});
-            }
-            break;
-        }
-
-        case SifCommand::Other:
-            return ++mDmaTransferId;
-    }
-
-    releaseRequest(mMemory, request);
-    // A completed transfer is a DMAC interrupt on the SIF0 channel.
-    mHardware.interrupts().raiseDmac(dmac::kSif0);
-    if (request.semaphore >= 0) {
-        mDeferredSignals.push_back(request.semaphore);
-    }
+    mSif.receive(transfers, count, mMmio.timers().hsyncCount());
     return ++mDmaTransferId;
-}
-
-s32 Kernel::writeFile(u32 argument) {
-    const s32 descriptor = static_cast<s32>(mMemory.read32(argument + kWriteFileDescriptor));
-    const u32 buffer = mMemory.read32(argument + kWriteBuffer);
-    const u32 size = mMemory.read32(argument + kWriteSize);
-
-    if (descriptor != kStandardOutput && descriptor != kStandardError) {
-        reportStub(std::format("write to fd {}", descriptor));
-        return -1;
-    }
-
-    mOutput.reserve(mOutput.size() + size);
-    for (u32 i = 0; i < size; ++i) {
-        mOutput.push_back(static_cast<char>(mMemory.read8(buffer + i)));
-    }
-    return static_cast<s32>(size);
 }
 
 }  // namespace uee

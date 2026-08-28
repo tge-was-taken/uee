@@ -1,7 +1,8 @@
 #pragma once
 
 #include "alarm.h"
-#include "hardware.h"
+#include "mmio.h"
+#include "sif.h"
 #include "memory.h"
 #include "semaphores.h"
 #include "thread.h"
@@ -52,6 +53,9 @@ public:
     void deliverInterrupts();
 
     bool isIdle() const { return mIdle; }
+    void dispatchAfterInterrupt();
+    void reportNoActiveThreads();
+    void attachDisc(Disc& disc) { mSif.attachDisc(disc); }
 
     // Advances the timers and queues any alarm that has expired.
     void advanceClock(u64 retiredInstructions);
@@ -64,7 +68,7 @@ public:
     const std::string& readOutput() const { return mOutput; }
 
 
-    Hardware& hardware() { return mHardware; }
+    Mmio& mmio() { return mMmio; }
 
 private:
     u32 readArgument(u32 index) const;
@@ -117,16 +121,15 @@ private:
     s32 releaseAlarm(s32 id);
 
     u32 sendSifDma(u32 transfers, u32 count);
+    s32 deci2Call(u32 function, u32 arguments);
     u32 readSifRegister(u32 id) const;
-    void writeSifRegister(u32 id, u32 value);
-    s32 writeFile(u32 argument);
+    u32 writeSifRegister(u32 id, u32 value);
 
     void publishTimers();
     void raiseFieldInterrupts();
     void queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32 cause);
     void makeReadyAndPreempt(usize id);
     void blockCurrentAndDispatch(WaitType type);
-    bool deliverDeferredSignals();
     SyscallResult dispatchNext();
     SyscallResult rescheduleIfWanted(bool interruptContext);
     void loadThread(usize id);
@@ -138,7 +141,9 @@ private:
     ThreadTable mThreads;
     SemaphoreTable mSemaphores;
     AlarmTable mAlarms;
-    Hardware mHardware;
+    Mmio mMmio;
+    std::string mOutput;
+    Sif mSif{mMemory, mMmio.sbus(), mOutput};
 
     u32 mHandlerCount = 0;
     u32 mRootThread = 0;
@@ -172,15 +177,10 @@ private:
     };
     std::optional<SyscallReturn> mSyscallReturn;
 
-    // A transfer completes through an interrupt, so the waiter has to block
-    // first and be woken afterwards.
-    std::vector<s32> mDeferredSignals;
-
-    std::map<u32, u32> mSifRegisters;
+    std::array<u32, 0x20> mSifRegisters = {};
     u32 mDmaTransferId = 0;
     std::vector<GuestCall> mPendingCalls;
 
-    std::string mOutput;
 };
 
 }  // namespace uee

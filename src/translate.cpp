@@ -922,8 +922,10 @@ private:
             if (!inlineSlot) {
                 return stepAt(pc + 4, depth);
             }
-            return inlineSlot->empty() ? std::string{}
-                                       : annotate(*inlineSlot, pc + 4, *delayed, depth) + "\n";
+            if (inlineSlot->empty()) {
+                return std::string{};
+            }
+            return annotate(*inlineSlot, pc + 4, *delayed, depth) + "  (delay slot)\n";
         };
         const bool slotTransfers = delaySlotTransfers(pc);
 

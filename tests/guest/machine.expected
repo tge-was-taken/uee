@@ -1,0 +1,11 @@
+-- TEST BEGIN
+memory size: 02000000
+machine type: ps bit was 0, now 1
+heap sized: 1
+heap to stack: 1
+heap restored: 1
+osd round trip: 5aa53cc3
+flush: 0 0 0 0
+prid nonzero: 1
+threads alive: 1
+-- TEST END

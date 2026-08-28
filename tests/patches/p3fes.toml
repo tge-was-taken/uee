@@ -1,0 +1,8 @@
+# SLUS_216.21, md5 9074ba25f5a100940ed233c9f8f675ab.
+#
+# H_Dbprt_FmtLog @ 0x1052b0 formats into the sLogs ring that H_Dbprt_DrawLogs
+# draws on screen, and never reaches the console. Tail call scePrintf @ 0x505e48
+# instead, which takes the same varargs and ends at the kernel TTY.
+[[patch]]
+address = 0x1052b0
+words = [0x08141792, 0x00000000]

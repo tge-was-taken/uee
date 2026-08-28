@@ -1,0 +1,15 @@
+-- TEST BEGIN
+main: prio was valid 1, now 40
+swap: returns previous 1
+thid 0 is current: 1
+prio 0x80: -1
+prio 0x7f: 1
+create prio 0: 1
+create: initial 50, current 50
+dormant change: -1
+preempt: mW
+rotate 0x80: -1
+rotate 60: 1
+rotated: BA
+prio 0 ran: H
+-- TEST END

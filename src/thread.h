@@ -1,7 +1,7 @@
 #pragma once
 
 #include "queue.h"
-#include "ee_context.h"
+#include "thread_context.h"
 #include "types.h"
 
 #include <vector>
@@ -51,7 +51,7 @@ struct ThreadControlBlock {
     u32 rootFunction = 0;
     u32 heapEnd = 0;
 
-    EeContext saved;
+    ThreadContext saved;
 };
 
 class ThreadTable {
@@ -86,7 +86,7 @@ public:
 private:
     usize indexOf(const Link* node) const;
 
-    // Each block carries a full EeContext, so the table lives on the heap.
+    // Each block carries a whole register file, so the table lives on the heap.
     std::vector<ThreadControlBlock> mThreads;
     std::vector<Link> mReadyQueue;
     Link mFreeList;

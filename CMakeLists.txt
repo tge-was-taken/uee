@@ -15,6 +15,12 @@ FetchContent_Declare(spdlog
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(spdlog)
 
+FetchContent_Declare(tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG v3.4.0
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(tomlplusplus)
+
 FetchContent_Declare(minicoro
     GIT_REPOSITORY https://github.com/edubart/minicoro.git
     GIT_TAG 02dad0f8b7cbb12fe6e216ae7a76db15ca55cd7b
@@ -38,14 +44,21 @@ add_library(uee
     src/semaphores.cpp
     src/timers.cpp
     src/alarm.cpp
-    src/hardware.cpp
+    src/mmio.cpp
     src/interrupts.cpp
     src/syscall_table.cpp
     src/syscall_stubs.cpp
+    src/sbus.cpp
+    src/dmac.cpp
     src/sif.cpp
+    src/iop_fileio.cpp
+    src/iop_loadfile.cpp
+    src/iop_cdvdfsv.cpp
+    src/disc.cpp
+    src/patches.cpp
     src/run.cpp)
 target_include_directories(uee PUBLIC src)
-target_link_libraries(uee PUBLIC minicoro)
+target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus)
 
 enable_testing()
 
@@ -113,7 +126,8 @@ find_program(EE_GCC mips64r5900el-ps2-elf-gcc
              HINTS $ENV{PS2DEV}/ee/bin /usr/local/ps2dev/ee/bin)
 if(EE_GCC AND EXISTS "$ENV{PS2SDK}/ee/startup/linkfile")
     set(PS2SDK $ENV{PS2SDK})
-    foreach(guest alarm thread_sema coverage degrade)
+    foreach(guest alarm thread_sema coverage degrade
+                  delay priority thread_state sema intc sif_regs syscall_hook machine)
         set(elf ${CMAKE_CURRENT_BINARY_DIR}/guest/${guest}.elf)
         add_custom_command(OUTPUT ${elf}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/guest
@@ -123,6 +137,7 @@ if(EE_GCC AND EXISTS "$ENV{PS2SDK}/ee/startup/linkfile")
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/${guest}.c
                     -o ${elf} -lkernel -lc -lkernel
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/${guest}.c
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/syscall.h
             COMMENT "Building guest test ${guest}")
         add_custom_target(guest_${guest} ALL DEPENDS ${elf})
         add_test(NAME guest.${guest}

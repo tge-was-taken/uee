@@ -16,8 +16,7 @@ std::set<std::string>& reported() {
 
 void reportStub(const std::string& name) {
     if (reported().insert(name).second) {
-        std::fprintf(stderr, "uee: %s is answered without the subsystem behind it\n",
-                     name.c_str());
+        std::fprintf(stderr, "STUB: %s\n", name.c_str());
     }
 }
 

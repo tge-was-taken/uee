@@ -1,0 +1,27 @@
+-- TEST BEGIN
+dormant: status 10
+suspend dormant: -1
+wakeup dormant: -1
+resume dormant: -1
+ready: status 02
+suspend ready: 1, status 08
+wakeup suspended: 1, status 08
+banked wakeups: 1
+cancel wakeup: 1, again 0
+resume suspended: 1, status 02
+resume ready: -1
+sleeping: status 04, waitType 1
+suspend waiting: 1, status 0c
+resume waiting: 1, status 04
+wakeup sleeper: 1
+sleeper returned own id: 1, ran 1
+sema wait: status 04, waitType 2, waitId 1
+wakeup sema waiter: 1, status 04
+wakeup self: -1
+resume self: -1
+suspend id 0: -1
+suspend id 256: -1
+refer null: 01
+refer thid 0: 01
+released: status 02
+-- TEST END
