@@ -269,10 +269,14 @@ inline Rounded rsqrt(u32 a, u32 b) {
     if (root == 0.0) {
         return {sign | kLargest, false, false};
     }
+    const f64 reciprocal = 1.0 / root;
+    const f64 reciprocalResidual = std::fma(-reciprocal, root, 1.0);
+    const u32 scale = pack(Wide{reciprocal, reciprocalResidual / root}, Rounding::Nearest).bits;
+    const f64 factor = widen(scale);
     const f64 numerator = std::fabs(widen(a));
-    const f64 quotient = numerator / root;
-    const f64 residual = std::fma(-quotient, root, numerator);
-    Rounded result = pack(Wide{quotient, residual / root}, Rounding::Truncate);
+    const f64 product = numerator * factor;
+    const f64 residual = std::fma(numerator, factor, -product);
+    Rounded result = pack(Wide{product, residual}, Rounding::Truncate);
     result.bits |= sign;
     return result;
 }

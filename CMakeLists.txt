@@ -34,7 +34,7 @@ add_library(uee
     src/instruction.cpp
     src/translate.cpp
     src/interpreter.cpp
-    src/vu0.cpp
+    src/vu.cpp
     src/vu0_interpreter.cpp
     src/fpu_interpreter.cpp
     src/memory.cpp
@@ -56,6 +56,9 @@ add_library(uee
     src/iop_cdvdfsv.cpp
     src/disc.cpp
     src/patches.cpp
+    src/vif.cpp
+    src/gif.cpp
+    src/vu_micro.cpp
     src/run.cpp)
 target_include_directories(uee PUBLIC src)
 target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus)
@@ -86,13 +89,16 @@ add_executable(translate_elf tests/translate_elf.cpp)
 target_link_libraries(translate_elf PRIVATE uee spdlog::spdlog)
 
 set(AUTOTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps2autotests/tests)
-file(GLOB AUTOTEST_ELFS
-     ${AUTOTEST_DIR}/cpu/ee/*.elf
-     ${AUTOTEST_DIR}/cpu/ee_cop0/*.elf
-     ${AUTOTEST_DIR}/cpu/ee_fpu/*.elf
-     ${AUTOTEST_DIR}/cpu/ee_simd/*.elf
-     ${AUTOTEST_DIR}/cpu/vu0_macro/*.elf
-    ${AUTOTEST_DIR}/kernel/ee/thread/*.elf)
+# Every vendored ELF that comes with recorded output, so a test category cannot
+# be left unrun by forgetting to name it here.
+file(GLOB_RECURSE AUTOTEST_CANDIDATES ${AUTOTEST_DIR}/*.elf)
+set(AUTOTEST_ELFS)
+foreach(elf ${AUTOTEST_CANDIDATES})
+    string(REGEX REPLACE "\\.elf$" ".expected" expected ${elf})
+    if(EXISTS ${expected})
+        list(APPEND AUTOTEST_ELFS ${elf})
+    endif()
+endforeach()
 foreach(elf ${AUTOTEST_ELFS})
     file(RELATIVE_PATH relative ${AUTOTEST_DIR} ${elf})
     string(REGEX REPLACE "\\.elf$" "" relative ${relative})

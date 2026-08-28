@@ -33,6 +33,9 @@ struct GuestCall {
     u32 argument = 0;
     u32 secondArgument = 0;
     u32 thirdArgument = 0;
+    // A handler in an interrupt chain, which a negative return cancels the
+    // rest of.
+    bool inChain = false;
 };
 
 class Kernel {
@@ -48,6 +51,9 @@ public:
     // The guest callback an RPC reply or an expired alarm owes its caller, which
     // the run loop has to execute before the guest resumes.
     std::optional<GuestCall> takePendingCall();
+    // What the guest call returned, which decides whether the rest of its chain
+    // still runs.
+    void completePendingCall(u32 result);
 
     // Runs the handler chain for any interrupt the processor is willing to take.
     void deliverInterrupts();

@@ -311,7 +311,8 @@ std::optional<std::string> emitOne(Instruction insn) {
         case Op::qmtc2_ni:
             return std::format("qmtc2(ee.cpu, ee.vu0, {}, {});", r(rt), insn.vs());
         case Op::cfc2_ni: return std::format("cfc2(ee.cpu, ee.vu0, {}, {});", r(rt), rd);
-        case Op::ctc2_ni: return std::format("ctc2(ee.cpu, ee.vu0, {}, {});", r(rt), rd);
+        case Op::ctc2_ni:
+            return std::format("ctc2(ee.cpu, ee, m.vu1(), mem, {}, {});", r(rt), rd);
 
         case Op::lb: return access("lb", rt, rs, simm);
         case Op::lbu: return access("lbu", rt, rs, simm);
@@ -393,8 +394,9 @@ std::optional<std::string> emitOne(Instruction insn) {
             return std::format("vopmsub(ee.vu0, 0x{:x}u, {}, {}, {});", insn.dest(), insn.vd(),
                                insn.vs(), insn.vt());
 
-        case Op::vcallms: return std::format("vcallms({});", insn.imm15());
-        case Op::vcallmsr: return std::string{"vcallmsr(ee.vu0);"};
+        case Op::vcallms:
+            return std::format("vcallms(ee.vu0, mem, {});", insn.imm15());
+        case Op::vcallmsr: return std::string{"vcallmsr(ee.vu0, mem);"};
 
         case Op::vnop:
         case Op::vwaitq:

@@ -14,12 +14,14 @@ Memory::Memory(std::vector<Region> regions, SegmentMirror mirror)
 Memory makeMainMemory() {
     std::vector<Region> regions;
     regions.push_back({0, std::vector<u8>(kMainRamSize)});
-    regions.push_back({kHardwareBase, std::vector<u8>(kHardwareSize)});
+    regions.push_back({kMmioBase, std::vector<u8>(kMmioSize)});
     regions.push_back({kScratchpadBase, std::vector<u8>(kScratchpadSize)});
     regions.push_back({kVu0MicroBase, std::vector<u8>(kVu0MemorySize)});
     regions.push_back({kVu0DataBase, std::vector<u8>(kVu0MemorySize)});
+    regions.push_back({kVu1MicroBase, std::vector<u8>(kVu1MemorySize)});
+    regions.push_back({kVu1DataBase, std::vector<u8>(kVu1MemorySize)});
     regions.push_back({kGsPrivBase, std::vector<u8>(kGsPrivSize)});
-    return Memory{std::move(regions), {kMirrorLimit, kPhysicalMask}};
+    return Memory{std::move(regions), {true}};
 }
 
 }  // namespace uee

@@ -19,6 +19,7 @@ enum class StopReason {
     UnknownSyscall,
     UnmappedAccess,
     Deadlocked,
+    WentIdle,
 };
 
 struct Stop {

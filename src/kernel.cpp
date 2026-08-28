@@ -88,7 +88,7 @@ constexpr u32 kSoftwareRegisters = 0x20;
 
 Kernel::Kernel(EeContext& ctx, Memory& memory) : mContext(ctx), mMemory(memory) {
     mMemory.attach(&mMmio);
-    mMmio.attach(mMemory);
+    mMmio.attach(mMemory, mContext.cpu);
     installSyscallTable(mMemory);
 
     // The guest starts with the processor as the ROM's boot leaves it: taking
@@ -341,7 +341,7 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
 
         case Syscall::AddIntcHandler:
             returnValue(static_cast<u32>(
-                addIntcHandler(arg(0), arg(1), static_cast<s32>(arg(2)), 0)));
+                addIntcHandler(arg(0), arg(1), static_cast<s32>(arg(2)), arg(3))));
             return SyscallResult::Handled;
 
         case Syscall::AddDmacHandler:
@@ -1241,7 +1241,7 @@ s32 Kernel::enableDmac(u32 channel, bool enable) {
 void Kernel::queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32 cause) {
     for (const IntrHandler* handler : chain) {
         if (handler->state == handler_state::kUser && handler->func != 0) {
-            mPendingCalls.push_back(GuestCall{handler->func, cause, handler->argument, 0});
+            mPendingCalls.push_back(GuestCall{handler->func, cause, handler->argument, 0, true});
         }
     }
 }
@@ -1431,6 +1431,9 @@ void Kernel::loadThread(usize id) {
         incoming.saved.gpr[kReturnRegister].lo = static_cast<u64>(static_cast<s64>(-1));
     }
     incoming.saved.loadInto(mContext);
+    // CPCOND0 is driven by the DMAC, not owned by the thread whose registers
+    // just came back, so it is restated rather than restored.
+    mMmio.refreshCondition();
     mContext.cpu.pc = incoming.resumePc;
 }
 
@@ -1456,6 +1459,15 @@ bool Kernel::resumeFromSyscallHandler() {
     mContext.cpu.write64(kReturnAddress, saved.returnAddress);
     mContext.cpu.pc = saved.resumePc;
     return true;
+}
+
+void Kernel::completePendingCall(u32 result) {
+    if (static_cast<s32>(result) >= 0) {
+        return;
+    }
+    while (!mPendingCalls.empty() && mPendingCalls.front().inChain) {
+        mPendingCalls.erase(mPendingCalls.begin());
+    }
 }
 
 std::optional<GuestCall> Kernel::takePendingCall() {

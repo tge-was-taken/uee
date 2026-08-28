@@ -20,6 +20,7 @@ Status Interpreter::execute(Instruction insn) {
     cpu.pc = pc + 4;
     mDelaySlot = false;
     mBranchTaken = false;
+    mBranchYields = false;
     countPerformanceEvents(cpu, 1);
 
     const auto branchIf = [&](bool taken) {
@@ -31,6 +32,13 @@ Status Interpreter::execute(Instruction insn) {
         cpu.pc = taken ? target : pc + 8;
         mDelaySlot = taken;
         mBranchTaken = taken;
+    };
+    // Found in a delay slot, a coprocessor branch hands its target on to the
+    // slot after it rather than committing there and then, so a run of them
+    // ends on the last. The integer branches commit where they are.
+    const auto coprocessorBranchIf = [&](bool taken) {
+        branchIf(taken);
+        mBranchYields = taken;
     };
     const auto jumpTo = [&](u32 destination) {
         cpu.pc = destination;
@@ -235,9 +243,9 @@ Status Interpreter::execute(Instruction insn) {
         case Op::bltzall: linkAndBranchLikelyIf(bltzTaken(cpu, rs)); break;
         case Op::bgezal: linkAndBranchIf(bgezTaken(cpu, rs)); break;
         case Op::bgezall: linkAndBranchLikelyIf(bgezTaken(cpu, rs)); break;
-        case Op::bc1f: branchIf(!bc1tTaken(ee.fpu)); break;
+        case Op::bc1f: coprocessorBranchIf(!bc1tTaken(ee.fpu)); break;
         case Op::bc1fl: branchLikelyIf(!bc1tTaken(ee.fpu)); break;
-        case Op::bc1t: branchIf(bc1tTaken(ee.fpu)); break;
+        case Op::bc1t: coprocessorBranchIf(bc1tTaken(ee.fpu)); break;
         case Op::bc1tl: branchLikelyIf(bc1tTaken(ee.fpu)); break;
         case Op::j: jumpTo(jumpTarget(insn, pc)); break;
         case Op::jal:
@@ -335,7 +343,7 @@ Status Interpreter::execute(Instruction insn) {
         case Op::qmfc2_ni: qmfc2(cpu, ee.vu0, rt, insn.vs()); break;
         case Op::qmtc2_ni: qmtc2(cpu, ee.vu0, rt, insn.vs()); break;
         case Op::cfc2_ni: cfc2(cpu, ee.vu0, rt, rd); break;
-        case Op::ctc2_ni: ctc2(cpu, ee.vu0, rt, rd); break;
+        case Op::ctc2_ni: ctc2(cpu, ee, vu1, memory, rt, rd); break;
 
         default:
             if (!executeVu0(ee.vu0, memory, slot.op, insn)) {

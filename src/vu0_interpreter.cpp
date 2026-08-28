@@ -1,11 +1,11 @@
 #include "vu0_interpreter.h"
 
 #include "instruction.h"
-#include "vu0_handlers.h"
+#include "vu_handlers.h"
 
 namespace uee {
 
-bool executeVu0(Vu0& vu0, Memory& memory, Op op, Instruction insn) {
+bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
     const u32 dest = insn.dest();
 
     switch (op) {
@@ -31,8 +31,8 @@ bool executeVu0(Vu0& vu0, Memory& memory, Op op, Instruction insn) {
     case Op::vsqrt: vsqrt(vu0, insn.vt(), insn.ftf()); break;
     case Op::vrsqrt: vrsqrt(vu0, insn.vs(), insn.fsf(), insn.vt(), insn.ftf()); break;
 
-    case Op::vcallms: vcallms(insn.imm15()); break;
-    case Op::vcallmsr: vcallmsr(vu0); break;
+    case Op::vcallms: vcallms(vu0, memory, insn.imm15()); break;
+    case Op::vcallmsr: vcallmsr(vu0, memory); break;
 
     case Op::vopmula: vopmula(vu0, dest, insn.vs(), insn.vt()); break;
     case Op::vopmsub: vopmsub(vu0, dest, insn.vd(), insn.vs(), insn.vt()); break;

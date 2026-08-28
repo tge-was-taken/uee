@@ -1,5 +1,8 @@
 #include "dmac.h"
 
+#include "gif.h"
+#include "vif.h"
+
 #include "interrupts.h"
 #include "memory.h"
 #include "syscall_stubs.h"
@@ -48,6 +51,14 @@ constexpr u32 kChainMode = 1;
 
 constexpr u32 kQuadwordBytes = 16;
 
+constexpr usize kVif0 = 0;
+constexpr usize kVif1 = 1;
+constexpr usize kGif = 2;
+
+constexpr u32 kInterleaveMode = 2;
+constexpr u32 kSkipQuadword = 0x1000E030;
+constexpr u32 kScratchpadQuadwordMask = 0x3FF0;
+
 constexpr u32 kScratchpadBit = 0x80000000;
 constexpr u32 kScratchpadWindow = 0x70000000;
 
@@ -92,12 +103,18 @@ u32 resolve(u32 address) {
 
 }  // namespace
 
-void Dmac::attach(Memory& memory, Interrupts& interrupts) {
+void Dmac::attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1) {
     mMemory = &memory;
+    mGif = &gif;
+    mVif[0] = &vif0;
+    mVif[1] = &vif1;
     mInterrupts = &interrupts;
 }
 
 std::optional<u32> Dmac::read(u32 address) const {
+    if (address == kSkipQuadword) {
+        return mSkipQuadword;
+    }
     if (address == dmac::kEnableRead || address == dmac::kEnableWrite) {
         return mEnable;
     }
@@ -121,6 +138,10 @@ std::optional<u32> Dmac::read(u32 address) const {
 }
 
 bool Dmac::write(u32 address, u32 value) {
+    if (address == kSkipQuadword) {
+        mSkipQuadword = value;
+        return true;
+    }
     if (address == dmac::kEnableWrite) {
         const bool resumed = (mEnable & dmac::kSuspended) != 0 &&
                              (value & dmac::kSuspended) == 0;
@@ -146,12 +167,18 @@ bool Dmac::write(u32 address, u32 value) {
                     start(i);
                 }
                 return true;
-            case kAddress: mChannels[i].address = value; return true;
+            case kAddress:
+                mChannels[i].address = (i == kFromScratchpad || i == kToScratchpad)
+                                           ? (value & ~kScratchpadBit)
+                                           : value;
+                return true;
             case kQuadwords: mChannels[i].quadwords = value; return true;
             case kTagAddress: mChannels[i].tagAddress = value; return true;
             case kReturn0: mChannels[i].returnAddress[0] = value; return true;
             case kReturn1: mChannels[i].returnAddress[1] = value; return true;
-            case kScratchpadAddress: mChannels[i].scratchpadAddress = value; return true;
+            case kScratchpadAddress:
+                mChannels[i].scratchpadAddress = value & kScratchpadQuadwordMask;
+                return true;
             default: return false;
         }
     }
@@ -174,6 +201,8 @@ void Dmac::start(usize index) {
     const u32 mode = (channel.control >> kModeShift) & kModeMask;
     if (mode == kChainMode) {
         followChain(index);
+    } else if (mode == kInterleaveMode) {
+        interleave(index);
     } else if (mode == kNormalMode) {
         transfer(index, channel.address, channel.quadwords);
         channel.address += channel.quadwords * kQuadwordBytes;
@@ -187,18 +216,62 @@ void Dmac::start(usize index) {
 }
 
 // Only the scratchpad channels have somewhere to put the data.
+// Interleave walks a run of quadwords then steps the address over a gap, which
+// is how the scratchpad channels move a rectangle out of a larger image.
+// Interleave walks a run of quadwords then steps over a gap, which is how the
+// scratchpad channels move a rectangle out of a larger image. The walking
+// cursor is local because the channel's own address is left where it started.
+void Dmac::interleave(usize index) {
+    Channel& channel = mChannels[index];
+    const u32 run = (mSkipQuadword >> 16) & 0xFFu;
+    const u32 skip = mSkipQuadword & 0xFFu;
+    if (run == 0) {
+        transfer(index, channel.address, channel.quadwords);
+        channel.address += channel.quadwords * kQuadwordBytes;
+        channel.quadwords = 0;
+        return;
+    }
+    for (u32 moved = 0; channel.quadwords != 0; --channel.quadwords) {
+        transfer(index, channel.address, 1);
+        channel.address += kQuadwordBytes;
+        if (++moved == run) {
+            moved = 0;
+            channel.address += skip * kQuadwordBytes;
+        }
+    }
+}
+
 void Dmac::transfer(usize index, u32 address, u32 quadwords) {
+    if (index == kVif0 || index == kVif1 || index == kGif) {
+        u32 source = resolve(address);
+        for (u32 moved = 0; moved < quadwords; ++moved, source += kQuadwordBytes) {
+            const u64 low = mMemory->read64(source);
+            const u64 high = mMemory->read64(source + 8);
+            if (index == kGif) {
+                mGif->writeQuadword(low, high);
+            } else {
+                mVif[index]->writeQuadword(low, high);
+            }
+        }
+        return;
+    }
     if (index != kFromScratchpad && index != kToScratchpad) {
         return;
     }
     Channel& channel = mChannels[index];
-    const u32 scratchpad = kScratchpadWindow | (channel.scratchpadAddress & 0x3FFFu);
-    const u32 from = index == kFromScratchpad ? scratchpad : resolve(address);
-    const u32 to = index == kFromScratchpad ? resolve(address) : scratchpad;
-    for (u32 i = 0; i < quadwords * kQuadwordBytes; i += 8) {
-        mMemory->write64(to + i, mMemory->read64(from + i));
+    u32 main = resolve(address);
+    for (u32 moved = 0; moved < quadwords; ++moved) {
+        const u32 scratchpad =
+            kScratchpadWindow | (channel.scratchpadAddress & kScratchpadQuadwordMask);
+        const u32 from = index == kFromScratchpad ? scratchpad : main;
+        const u32 to = index == kFromScratchpad ? main : scratchpad;
+        for (u32 i = 0; i < kQuadwordBytes; i += 8) {
+            mMemory->write64(to + i, mMemory->read64(from + i));
+        }
+        main += kQuadwordBytes;
+        channel.scratchpadAddress =
+            (channel.scratchpadAddress + kQuadwordBytes) & kScratchpadQuadwordMask;
     }
-    channel.scratchpadAddress += quadwords * kQuadwordBytes;
 }
 
 // The tag lands in the upper half of the control register, where the guest
@@ -216,19 +289,28 @@ void Dmac::followChain(usize index) {
             case kReference:
             case kReferenceStalled:
                 transfer(index, resolve(tag.address), tag.quadwords);
+                channel.address = resolve(tag.address) + tag.quadwords * kQuadwordBytes;
                 channel.tagAddress = follow;
                 break;
             case kCount:
+                transfer(index, follow, tag.quadwords);
+                channel.address = follow + tag.quadwords * kQuadwordBytes;
+                channel.tagAddress = channel.address;
+                break;
+            // Unlike the other terminators, end leaves TADR on itself rather
+            // than past it.
             case kEnd:
                 transfer(index, follow, tag.quadwords);
-                channel.tagAddress = follow + tag.quadwords * kQuadwordBytes;
+                channel.address = follow + tag.quadwords * kQuadwordBytes;
                 break;
             case kNext:
                 transfer(index, follow, tag.quadwords);
+                channel.address = follow + tag.quadwords * kQuadwordBytes;
                 channel.tagAddress = resolve(tag.address);
                 break;
             case kCall:
                 transfer(index, follow, tag.quadwords);
+                channel.address = follow + tag.quadwords * kQuadwordBytes;
                 channel.returnAddress[channel.returnDepth] =
                     follow + tag.quadwords * kQuadwordBytes;
                 channel.returnDepth = (channel.returnDepth + 1) % dmac::kReturnDepth;
@@ -236,6 +318,7 @@ void Dmac::followChain(usize index) {
                 break;
             case kReturn:
                 transfer(index, follow, tag.quadwords);
+                channel.address = follow + tag.quadwords * kQuadwordBytes;
                 channel.returnDepth = (channel.returnDepth + dmac::kReturnDepth - 1) % dmac::kReturnDepth;
                 channel.tagAddress = channel.returnAddress[channel.returnDepth];
                 break;
@@ -247,7 +330,6 @@ void Dmac::followChain(usize index) {
             reportStub("dma tag refs walked as ref");
         }
 
-        channel.address = channel.tagAddress;
         channel.quadwords = 0;
         const bool ends = tag.id == kReferenceAndEnd || tag.id == kEnd;
         const bool interrupts = tag.interrupt && (channel.control & kTagInterrupt) != 0;

@@ -55,6 +55,19 @@ bool oracleFollowsHost(Op op) {
         case Op::madd_s: case Op::msub_s: case Op::madda_s: case Op::msuba_s:
         case Op::c_eq_s: case Op::c_lt_s: case Op::c_le_s:
         case Op::ctc1:
+        // The R register masks to its mantissa on hardware; these vectors keep
+        // the exponent the unit only applies when it reads the register.
+        case Op::ctc2_ni:
+        // The vector adder loses whatever shifts past its width, which these
+        // vectors keep by adding at full precision and rounding once.
+        case Op::vadd: case Op::vaddx: case Op::vaddy: case Op::vaddz:
+        case Op::vaddw: case Op::vaddq: case Op::vaddi:
+        case Op::vsub: case Op::vsubx: case Op::vsuby: case Op::vsubz:
+        case Op::vsubw: case Op::vsubq: case Op::vsubi:
+        case Op::vadda: case Op::vaddax: case Op::vadday: case Op::vaddaz:
+        case Op::vaddaw: case Op::vaddaq: case Op::vaddai:
+        case Op::vsuba: case Op::vsubax: case Op::vsubay: case Op::vsubaz:
+        case Op::vsubaw: case Op::vsubaq: case Op::vsubai:
             return true;
         default:
             return false;
@@ -226,7 +239,7 @@ Reg128 read(const EeContext& ee, std::string_view file, u32 index) {
         return ee.vu0.acc;
     }
     if (file == "q") {
-        return Reg128{ee.vu0.vi[Vu0::kQ], 0};
+        return Reg128{ee.vu0.vi[Vu::kQ], 0};
     }
     if (file == "sa") {
         return Reg128{ee.cpu.sa, 0};
@@ -256,11 +269,11 @@ void setUp(EeContext& ee, const Case& k) {
     ee.fpu.fcr31 = k.fcr31;
     ee.fpu.acc = k.facc;
     ee.vu0.acc = k.acc;
-    ee.vu0.vi[Vu0::kQ] = k.q;
-    ee.vu0.vi[Vu0::kP] = k.p;
-    ee.vu0.vi[Vu0::kStatus] = k.vstatus;
-    ee.vu0.vi[Vu0::kMac] = k.vmac;
-    ee.vu0.vi[Vu0::kClip] = k.vclip;
+    ee.vu0.vi[Vu::kQ] = k.q;
+    ee.vu0.vi[Vu::kP] = k.p;
+    ee.vu0.vi[Vu::kStatus] = k.vstatus;
+    ee.vu0.vi[Vu::kMac] = k.vmac;
+    ee.vu0.vi[Vu::kClip] = k.vclip;
     ee.vu0.vf[insn.rd()] = k.vfs;
     ee.vu0.vf[insn.rt()] = k.vft;
     ee.vu0.vf[k.fd & 31] = k.vfd;
@@ -288,7 +301,7 @@ void setUp(EeContext& ee, const Case& k) {
         } else if (ch.file == "acc") {
             ee.vu0.acc = ch.before;
         } else if (ch.file == "q") {
-            ee.vu0.vi[Vu0::kQ] = static_cast<u32>(ch.before.lo);
+            ee.vu0.vi[Vu::kQ] = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "sa") {
             ee.cpu.sa = static_cast<u32>(ch.before.lo);
         }

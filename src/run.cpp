@@ -14,6 +14,7 @@ namespace uee {
 namespace {
 
 constexpr u32 kArgumentRegister = 4;
+constexpr u32 kResultRegister = 2;
 constexpr u32 kReturnAddressRegister = 31;
 
 constexpr u32 kCallbackReturn = 0xF0000000;
@@ -31,6 +32,7 @@ struct Step {
     std::optional<Stop> stop;
     bool hasDelaySlot = false;
     bool tookBranch = false;
+    bool branchYields = false;
 };
 
 // A stop leaves the pc on the instruction that caused it. The interpreter
@@ -73,7 +75,8 @@ Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) 
         return stopAt(cpu, {StopReason::UnmappedAccess, pc,
                             std::format("{} touched {:08x}", insn, *address)});
     }
-    return {std::nullopt, interpreter.hasDelaySlot(), interpreter.tookBranch()};
+    return {std::nullopt, interpreter.hasDelaySlot(), interpreter.tookBranch(),
+            interpreter.branchYieldsDelaySlot()};
 }
 
 // An interrupt handler runs on the context it interrupted, so while one is on
@@ -150,13 +153,21 @@ private:
 // and the R5900 lets the second transfer win rather than queueing both.
 Step runDelaySlot(Machine& machine, u32 pc) {
     R5900& cpu = machine.ee().cpu;
-    const u32 pending = cpu.pc;
-    cpu.pc = pc;
-    const Step step = stepOnce(machine.interpreter, machine.memory, machine.kernel, pc);
-    if (!step.tookBranch) {
-        cpu.pc = pending;
+    u32 pending = cpu.pc;
+    for (u32 slot = pc;; slot += 4) {
+        cpu.pc = slot;
+        const Step step = stepOnce(machine.interpreter, machine.memory, machine.kernel, slot);
+        if (step.stop || !step.tookBranch) {
+            if (!step.tookBranch) {
+                cpu.pc = pending;
+            }
+            return step;
+        }
+        if (!step.branchYields) {
+            return step;
+        }
+        pending = cpu.pc;
     }
-    return step;
 }
 
 Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
@@ -213,7 +224,9 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
             ++executed;
         }
 
-        if (auto call = kernel.takePendingCall()) {
+        // A nested run must not start a queued call of its own: chaining them
+        // that way would finish a handler chain in the reverse of its order.
+        if (idling == Idling::Allowed) if (auto call = kernel.takePendingCall()) {
             const EeContext caller = interpreter.ee;
             cpu.pc = call->function;
             cpu.write64(kArgumentRegister, call->argument);
@@ -223,10 +236,14 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
 
             const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit,
                                        Idling::Blocked);
+            kernel.completePendingCall(static_cast<u32>(cpu.gpr[kResultRegister].lo));
             if (stop.reason != StopReason::Returned) {
                 return stop;
             }
             interpreter.ee = caller;
+            // The handler can have readied the thread that gave up the
+            // processor to run it, and nothing else will pick that thread up.
+            kernel.dispatchAfterInterrupt();
         }
     }
 
@@ -253,6 +270,7 @@ std::optional<Stop> runIdle(Machine& machine, u64& executed, u64 instructionLimi
             cpu.write64(kReturnAddressRegister, kCallbackReturn);
             const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit,
                                        Idling::Blocked);
+            kernel.completePendingCall(static_cast<u32>(cpu.gpr[kResultRegister].lo));
             machine.ee() = caller;
             if (stop.reason != StopReason::Returned) {
                 return stop;
@@ -262,7 +280,7 @@ std::optional<Stop> runIdle(Machine& machine, u64& executed, u64 instructionLimi
     }
     if (kernel.isIdle()) {
         kernel.reportNoActiveThreads();
-        return Stop{StopReason::ReachedLimit, cpu.pc, {}};
+        return Stop{StopReason::WentIdle, cpu.pc, {}};
     }
     return std::nullopt;
 }
@@ -277,6 +295,7 @@ std::string_view nameOf(StopReason reason) {
         case StopReason::UnknownSyscall: return "unknown syscall";
         case StopReason::UnmappedAccess: return "unmapped access";
         case StopReason::Deadlocked: return "every thread is blocked";
+        case StopReason::WentIdle: return "the processor went idle with nothing left to wake it";
     }
     return "unknown";
 }

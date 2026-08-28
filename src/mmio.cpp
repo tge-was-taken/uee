@@ -4,7 +4,7 @@ namespace uee {
 namespace {
 
 // The ranges are disjoint, so an address decodes to one block.
-enum class Block { None, Timers, Dmac, Interrupts, Sbus };
+enum class Block { None, Timers, Dmac, Interrupts, Sbus, Gif, Vif0, Vif1 };
 
 struct Range {
     u32 base = 0;
@@ -15,11 +15,19 @@ struct Range {
 constexpr Range kRanges[] = {
     {0x10000000, 0x2000, Block::Timers},
     {0x10008000, 0x6000, Block::Dmac},
+    // The skip quadword register sits inside the interrupt window's span, so it
+    // is named first for the search to reach it.
+    {0x1000E030, 0x0004, Block::Dmac},
     {0x1000E000, 0x0100, Block::Interrupts},
     {0x1000F000, 0x0100, Block::Interrupts},
     {0x1000F200, 0x0100, Block::Sbus},
     {0x1000F520, 0x0004, Block::Dmac},
     {0x1000F590, 0x0004, Block::Dmac},
+    {0x10003000, 0x0100, Block::Gif},
+    {0x10003800, 0x0180, Block::Vif0},
+    {0x10003C00, 0x0180, Block::Vif1},
+    {0x10004000, 0x1000, Block::Vif0},
+    {0x10005000, 0x1000, Block::Vif1},
 };
 
 constexpr Block blockOf(u32 address) {
@@ -39,20 +47,32 @@ std::optional<u32> Mmio::read(u32 address) const {
         case Block::Dmac: return mDmac.read(address);
         case Block::Interrupts: return mInterrupts.read(address);
         case Block::Sbus: return mSbus.read(address);
+        case Block::Gif: return mGif.read(address);
+        case Block::Vif0: return mVif[0].read(address);
+        case Block::Vif1: return mVif[1].read(address);
         case Block::None: return std::nullopt;
     }
     return std::nullopt;
 }
 
 bool Mmio::write(u32 address, u32 value) {
-    switch (blockOf(address)) {
-        case Block::Timers: return mTimers.write(address, value);
-        case Block::Dmac: return mDmac.write(address, value);
-        case Block::Interrupts: return mInterrupts.write(address, value);
-        case Block::Sbus: return mSbus.write(address, value);
-        case Block::None: return false;
+    const bool handled = [&] {
+        switch (blockOf(address)) {
+            case Block::Timers: return mTimers.write(address, value);
+            case Block::Dmac: return mDmac.write(address, value);
+            case Block::Interrupts: return mInterrupts.write(address, value);
+            case Block::Sbus: return mSbus.write(address, value);
+            case Block::Gif: return mGif.write(address, value);
+            case Block::Vif0: return mVif[0].write(address, value);
+            case Block::Vif1: return mVif[1].write(address, value);
+            case Block::None: return false;
+        }
+        return false;
+    }();
+    if (handled) {
+        refreshCondition();
     }
-    return false;
+    return handled;
 }
 
 }  // namespace uee

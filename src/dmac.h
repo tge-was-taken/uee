@@ -7,6 +7,9 @@
 
 namespace uee {
 
+class Gif;
+class Vif;
+
 class Memory;
 class Interrupts;
 
@@ -24,7 +27,7 @@ constexpr u32 kSuspended = 0x10000;
 // the start bit, so a channel is never seen busy.
 class Dmac {
 public:
-    void attach(Memory& memory, Interrupts& interrupts);
+    void attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1);
 
     std::optional<u32> read(u32 address) const;
     bool write(u32 address, u32 value);
@@ -41,11 +44,15 @@ private:
     };
 
     void start(usize index);
+    void interleave(usize index);
     void transfer(usize index, u32 address, u32 quadwords);
     void followChain(usize index);
 
     std::array<Channel, dmac::kChannels> mChannels;
     u32 mEnable = 0;
+    u32 mSkipQuadword = 0;
+    Gif* mGif = nullptr;
+    Vif* mVif[2] = {nullptr, nullptr};
     Memory* mMemory = nullptr;
     Interrupts* mInterrupts = nullptr;
 };

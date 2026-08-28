@@ -21,6 +21,7 @@ struct Machine {
     FunctionRunner functions = nullptr;
 
     EeContext& ee() const { return interpreter.ee; }
+    Vu& vu1() const { return interpreter.vu1; }
 };
 
 inline bool leave(EeContext& ee, u32 pc, u32 returnTo) {

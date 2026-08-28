@@ -22,12 +22,17 @@ public:
 
     bool hasDelaySlot() const { return mDelaySlot; }
     bool tookBranch() const { return mBranchTaken; }
+    bool branchYieldsDelaySlot() const { return mBranchYields; }
 
     EeContext ee;
+    // Not part of the context an interrupt saves: VU1 keeps running its own
+    // microprogram across one.
+    Vu vu1;
 
 private:
     Memory& mMemory;
     bool mDelaySlot = false;
+    bool mBranchYields = false;
     bool mBranchTaken = false;
 };
 

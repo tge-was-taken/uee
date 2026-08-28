@@ -64,6 +64,7 @@ public:
 
     void raiseIntc(u32 cause);
     void raiseDmac(u32 channel);
+    u32 readDStat() const { return mDStat; }
 
     // The lowest pending cause that is not masked, if any.
     std::optional<u32> pendingIntc() const;

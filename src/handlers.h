@@ -5,8 +5,10 @@
 #include "memory.h"
 #include "r5900.h"
 #include "types.h"
-#include "vu0.h"
-#include "vu0_handlers.h"
+#include "ee_context.h"
+#include "vu.h"
+#include "vu_micro.h"
+#include "vu_handlers.h"
 
 #include <bit>
 #include <limits>
@@ -1069,19 +1071,22 @@ inline void ctc1(R5900& cpu, Fpu& fpu, u32 rt, u32 fs) {
     fpu.writeControl(fs, low(cpu.gpr[rt]));
 }
 
-inline void qmfc2(R5900& cpu, const Vu0& vu0, u32 rt, u32 vs) {
+inline void qmfc2(R5900& cpu, const Vu& vu0, u32 rt, u32 vs) {
     cpu.write128(rt, vu0.readVf(vs));
 }
-inline void qmtc2(R5900& cpu, Vu0& vu0, u32 rt, u32 vs) {
+inline void qmtc2(R5900& cpu, Vu& vu0, u32 rt, u32 vs) {
     vu0.vf[vs] = cpu.gpr[rt];
 }
-inline void cfc2(R5900& cpu, const Vu0& vu0, u32 rt, u32 rd) {
+inline void cfc2(R5900& cpu, const Vu& vu0, u32 rt, u32 rd) {
     cpu.write32(rt, vu0.vi[rd]);
 }
-inline void ctc2(R5900& cpu, Vu0& vu0, u32 rt, u32 rd) {
-    // R holds a 23-bit mantissa and reads back with the exponent fixed
-    vu0.vi[rd] =
-        (rd == Vu0::kR) ? (0x3F800000u | (low(cpu.gpr[rt]) & 0x7FFFFFu)) : low(cpu.gpr[rt]);
+// Writing the second unit's start address is what launches it, so that one
+// register reaches past the file it lives in.
+inline void ctc2(R5900& cpu, EeContext& ee, Vu& vu1, Memory& memory, u32 rt, u32 rd) {
+    ee.vu0.writeControl(rd, low(cpu.gpr[rt]));
+    if (rd == Vu::kCmsar1) {
+        vu1.vi[Vu::kTpc] = VuMicro(vu1, memory, 1).run(ee.vu0.vi[Vu::kCmsar1]);
+    }
 }
 
 inline void lb(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
@@ -1114,7 +1119,7 @@ inline void lq(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
 inline void lwc1(R5900& cpu, Fpu& fpu, Memory& memory, u32 ft, u32 base, s32 offset) {
     fpu.fpr[ft] = memory.read32(effectiveAddress(cpu, base, offset));
 }
-inline void lqc2(R5900& cpu, Vu0& vu0, Memory& memory, u32 ft, u32 base, s32 offset) {
+inline void lqc2(R5900& cpu, Vu& vu0, Memory& memory, u32 ft, u32 base, s32 offset) {
     const u32 aligned = effectiveAddress(cpu, base, offset) & ~15u;
     vu0.vf[ft] = Reg128{memory.read64(aligned), memory.read64(aligned + 8)};
 }
@@ -1139,7 +1144,7 @@ inline void sq(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
 inline void swc1(R5900& cpu, const Fpu& fpu, Memory& memory, u32 ft, u32 base, s32 offset) {
     memory.write32(effectiveAddress(cpu, base, offset), fpu.fpr[ft]);
 }
-inline void sqc2(R5900& cpu, const Vu0& vu0, Memory& memory, u32 ft, u32 base, s32 offset) {
+inline void sqc2(R5900& cpu, const Vu& vu0, Memory& memory, u32 ft, u32 base, s32 offset) {
     const u32 aligned = effectiveAddress(cpu, base, offset) & ~15u;
     memory.write64(aligned, vu0.vf[ft].lo);
     memory.write64(aligned + 8, vu0.vf[ft].hi);
