@@ -1,6 +1,6 @@
 // CDVDFSV md5 89ba5280d919f5e8d20ee79b62dbe1c8.
 
-#include "iop_cdvdfsv.h"
+#include "iop_hle_cdvdfsv.h"
 
 #include "disc.h"
 #include "syscall_stubs.h"
@@ -54,11 +54,11 @@ constexpr s32 kNotFound = 0;
 
 }  // namespace
 
-IopCdvdfsv::IopCdvdfsv(Memory& memory) : mMemory(memory) {}
+IopHleCdvdfsv::IopHleCdvdfsv(Memory& memory) : mMemory(memory) {}
 
-std::span<const u32> IopCdvdfsv::serverIds() const { return kServerIds; }
+std::span<const u32> IopHleCdvdfsv::serverIds() const { return kServerIds; }
 
-s32 IopCdvdfsv::call(u32 serverId, const RpcCall& call) {
+s32 IopHleCdvdfsv::call(u32 serverId, const RpcCall& call) {
     switch (serverId) {
         case kInit:
             if (call.number == 0) {
@@ -92,7 +92,7 @@ s32 IopCdvdfsv::call(u32 serverId, const RpcCall& call) {
 }
 
 // CDVDFSV: CdvdNCmd01_Read @ 0x4d8. The named address is on the EE side.
-s32 IopCdvdfsv::read(u32 argument) {
+s32 IopHleCdvdfsv::read(u32 argument) {
     if (mDisc == nullptr) {
         reportStub("disc read with no disc");
         return -1;
@@ -116,7 +116,7 @@ s32 IopCdvdfsv::read(u32 argument) {
 }
 
 // CDVDFSV: CdSearchFile @ 0x2f0
-s32 IopCdvdfsv::search(u32 argument) {
+s32 IopHleCdvdfsv::search(u32 argument) {
     if (mDisc == nullptr) {
         reportStub("disc search with no disc");
         return kNotFound;

@@ -1,0 +1,17 @@
+-- TEST BEGIN
+memory size: 00200000
+free fits: 1
+largest fits: 1
+both allocated: 1
+ends differ: 1
+aligned: 1 1
+block size: 1
+block top: 1
+free: 0 0
+reused: 1
+took at least what was asked: 1
+gave it back: 1
+too large: 1
+free null: -1
+free unowned: -1
+-- TEST END

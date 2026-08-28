@@ -1,6 +1,6 @@
 // FILEIO md5 edf4a7d5624cb54db0cfa518d74c9559.
 
-#include "iop_fileio.h"
+#include "iop_hle_fileio.h"
 
 #include "syscall_stubs.h"
 
@@ -32,12 +32,12 @@ constexpr u32 kHeapBase = 0x00200000;
 
 }  // namespace
 
-IopFileio::IopFileio(Memory& memory, std::string& console)
+IopHleFileio::IopHleFileio(Memory& memory, std::string& console)
     : mMemory(memory), mConsole(console), mHeapEnd(kHeapBase) {}
 
-std::span<const u32> IopFileio::serverIds() const { return kServerIds; }
+std::span<const u32> IopHleFileio::serverIds() const { return kServerIds; }
 
-s32 IopFileio::call(u32 serverId, const RpcCall& call) {
+s32 IopHleFileio::call(u32 serverId, const RpcCall& call) {
     switch (serverId) {
         case kFileIo:
             switch (call.number) {
@@ -59,7 +59,7 @@ s32 IopFileio::call(u32 serverId, const RpcCall& call) {
 }
 
 // FILEIO: FileIoWrite @ 0x568
-s32 IopFileio::write(u32 argument) {
+s32 IopHleFileio::write(u32 argument) {
     const s32 descriptor = static_cast<s32>(mMemory.read32(argument + kDescriptor * 4));
     const u32 buffer = mMemory.read32(argument + kBuffer * 4);
     const u32 size = mMemory.read32(argument + kSize * 4);
@@ -77,7 +77,7 @@ s32 IopFileio::write(u32 argument) {
 }
 
 // FILEIO: IopHeapAlloc @ 0xe5c
-u32 IopFileio::allocate(u32 size) {
+u32 IopHleFileio::allocate(u32 size) {
     const u32 block = mHeapEnd;
     mHeapEnd += (size + 0xF) & ~0xFu;
     return block;

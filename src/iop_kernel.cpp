@@ -1,0 +1,1373 @@
+// Stands in for the resident IOP modules. A `<MODULE>: <name> @ <address>` tag
+// names the routine reimplemented below, in the modules split out under
+// ps2-split/work/ps2bios:
+//   SYSCLIB  md5 6e25fddccabe0cc00aaa52afd3149cff
+//   SYSMEM   md5 f313d3e9879b1d8886fb2353c816b9eb
+//   INTRMANI md5 2e57f684f325b787a93f9a5883930b3b
+//   THREADMAN md5 73902f937fcdc068825e9a6ac50a0355
+
+#include "iop_kernel.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <format>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+
+namespace uee {
+namespace {
+
+constexpr u32 kFirstArgumentRegister = 4;
+constexpr u32 kResultRegister = 2;
+constexpr u32 kStackRegister = 29;
+// o32 reserves stack slots for the register arguments as well.
+constexpr u32 kRegisterArguments = 4;
+
+constexpr u32 kBlockAlignment = 256;
+
+constexpr u32 kAllocFirst = 0;
+constexpr u32 kAllocLast = 1;
+constexpr u32 kAllocAddress = 2;
+
+constexpr u32 kFailed = 0xFFFFFFFFu;
+
+constexpr u32 kIllegalContext = static_cast<u32>(-100);
+constexpr u32 kNoMemory = static_cast<u32>(-400);
+constexpr u32 kIllegalAttr = static_cast<u32>(-401);
+constexpr u32 kIllegalEntry = static_cast<u32>(-402);
+constexpr u32 kIllegalPriority = static_cast<u32>(-403);
+constexpr u32 kIllegalStackSize = static_cast<u32>(-404);
+constexpr u32 kIllegalThid = static_cast<u32>(-406);
+constexpr u32 kUnknownThid = static_cast<u32>(-407);
+constexpr u32 kUnknownSemaid = static_cast<u32>(-408);
+constexpr u32 kIllegalMode = static_cast<u32>(-405);
+constexpr u32 kUnknownEventFlagId = static_cast<u32>(-409);
+constexpr u32 kEventFlagCondition = static_cast<u32>(-421);
+constexpr u32 kEventFlagPattern = static_cast<u32>(-423);
+
+// THREADMAN: PollEventFlag @ 0x2db0
+constexpr u32 kEventFlagModeMask = 0xFFFFFFEEu;
+constexpr u32 kEventFlagClear = 0x10;
+constexpr u32 kNotDormant = static_cast<u32>(-414);
+constexpr u32 kSemaZero = static_cast<u32>(-419);
+constexpr u32 kSemaOverflow = static_cast<u32>(-420);
+
+// THREADMAN: CreateThread @ 0xc5c
+constexpr u32 kThreadAttrMask = 0x1CFFFFF7u;
+constexpr s32 kLowestPriority = 126;
+constexpr u32 kSmallestStack = 0x130;
+
+// THREADMAN: CreateSema @ 0x3060
+constexpr u32 kSemaAttrMask = 0xFFFFFEFEu;
+
+constexpr u64 kTicksPerMicrosecondNumerator = 36864;
+constexpr u64 kTicksPerMicrosecondDenominator = 1000;
+
+constexpr u32 kThreadReturn = 0x0FFFFFE0u;
+
+// LOADCORE starts a module entry at this priority.
+constexpr s32 kModulePriority = 64;
+
+constexpr usize kMaxThreads = 64;
+constexpr usize kMaxSemaphores = 64;
+constexpr usize kMaxEventFlags = 64;
+constexpr u32 kIllegalIntrCode = static_cast<u32>(-101);
+constexpr u32 kCpuDisabled = static_cast<u32>(-102);
+constexpr u32 kFoundHandler = static_cast<u32>(-104);
+constexpr u32 kNotFoundHandler = static_cast<u32>(-105);
+
+// INTRMANI: RegisterIntrHandler @ 0x148
+constexpr bool isInterruptLine(s32 line) {
+    return (line >= 0 && line < 46) || line == 62 || line == 63;
+}
+
+constexpr std::string_view kSpecFlags = "-+ #0";
+constexpr std::string_view kSpecDigits = "0123456789.";
+constexpr std::string_view kSpecLengths = "lhzjt";
+
+constexpr u8 kUpper = 0x01;
+constexpr u8 kLower = 0x02;
+constexpr u8 kDigit = 0x04;
+constexpr u8 kSpace = 0x08;
+constexpr u8 kPunct = 0x10;
+constexpr u8 kControl = 0x20;
+constexpr u8 kHex = 0x40;
+
+// SYSCLIB: ctype table @ 0x1af1
+constexpr u8 classify(u32 c) {
+    u8 flags = 0;
+    if (c >= 'A' && c <= 'Z') {
+        flags |= kUpper;
+    }
+    if (c >= 'a' && c <= 'z') {
+        flags |= kLower;
+    }
+    if (c >= '0' && c <= '9') {
+        flags |= kDigit;
+    }
+    if ((c >= 9 && c <= 13) || c == ' ') {
+        flags |= kSpace;
+    }
+    if (c == ' ' || (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) ||
+        (c >= 123 && c <= 126)) {
+        flags |= kPunct;
+    }
+    if (c < 9 || (c >= 14 && c <= 31) || c == 127) {
+        flags |= kControl;
+    }
+    if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+        flags |= kHex;
+    }
+    return flags;
+}
+
+u32 digitValue(u8 c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'z') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'Z') {
+        return c - 'A' + 10;
+    }
+    return 0xFFFFFFFFu;
+}
+
+bool eventFlagSatisfied(u32 bits, u32 pattern, u32 mode) {
+    return (mode & 1) != 0 ? (bits & pattern) != 0 : (bits & pattern) == pattern;
+}
+
+template <typename T>
+void appendFormatted(std::string& out, const std::string& spec, T value) {
+    const int size = std::snprintf(nullptr, 0, spec.c_str(), value);
+    if (size < 0) {
+        throw std::runtime_error(std::format("the host rejected the format {}", spec));
+    }
+    std::string text(static_cast<usize>(size), '\0');
+    std::snprintf(text.data(), static_cast<usize>(size) + 1, spec.c_str(), value);
+    out += text;
+}
+
+}  // namespace
+
+IopKernel::Service IopKernel::lookup(const Import& import) {
+    struct Entry {
+        std::string_view module;
+        u32 id;
+        Service run;
+    };
+    static constexpr Entry kServices[] = {
+        {"stdio", 4, &IopKernel::printf},
+        {"loadcore", 5, &IopKernel::flushCache},
+        {"loadcore", 6, &IopKernel::flushCache},
+        {"thbase", 4, &IopKernel::createThread},
+        {"thbase", 5, &IopKernel::deleteThread},
+        {"thbase", 6, &IopKernel::startThread},
+        {"thbase", 8, &IopKernel::exitThread},
+        {"thbase", 10, &IopKernel::terminateThread},
+        {"thbase", 14, &IopKernel::changeThreadPriority},
+        {"thbase", 20, &IopKernel::getThreadId},
+        {"thbase", 22, &IopKernel::referThreadStatus},
+        {"thbase", 24, &IopKernel::sleepThread},
+        {"thbase", 25, &IopKernel::wakeupThread},
+        {"thbase", 27, &IopKernel::cancelWakeupThread},
+        {"thbase", 33, &IopKernel::delayThread},
+        {"thbase", 34, &IopKernel::getSystemTime},
+        {"thbase", 39, &IopKernel::usecToSysClock},
+        {"thbase", 40, &IopKernel::sysClockToUsec},
+        {"thsemap", 4, &IopKernel::createSema},
+        {"thsemap", 5, &IopKernel::deleteSema},
+        {"thsemap", 6, &IopKernel::signalSema},
+        {"thsemap", 7, &IopKernel::signalSema},
+        {"thsemap", 8, &IopKernel::waitSema},
+        {"thsemap", 9, &IopKernel::pollSema},
+        {"thsemap", 11, &IopKernel::referSemaStatus},
+        {"thevent", 4, &IopKernel::createEventFlag},
+        {"thevent", 5, &IopKernel::deleteEventFlag},
+        {"thevent", 6, &IopKernel::setEventFlag},
+        {"thevent", 8, &IopKernel::clearEventFlag},
+        {"thevent", 10, &IopKernel::waitEventFlag},
+        {"thevent", 11, &IopKernel::pollEventFlag},
+        {"thevent", 13, &IopKernel::referEventFlagStatus},
+        {"intrman", 4, &IopKernel::registerIntrHandler},
+        {"intrman", 5, &IopKernel::releaseIntrHandler},
+        {"intrman", 6, &IopKernel::enableIntr},
+        {"intrman", 7, &IopKernel::disableIntr},
+        {"intrman", 8, &IopKernel::cpuDisableIntr},
+        {"intrman", 9, &IopKernel::cpuEnableIntr},
+        {"intrman", 17, &IopKernel::cpuSuspendIntr},
+        {"intrman", 18, &IopKernel::cpuResumeIntr},
+        {"intrman", 23, &IopKernel::queryIntrContext},
+        {"sysmem", 4, &IopKernel::allocSysMemory},
+        {"sysmem", 5, &IopKernel::freeSysMemory},
+        {"sysmem", 6, &IopKernel::queryMemSize},
+        {"sysmem", 7, &IopKernel::queryMaxFreeMemSize},
+        {"sysmem", 8, &IopKernel::queryTotalFreeMemSize},
+        {"sysmem", 9, &IopKernel::queryBlockTopAddress},
+        {"sysmem", 10, &IopKernel::queryBlockSize},
+        {"sysclib", 8, &IopKernel::lookCtypeTable},
+        {"sysclib", 11, &IopKernel::memcmp},
+        {"sysclib", 12, &IopKernel::memcpy},
+        {"sysclib", 14, &IopKernel::memset},
+        {"sysclib", 17, &IopKernel::bzero},
+        {"sysclib", 19, &IopKernel::sprintf},
+        {"sysclib", 20, &IopKernel::strcat},
+        {"sysclib", 23, &IopKernel::strcpy},
+        {"sysclib", 27, &IopKernel::strlen},
+        {"sysclib", 29, &IopKernel::strncmp},
+        {"sysclib", 30, &IopKernel::strncpy},
+        {"sysclib", 36, &IopKernel::strtol},
+    };
+    for (const Entry& entry : kServices) {
+        if (entry.module == import.module && entry.id == import.id) {
+            return entry.run;
+        }
+    }
+    return nullptr;
+}
+
+IopKernel::IopKernel(IopContext& iop, Memory& memory, std::vector<Import> imports, HeapRange heap)
+    : mIop(iop), mMemory(memory), mImports(std::move(imports)) {
+    mServices.reserve(mImports.size());
+    for (const Import& import : mImports) {
+        mServices.push_back(lookup(import));
+    }
+    mThreads.resize(kMaxThreads);
+    mSemaphores.resize(kMaxSemaphores);
+    mEventFlags.resize(kMaxEventFlags);
+    mThreads[0].allocated = true;
+    mThreads[0].sequence = ++mSequence;
+    mThreads[0].status = iopstatus::kRun;
+    mThreads[0].initialPriority = kModulePriority;
+    mThreads[0].currentPriority = kModulePriority;
+
+    const u32 start = (heap.start + kBlockAlignment - 1) & ~(kBlockAlignment - 1);
+    const u32 end = heap.end & ~(kBlockAlignment - 1);
+    if (end > start) {
+        mBlocks.push_back({start, end - start, false});
+    }
+}
+
+std::string IopKernel::nameOf(u32 index) const {
+    if (index >= mImports.size()) {
+        return std::format("import {}", index);
+    }
+    return std::format("{}.{}", mImports[index].module, mImports[index].id);
+}
+
+bool IopKernel::call(u32 index) {
+    if (index >= mServices.size() || mServices[index] == nullptr) {
+        return false;
+    }
+    (this->*mServices[index])();
+    return true;
+}
+
+u32 IopKernel::argument(u32 index) {
+    if (index < kRegisterArguments) {
+        return mIop.cpu.gpr[kFirstArgumentRegister + index];
+    }
+    return mMemory.read32(mIop.cpu.gpr[kStackRegister] + 4 * index);
+}
+
+void IopKernel::returnValue(u32 value) {
+    mIop.cpu.write(kResultRegister, value);
+}
+
+u32 IopKernel::stringLength(u32 address) {
+    for (u32 i = 0; i < kIopRamSize; ++i) {
+        if (mMemory.read8(address + i) == 0) {
+            return i;
+        }
+    }
+    throw std::runtime_error(std::format("the string at {:08x} is not terminated", address));
+}
+
+std::string IopKernel::readString(u32 address) {
+    const u32 length = stringLength(address);
+    std::string text;
+    text.reserve(length);
+    for (u32 i = 0; i < length; ++i) {
+        text.push_back(static_cast<char>(mMemory.read8(address + i)));
+    }
+    return text;
+}
+
+void IopKernel::writeString(u32 address, const std::string& text) {
+    for (usize i = 0; i < text.size(); ++i) {
+        mMemory.write8(address + static_cast<u32>(i), static_cast<u8>(text[i]));
+    }
+    mMemory.write8(address + static_cast<u32>(text.size()), 0);
+}
+
+std::string IopKernel::format(u32 text, u32 firstArgument) {
+    const std::string source = readString(text);
+    std::string out;
+    u32 next = firstArgument;
+
+    for (usize i = 0; i < source.size(); ++i) {
+        if (source[i] != '%') {
+            out.push_back(source[i]);
+            continue;
+        }
+        const usize start = i;
+        ++i;
+        while (i < source.size() && kSpecFlags.find(source[i]) != std::string_view::npos) {
+            ++i;
+        }
+        while (i < source.size() && kSpecDigits.find(source[i]) != std::string_view::npos) {
+            ++i;
+        }
+        const usize afterWidth = i;
+        while (i < source.size() && kSpecLengths.find(source[i]) != std::string_view::npos) {
+            ++i;
+        }
+        if (i >= source.size()) {
+            throw std::runtime_error(std::format("the format {} ends mid directive", source));
+        }
+        // A host long is 64 bits, so the guest's length modifier cannot go through.
+        const std::string spec = source.substr(start, afterWidth - start) + source[i];
+
+        switch (source[i]) {
+            case '%':
+                out.push_back('%');
+                break;
+            case 'd': case 'i':
+                appendFormatted(out, spec, static_cast<s32>(argument(next++)));
+                break;
+            // %p omitted: the host would read 64 bits off a 32-bit argument.
+            case 'u': case 'x': case 'X': case 'o':
+                appendFormatted(out, spec, argument(next++));
+                break;
+            case 'c':
+                appendFormatted(out, spec, static_cast<int>(argument(next++)));
+                break;
+            case 's': {
+                const std::string value = readString(argument(next++));
+                appendFormatted(out, spec, value.c_str());
+                break;
+            }
+            default:
+                throw std::runtime_error(std::format(
+                    "the conversion {} in {} is not one this stands in for", source[i], source));
+        }
+    }
+    return out;
+}
+
+void IopKernel::printf() {
+    const std::string text = format(argument(0), 1);
+    mConsole += text;
+    returnValue(static_cast<u32>(text.size()));
+}
+
+// SYSCLIB: sprintf @ 0x1750
+void IopKernel::sprintf() {
+    const std::string text = format(argument(1), 2);
+    writeString(argument(0), text);
+    returnValue(static_cast<u32>(text.size()));
+}
+
+// SYSCLIB: look_ctype_table @ 0xa00
+void IopKernel::lookCtypeTable() {
+    const u32 c = argument(0);
+    returnValue(c < 128 ? classify(c) : 0);
+}
+
+// SYSCLIB: memcmp @ 0xa68
+void IopKernel::memcmp() {
+    const u32 left = argument(0);
+    const u32 right = argument(1);
+    const s32 size = static_cast<s32>(argument(2));
+    for (s32 i = 0; i < size; ++i) {
+        const u8 a = mMemory.read8(left + static_cast<u32>(i));
+        const u8 b = mMemory.read8(right + static_cast<u32>(i));
+        if (a != b) {
+            returnValue(static_cast<u32>(a < b ? -1 : 1));
+            return;
+        }
+    }
+    returnValue(0);
+}
+
+void IopKernel::memcpy() {
+    const u32 destination = argument(0);
+    const u32 source = argument(1);
+    const u32 size = argument(2);
+    for (u32 i = 0; i < size; ++i) {
+        mMemory.write8(destination + i, mMemory.read8(source + i));
+    }
+    returnValue(destination);
+}
+
+void IopKernel::memset() {
+    const u32 destination = argument(0);
+    const u8 value = static_cast<u8>(argument(1));
+    const u32 size = argument(2);
+    for (u32 i = 0; i < size; ++i) {
+        mMemory.write8(destination + i, value);
+    }
+    returnValue(destination);
+}
+
+void IopKernel::bzero() {
+    const u32 destination = argument(0);
+    const u32 size = argument(1);
+    for (u32 i = 0; i < size; ++i) {
+        mMemory.write8(destination + i, 0);
+    }
+}
+
+// SYSCLIB: strcat @ 0xccc
+void IopKernel::strcat() {
+    const u32 destination = argument(0);
+    const u32 source = argument(1);
+    if (destination == 0) {
+        returnValue(0);
+        return;
+    }
+    if (source != 0) {
+        writeString(destination + stringLength(destination), readString(source));
+    }
+    returnValue(destination);
+}
+
+// SYSCLIB: strcpy @ 0xe0c
+void IopKernel::strcpy() {
+    const u32 destination = argument(0);
+    const u32 source = argument(1);
+    if (destination == 0 || source == 0) {
+        returnValue(0);
+        return;
+    }
+    writeString(destination, readString(source));
+    returnValue(destination);
+}
+
+// SYSCLIB: strlen @ 0xf54
+void IopKernel::strlen() {
+    const u32 text = argument(0);
+    returnValue(text == 0 ? 0 : stringLength(text));
+}
+
+// SYSCLIB: strncmp @ 0xff4
+void IopKernel::strncmp() {
+    const u32 left = argument(0);
+    const u32 right = argument(1);
+    const s32 size = static_cast<s32>(argument(2));
+    if (left == 0 || right == 0) {
+        returnValue(left == right ? 0 : static_cast<u32>(left == 0 ? -1 : 1));
+        return;
+    }
+    for (s32 i = 0; i < size; ++i) {
+        const s8 a = static_cast<s8>(mMemory.read8(left + static_cast<u32>(i)));
+        const s8 b = static_cast<s8>(mMemory.read8(right + static_cast<u32>(i)));
+        if (a != b) {
+            returnValue(static_cast<u32>(a - b));
+            return;
+        }
+        if (a == 0) {
+            break;
+        }
+    }
+    returnValue(0);
+}
+
+// SYSCLIB: strncpy @ 0x107c
+void IopKernel::strncpy() {
+    const u32 destination = argument(0);
+    const u32 source = argument(1);
+    const s32 size = static_cast<s32>(argument(2));
+    if (destination == 0 || source == 0) {
+        returnValue(0);
+        return;
+    }
+    s32 i = 0;
+    for (; i < size; ++i) {
+        const u8 c = mMemory.read8(source + static_cast<u32>(i));
+        mMemory.write8(destination + static_cast<u32>(i), c);
+        if (c == 0) {
+            break;
+        }
+    }
+    for (; i < size; ++i) {
+        mMemory.write8(destination + static_cast<u32>(i), 0);
+    }
+    returnValue(destination);
+}
+
+// SYSCLIB: strtol @ 0x1398
+void IopKernel::strtol() {
+    const u32 start = argument(0);
+    const u32 end = argument(1);
+    u32 base = argument(2);
+
+    u32 at = start;
+    while ((classify(mMemory.read8(at)) & kSpace) != 0) {
+        ++at;
+    }
+    bool negative = false;
+    if (mMemory.read8(at) == '+' || mMemory.read8(at) == '-') {
+        negative = mMemory.read8(at) == '-';
+        ++at;
+    }
+    if ((base == 0 || base == 16) && mMemory.read8(at) == '0' &&
+        (mMemory.read8(at + 1) | 0x20) == 'x') {
+        base = 16;
+        at += 2;
+    } else if (base == 0) {
+        base = mMemory.read8(at) == '0' ? 8 : 10;
+    }
+
+    const u32 first = at;
+    u32 value = 0;
+    while (digitValue(mMemory.read8(at)) < base) {
+        value = value * base + digitValue(mMemory.read8(at));
+        ++at;
+    }
+    if (end != 0) {
+        mMemory.write32(end, at == first ? start : at);
+    }
+    returnValue(negative ? ~value + 1 : value);
+}
+
+std::vector<IopKernel::Block>::iterator IopKernel::blockAt(u32 address) {
+    return std::find_if(mBlocks.begin(), mBlocks.end(),
+                        [address](const Block& block) { return block.start == address; });
+}
+
+std::vector<IopKernel::Block>::iterator IopKernel::blockContaining(u32 address) {
+    return std::find_if(mBlocks.begin(), mBlocks.end(), [address](const Block& block) {
+        return address >= block.start && address < block.start + block.size;
+    });
+}
+
+// SYSMEM: AllocSysMemory @ 0x2ec
+void IopKernel::allocSysMemory() {
+    returnValue(allocateBlock(argument(0), argument(1)));
+}
+
+u32 IopKernel::allocateBlock(u32 mode, u32 requested) {
+    const u32 size = (requested + kBlockAlignment - 1) & ~(kBlockAlignment - 1);
+    if (mode > kAllocAddress || size == 0) {
+        return 0;
+    }
+
+    auto chosen = mBlocks.end();
+    for (auto block = mBlocks.begin(); block != mBlocks.end(); ++block) {
+        if (block->used || block->size < size) {
+            continue;
+        }
+        if (mode == kAllocAddress && block->start > argument(2)) {
+            continue;
+        }
+        if (chosen == mBlocks.end() || mode != kAllocFirst) {
+            chosen = block;
+        }
+        if (mode == kAllocFirst) {
+            break;
+        }
+    }
+    if (chosen == mBlocks.end()) {
+        return 0;
+    }
+
+    const u32 start = mode == kAllocFirst ? chosen->start : chosen->start + chosen->size - size;
+    const u32 remaining = chosen->size - size;
+    if (remaining == 0) {
+        chosen->used = true;
+    } else if (mode == kAllocFirst) {
+        chosen->size = remaining;
+        chosen->start += size;
+        mBlocks.insert(chosen, {start, size, true});
+    } else {
+        chosen->size = remaining;
+        mBlocks.insert(chosen + 1, {start, size, true});
+    }
+    return start;
+}
+
+// SYSMEM: FreeSysMemory @ 0x33c over HeapFreeBlock @ 0x86c
+void IopKernel::freeSysMemory() {
+    returnValue(freeBlock(argument(0)) ? 0 : kFailed);
+}
+
+bool IopKernel::freeBlock(u32 address) {
+    const auto block = blockAt(address);
+    if ((address % kBlockAlignment) != 0 || block == mBlocks.end() || !block->used) {
+        return false;
+    }
+    block->used = false;
+    for (usize i = 0; i + 1 < mBlocks.size();) {
+        if (!mBlocks[i].used && !mBlocks[i + 1].used) {
+            mBlocks[i].size += mBlocks[i + 1].size;
+            mBlocks.erase(mBlocks.begin() + static_cast<isize>(i) + 1);
+        } else {
+            ++i;
+        }
+    }
+    return true;
+}
+
+// SYSMEM: QueryMemSize @ 0x204
+void IopKernel::queryMemSize() {
+    returnValue(kIopRamSize);
+}
+
+// SYSMEM: QueryMaxFreeMemSize @ 0x230
+void IopKernel::queryMaxFreeMemSize() {
+    u32 largest = 0;
+    for (const Block& block : mBlocks) {
+        if (!block.used && block.size > largest) {
+            largest = block.size;
+        }
+    }
+    returnValue(largest);
+}
+
+// SYSMEM: QueryTotalFreeMemSize @ 0x294
+void IopKernel::queryTotalFreeMemSize() {
+    u32 total = 0;
+    for (const Block& block : mBlocks) {
+        if (!block.used) {
+            total += block.size;
+        }
+    }
+    returnValue(total);
+}
+
+// SYSMEM: QueryBlockSize @ 0x40c over HeapBlockInfo @ 0xb28
+void IopKernel::queryBlockSize() {
+    const auto block = blockContaining(argument(0));
+    if (block == mBlocks.end()) {
+        returnValue(kFailed);
+        return;
+    }
+    returnValue(block->used ? block->size : block->size | 0x80000000u);
+}
+
+// SYSMEM: QueryBlockTopAddress @ 0x3a4 over HeapBlockInfo @ 0xb28
+void IopKernel::queryBlockTopAddress() {
+    const auto block = blockContaining(argument(0));
+    if (block == mBlocks.end()) {
+        returnValue(kFailed);
+        return;
+    }
+    returnValue(block->used ? block->start : block->start + 0x80000000u);
+}
+
+// INTRMANI: CpuSuspendIntr @ 0x348
+void IopKernel::cpuSuspendIntr() {
+    const u32 state = argument(0);
+    const bool was = mInterruptsEnabled;
+    if (state != 0) {
+        mMemory.write32(state, was ? 1 : 0);
+    }
+    mInterruptsEnabled = false;
+    returnValue(was ? 0 : kCpuDisabled);
+}
+
+// INTRMANI: CpuResumeIntr @ 0x374
+void IopKernel::cpuResumeIntr() {
+    mInterruptsEnabled = argument(0) != 0;
+    returnValue(0);
+}
+
+void IopKernel::cpuEnableIntr() {
+    mInterruptsEnabled = true;
+    returnValue(0);
+}
+
+void IopKernel::cpuDisableIntr() {
+    const bool was = mInterruptsEnabled;
+    mInterruptsEnabled = false;
+    returnValue(was ? 0 : kCpuDisabled);
+}
+
+// INTRMANI: QueryIntrContext @ 0xd70
+void IopKernel::queryIntrContext() {
+    returnValue(0);
+}
+
+// INTRMANI: RegisterIntrHandler @ 0x148
+void IopKernel::registerIntrHandler() {
+    const s32 line = static_cast<s32>(argument(0));
+    const u32 handler = argument(2);
+    if (!isInterruptLine(line) || handler == 0) {
+        returnValue(kIllegalIntrCode);
+        return;
+    }
+    if (mInterrupts[line].handler != 0) {
+        returnValue(kFoundHandler);
+        return;
+    }
+    mInterrupts[line] = {handler, argument(3)};
+    returnValue(0);
+}
+
+// INTRMANI: ReleaseIntrHandler @ 0x270
+void IopKernel::releaseIntrHandler() {
+    const s32 line = static_cast<s32>(argument(0));
+    if (!isInterruptLine(line)) {
+        returnValue(kIllegalIntrCode);
+        return;
+    }
+    if (mInterrupts[line].handler == 0) {
+        returnValue(kNotFoundHandler);
+        return;
+    }
+    mInterrupts[line] = {};
+    returnValue(0);
+}
+
+void IopKernel::enableIntr() {
+    returnValue(isInterruptLine(static_cast<s32>(argument(0))) ? 0 : kIllegalIntrCode);
+}
+
+void IopKernel::disableIntr() {
+    returnValue(isInterruptLine(static_cast<s32>(argument(0))) ? 0 : kIllegalIntrCode);
+}
+
+u32 IopKernel::makeHandle(usize index, u32 sequence) {
+    return (static_cast<u32>(index) << 7) | ((sequence & 0x3F) << 1) | 1;
+}
+
+usize IopKernel::handleIndex(u32 handle) {
+    return handle >> 7;
+}
+
+u32 IopKernel::handleSequence(u32 handle) {
+    return (handle >> 1) & 0x3F;
+}
+
+IopThread* IopKernel::threadFor(u32 handle) {
+    const usize index = handleIndex(handle);
+    if ((handle & 1) == 0 || index >= mThreads.size() || !mThreads[index].allocated) {
+        return nullptr;
+    }
+    IopThread& thread = mThreads[index];
+    return (thread.sequence & 0x3F) == handleSequence(handle) ? &thread : nullptr;
+}
+
+IopSemaphore* IopKernel::semaphoreFor(u32 handle) {
+    const usize index = handleIndex(handle);
+    if ((handle & 1) == 0 || index >= mSemaphores.size() || !mSemaphores[index].allocated) {
+        return nullptr;
+    }
+    IopSemaphore& semaphore = mSemaphores[index];
+    return (semaphore.sequence & 0x3F) == handleSequence(handle) ? &semaphore : nullptr;
+}
+
+IopEventFlag* IopKernel::eventFlagFor(u32 handle) {
+    const usize index = handleIndex(handle);
+    if ((handle & 1) == 0 || index >= mEventFlags.size() || !mEventFlags[index].allocated) {
+        return nullptr;
+    }
+    IopEventFlag& flag = mEventFlags[index];
+    return (flag.sequence & 0x3F) == handleSequence(handle) ? &flag : nullptr;
+}
+
+void IopKernel::switchTo(usize thread) {
+    if (thread == mCurrent) {
+        return;
+    }
+    IopThread& outgoing = mThreads[mCurrent];
+    if (outgoing.status == iopstatus::kRun) {
+        outgoing.status = iopstatus::kReady;
+    }
+    outgoing.saved = mIop.cpu;
+    mCurrent = thread;
+    mThreads[thread].status = iopstatus::kRun;
+    mIop.cpu = mThreads[thread].saved;
+}
+
+u32 IopKernel::waitingOn(IopWait wait, u32 id) const {
+    u32 waiting = 0;
+    for (const IopThread& thread : mThreads) {
+        if (thread.status == iopstatus::kWait && thread.wait == wait && thread.waitId == id) {
+            ++waiting;
+        }
+    }
+    return waiting;
+}
+
+void IopKernel::readyThread(usize thread) {
+    mThreads[thread].status = iopstatus::kReady;
+    mThreads[thread].wait = IopWait::None;
+    mThreads[thread].waitId = 0;
+}
+
+void IopKernel::blockCurrentThread(IopWait wait, u32 id) {
+    IopThread& thread = mThreads[mCurrent];
+    thread.status = iopstatus::kWait;
+    thread.wait = wait;
+    thread.waitId = id;
+    reschedule();
+}
+
+void IopKernel::reschedule() {
+    usize best = mThreads.size();
+    for (usize i = 0; i < mThreads.size(); ++i) {
+        const IopThread& thread = mThreads[i];
+        if (!thread.allocated ||
+            (thread.status & (iopstatus::kReady | iopstatus::kRun)) == 0) {
+            continue;
+        }
+        if (best == mThreads.size() || thread.currentPriority < mThreads[best].currentPriority) {
+            best = i;
+        }
+    }
+    if (best != mThreads.size()) {
+        switchTo(best);
+    }
+}
+
+bool IopKernel::isIdle() const {
+    for (const IopThread& thread : mThreads) {
+        if (thread.allocated && (thread.status & (iopstatus::kReady | iopstatus::kRun)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void IopKernel::exitCurrentThread() {
+    mThreads[mCurrent].status = iopstatus::kDormant;
+    reschedule();
+}
+
+// Nothing here has a cache.
+void IopKernel::flushCache() {
+    returnValue(0);
+}
+
+// THREADMAN: CreateThread @ 0xc5c
+void IopKernel::createThread() {
+    const u32 param = argument(0);
+    const u32 attr = mMemory.read32(param);
+    const u32 entry = mMemory.read32(param + 8);
+    const u32 stackSize = mMemory.read32(param + 12);
+    const s32 priority = static_cast<s32>(mMemory.read32(param + 16));
+
+    if ((attr & kThreadAttrMask) != 0) {
+        returnValue(kIllegalAttr);
+        return;
+    }
+    if (priority < 1 || priority > kLowestPriority) {
+        returnValue(kIllegalPriority);
+        return;
+    }
+    if ((entry & 3) != 0) {
+        returnValue(kIllegalEntry);
+        return;
+    }
+    if (stackSize < kSmallestStack) {
+        returnValue(kIllegalStackSize);
+        return;
+    }
+
+    usize index = 1;
+    while (index < mThreads.size() && mThreads[index].allocated) {
+        ++index;
+    }
+    if (index == mThreads.size()) {
+        returnValue(kNoMemory);
+        return;
+    }
+
+    const u32 rounded = (stackSize + kBlockAlignment - 1) & ~(kBlockAlignment - 1);
+    const u32 stack = allocateBlock(kAllocLast, rounded);
+    if (stack == 0) {
+        returnValue(kNoMemory);
+        return;
+    }
+
+    IopThread& thread = mThreads[index];
+    thread = {};
+    thread.allocated = true;
+    thread.sequence = ++mSequence;
+    thread.status = iopstatus::kDormant;
+    thread.attr = attr;
+    thread.option = mMemory.read32(param + 4);
+    thread.entry = entry;
+    thread.stack = stack;
+    thread.stackSize = rounded;
+    thread.initialPriority = priority;
+    thread.currentPriority = priority;
+    returnValue(makeHandle(index, thread.sequence));
+}
+
+// THREADMAN: DeleteThread @ 0xe10
+void IopKernel::deleteThread() {
+    const u32 handle = argument(0);
+    if (handle == 0) {
+        returnValue(kIllegalThid);
+        return;
+    }
+    IopThread* thread = threadFor(handle);
+    if (thread == nullptr || handleIndex(handle) == mCurrent) {
+        returnValue(kUnknownThid);
+        return;
+    }
+    if (thread->status != iopstatus::kDormant) {
+        returnValue(kNotDormant);
+        return;
+    }
+    freeBlock(thread->stack);
+    thread->allocated = false;
+    returnValue(0);
+}
+
+// THREADMAN: StartThread @ 0x1028
+void IopKernel::startThread() {
+    const u32 handle = argument(0);
+    if (handle == 0) {
+        returnValue(kIllegalThid);
+        return;
+    }
+    IopThread* thread = threadFor(handle);
+    if (thread == nullptr) {
+        returnValue(kUnknownThid);
+        return;
+    }
+    if (thread->status != iopstatus::kDormant) {
+        returnValue(kNotDormant);
+        return;
+    }
+
+    thread->saved = R3000A{};
+    thread->saved.pc = thread->entry;
+    thread->saved.gpr[reg::a0] = argument(1);
+    thread->saved.gpr[reg::sp] = thread->stack + thread->stackSize - 16;
+    thread->saved.gpr[reg::gp] = mIop.cpu.gpr[reg::gp];
+    thread->saved.gpr[reg::ra] = kThreadReturn;
+    thread->status = iopstatus::kReady;
+    returnValue(0);
+    reschedule();
+}
+
+// THREADMAN: ExitThread @ 0x123c
+void IopKernel::exitThread() {
+    exitCurrentThread();
+}
+
+// THREADMAN: TerminateThread @ 0x12d8
+void IopKernel::terminateThread() {
+    const u32 handle = argument(0);
+    if (handle == 0) {
+        returnValue(kIllegalThid);
+        return;
+    }
+    IopThread* thread = threadFor(handle);
+    if (thread == nullptr) {
+        returnValue(kUnknownThid);
+        return;
+    }
+    thread->status = iopstatus::kDormant;
+    thread->wait = IopWait::None;
+    returnValue(0);
+    reschedule();
+}
+
+// THREADMAN: GetThreadId @ 0x1ca8
+void IopKernel::getThreadId() {
+    returnValue(makeHandle(mCurrent, mThreads[mCurrent].sequence));
+}
+
+// THREADMAN: ReferThreadStatus @ 0x1f00
+void IopKernel::referThreadStatus() {
+    const u32 handle = argument(0);
+    const u32 info = argument(1);
+    IopThread* thread = handle == 0 ? &mThreads[mCurrent] : threadFor(handle);
+    if (thread == nullptr) {
+        returnValue(kUnknownThid);
+        return;
+    }
+    mMemory.write32(info, thread->attr);
+    mMemory.write32(info + 4, thread->option);
+    mMemory.write32(info + 8, thread->status);
+    mMemory.write32(info + 12, thread->entry);
+    mMemory.write32(info + 16, thread->stack);
+    mMemory.write32(info + 20, thread->stackSize);
+    mMemory.write32(info + 24, 0);
+    mMemory.write32(info + 28, static_cast<u32>(thread->initialPriority));
+    mMemory.write32(info + 32, static_cast<u32>(thread->currentPriority));
+    mMemory.write32(info + 36, 0);
+    returnValue(0);
+}
+
+// THREADMAN: ChangeThreadPriority @ 0x1568
+void IopKernel::changeThreadPriority() {
+    const u32 handle = argument(0);
+    const s32 priority = static_cast<s32>(argument(1));
+    IopThread* thread = handle == 0 ? &mThreads[mCurrent] : threadFor(handle);
+    if (thread == nullptr) {
+        returnValue(kUnknownThid);
+        return;
+    }
+    if (priority < 1 || priority > kLowestPriority) {
+        returnValue(kIllegalPriority);
+        return;
+    }
+    thread->currentPriority = priority;
+    returnValue(0);
+    reschedule();
+}
+
+// THREADMAN: SleepThread @ 0x200c
+void IopKernel::sleepThread() {
+    IopThread& thread = mThreads[mCurrent];
+    if (thread.wakeupCount > 0) {
+        --thread.wakeupCount;
+        returnValue(0);
+        return;
+    }
+    returnValue(0);
+    blockCurrentThread(IopWait::Sleep, 0);
+}
+
+// THREADMAN: WakeupThread @ 0x20e4
+void IopKernel::wakeupThread() {
+    const u32 handle = argument(0);
+    IopThread* thread = handle == 0 ? &mThreads[mCurrent] : threadFor(handle);
+    if (thread == nullptr) {
+        returnValue(kUnknownThid);
+        return;
+    }
+    if (thread->status == iopstatus::kWait && thread->wait == IopWait::Sleep) {
+        readyThread(handle == 0 ? mCurrent : handleIndex(handle));
+        returnValue(0);
+        reschedule();
+        return;
+    }
+    ++thread->wakeupCount;
+    returnValue(0);
+}
+
+// THREADMAN: CancelWakeupThread @ 0x22dc
+void IopKernel::cancelWakeupThread() {
+    const u32 handle = argument(0);
+    IopThread* thread = handle == 0 ? &mThreads[mCurrent] : threadFor(handle);
+    if (thread == nullptr) {
+        returnValue(kUnknownThid);
+        return;
+    }
+    const s32 banked = thread->wakeupCount;
+    thread->wakeupCount = 0;
+    returnValue(static_cast<u32>(banked));
+}
+
+// THREADMAN: DelayThread @ 0x5738
+void IopKernel::delayThread() {
+    mMicroseconds += argument(0);
+    returnValue(0);
+}
+
+// THREADMAN: GetSystemTime @ 0x5764
+void IopKernel::getSystemTime() {
+    const u64 ticks = mMicroseconds * kTicksPerMicrosecondNumerator /
+                      kTicksPerMicrosecondDenominator;
+    mMemory.write32(argument(0), static_cast<u32>(ticks));
+    mMemory.write32(argument(0) + 4, static_cast<u32>(ticks >> 32));
+    returnValue(0);
+}
+
+void IopKernel::usecToSysClock() {
+    const u64 ticks = static_cast<u64>(argument(0)) * kTicksPerMicrosecondNumerator /
+                      kTicksPerMicrosecondDenominator;
+    mMemory.write32(argument(1), static_cast<u32>(ticks));
+    mMemory.write32(argument(1) + 4, static_cast<u32>(ticks >> 32));
+}
+
+void IopKernel::sysClockToUsec() {
+    const u32 clock = argument(0);
+    const u64 ticks = mMemory.read32(clock) | (static_cast<u64>(mMemory.read32(clock + 4)) << 32);
+    const u64 total = ticks * kTicksPerMicrosecondDenominator / kTicksPerMicrosecondNumerator;
+    mMemory.write32(argument(1), static_cast<u32>(total / 1000000));
+    mMemory.write32(argument(2), static_cast<u32>(total % 1000000));
+}
+
+// THREADMAN: CreateSema @ 0x3060
+void IopKernel::createSema() {
+    const u32 param = argument(0);
+    const u32 attr = mMemory.read32(param);
+    if ((attr & kSemaAttrMask) != 0) {
+        returnValue(kIllegalAttr);
+        return;
+    }
+    usize index = 0;
+    while (index < mSemaphores.size() && mSemaphores[index].allocated) {
+        ++index;
+    }
+    if (index == mSemaphores.size()) {
+        returnValue(kNoMemory);
+        return;
+    }
+    IopSemaphore& semaphore = mSemaphores[index];
+    semaphore = {};
+    semaphore.allocated = true;
+    semaphore.sequence = ++mSequence;
+    semaphore.attr = attr;
+    semaphore.option = mMemory.read32(param + 4);
+    semaphore.initial = static_cast<s32>(mMemory.read32(param + 8));
+    semaphore.count = semaphore.initial;
+    semaphore.maxCount = static_cast<s32>(mMemory.read32(param + 12));
+    returnValue(makeHandle(index, semaphore.sequence));
+}
+
+// THREADMAN: DeleteSema @ 0x3164
+void IopKernel::deleteSema() {
+    const u32 handle = argument(0);
+    IopSemaphore* semaphore = semaphoreFor(handle);
+    if (semaphore == nullptr) {
+        returnValue(kUnknownSemaid);
+        return;
+    }
+    for (usize i = 0; i < mThreads.size(); ++i) {
+        if (mThreads[i].status == iopstatus::kWait && mThreads[i].wait == IopWait::Semaphore &&
+            mThreads[i].waitId == handle) {
+            readyThread(i);
+        }
+    }
+    semaphore->allocated = false;
+    returnValue(0);
+    reschedule();
+}
+
+// THREADMAN: SignalSema @ 0x328c
+void IopKernel::signalSema() {
+    const u32 handle = argument(0);
+    IopSemaphore* semaphore = semaphoreFor(handle);
+    if (semaphore == nullptr) {
+        returnValue(kUnknownSemaid);
+        return;
+    }
+    for (usize i = 0; i < mThreads.size(); ++i) {
+        if (mThreads[i].status == iopstatus::kWait && mThreads[i].wait == IopWait::Semaphore &&
+            mThreads[i].waitId == handle) {
+            readyThread(i);
+            returnValue(0);
+            reschedule();
+            return;
+        }
+    }
+    if (semaphore->count >= semaphore->maxCount) {
+        returnValue(kSemaOverflow);
+        return;
+    }
+    ++semaphore->count;
+    returnValue(0);
+}
+
+// THREADMAN: WaitSema @ 0x3444
+void IopKernel::waitSema() {
+    const u32 handle = argument(0);
+    IopSemaphore* semaphore = semaphoreFor(handle);
+    if (semaphore == nullptr) {
+        returnValue(kUnknownSemaid);
+        return;
+    }
+    if (semaphore->count > 0) {
+        --semaphore->count;
+        returnValue(0);
+        return;
+    }
+    returnValue(0);
+    blockCurrentThread(IopWait::Semaphore, handle);
+}
+
+// THREADMAN: PollSema @ 0x35b4
+void IopKernel::pollSema() {
+    const u32 handle = argument(0);
+    IopSemaphore* semaphore = semaphoreFor(handle);
+    if (semaphore == nullptr) {
+        returnValue(kUnknownSemaid);
+        return;
+    }
+    if (semaphore->count <= 0) {
+        returnValue(kSemaZero);
+        return;
+    }
+    --semaphore->count;
+    returnValue(0);
+}
+
+void IopKernel::referSemaStatus() {
+    const u32 handle = argument(0);
+    const u32 info = argument(1);
+    IopSemaphore* semaphore = semaphoreFor(handle);
+    if (semaphore == nullptr) {
+        returnValue(kUnknownSemaid);
+        return;
+    }
+    mMemory.write32(info, semaphore->attr);
+    mMemory.write32(info + 4, semaphore->option);
+    mMemory.write32(info + 8, static_cast<u32>(semaphore->initial));
+    mMemory.write32(info + 12, static_cast<u32>(semaphore->maxCount));
+    mMemory.write32(info + 16, static_cast<u32>(semaphore->count));
+    mMemory.write32(info + 20, waitingOn(IopWait::Semaphore, handle));
+    returnValue(0);
+}
+
+// THREADMAN: CreateEventFlag @ 0x2560
+void IopKernel::createEventFlag() {
+    const u32 param = argument(0);
+    usize index = 0;
+    while (index < mEventFlags.size() && mEventFlags[index].allocated) {
+        ++index;
+    }
+    if (index == mEventFlags.size()) {
+        returnValue(kNoMemory);
+        return;
+    }
+    IopEventFlag& flag = mEventFlags[index];
+    flag = {};
+    flag.allocated = true;
+    flag.sequence = ++mSequence;
+    flag.attr = mMemory.read32(param);
+    flag.option = mMemory.read32(param + 4);
+    flag.initialBits = mMemory.read32(param + 8);
+    flag.bits = flag.initialBits;
+    returnValue(makeHandle(index, flag.sequence));
+}
+
+// THREADMAN: DeleteEventFlag @ 0x2660
+void IopKernel::deleteEventFlag() {
+    IopEventFlag* flag = eventFlagFor(argument(0));
+    if (flag == nullptr) {
+        returnValue(kUnknownEventFlagId);
+        return;
+    }
+    flag->allocated = false;
+    returnValue(0);
+}
+
+// THREADMAN: SetEventFlag @ 0x2788
+void IopKernel::setEventFlag() {
+    const u32 handle = argument(0);
+    IopEventFlag* flag = eventFlagFor(handle);
+    if (flag == nullptr) {
+        returnValue(kUnknownEventFlagId);
+        return;
+    }
+    flag->bits |= argument(1);
+    for (usize i = 0; i < mThreads.size(); ++i) {
+        IopThread& thread = mThreads[i];
+        if (thread.status != iopstatus::kWait || thread.wait != IopWait::EventFlag ||
+            thread.waitId != handle) {
+            continue;
+        }
+        if (eventFlagSatisfied(flag->bits, thread.waitPattern, thread.waitMode)) {
+            if (thread.resultAddress != 0) {
+                mMemory.write32(thread.resultAddress, flag->bits);
+            }
+            if ((thread.waitMode & kEventFlagClear) != 0) {
+                flag->bits = 0;
+            }
+            readyThread(i);
+        }
+    }
+    returnValue(0);
+    reschedule();
+}
+
+// THREADMAN: ClearEventFlag @ 0x2abc
+void IopKernel::clearEventFlag() {
+    IopEventFlag* flag = eventFlagFor(argument(0));
+    if (flag == nullptr) {
+        returnValue(kUnknownEventFlagId);
+        return;
+    }
+    flag->bits &= argument(1);
+    returnValue(0);
+}
+
+// THREADMAN: WaitEventFlag @ 0x2bd0
+void IopKernel::waitEventFlag() {
+    const u32 handle = argument(0);
+    const u32 pattern = argument(1);
+    const u32 mode = argument(2);
+    const u32 result = argument(3);
+    if ((mode & kEventFlagModeMask) != 0) {
+        returnValue(kIllegalMode);
+        return;
+    }
+    if (pattern == 0) {
+        returnValue(kEventFlagPattern);
+        return;
+    }
+    IopEventFlag* flag = eventFlagFor(handle);
+    if (flag == nullptr) {
+        returnValue(kUnknownEventFlagId);
+        return;
+    }
+    if (eventFlagSatisfied(flag->bits, pattern, mode)) {
+        if (result != 0) {
+            mMemory.write32(result, flag->bits);
+        }
+        if ((mode & kEventFlagClear) != 0) {
+            flag->bits = 0;
+        }
+        returnValue(0);
+        return;
+    }
+    IopThread& thread = mThreads[mCurrent];
+    thread.waitPattern = pattern;
+    thread.waitMode = mode;
+    thread.resultAddress = result;
+    returnValue(0);
+    blockCurrentThread(IopWait::EventFlag, handle);
+}
+
+// THREADMAN: PollEventFlag @ 0x2db0
+void IopKernel::pollEventFlag() {
+    const u32 handle = argument(0);
+    const u32 pattern = argument(1);
+    const u32 mode = argument(2);
+    const u32 result = argument(3);
+    if ((mode & kEventFlagModeMask) != 0) {
+        returnValue(kIllegalMode);
+        return;
+    }
+    if (pattern == 0) {
+        returnValue(kEventFlagPattern);
+        return;
+    }
+    IopEventFlag* flag = eventFlagFor(handle);
+    if (flag == nullptr) {
+        returnValue(kUnknownEventFlagId);
+        return;
+    }
+    if (!eventFlagSatisfied(flag->bits, pattern, mode)) {
+        returnValue(kEventFlagCondition);
+        return;
+    }
+    if (result != 0) {
+        mMemory.write32(result, flag->bits);
+    }
+    if ((mode & kEventFlagClear) != 0) {
+        flag->bits = 0;
+    }
+    returnValue(0);
+}
+
+// THREADMAN: ReferEventFlagStatus @ 0x2f4c
+void IopKernel::referEventFlagStatus() {
+    const u32 handle = argument(0);
+    const u32 info = argument(1);
+    IopEventFlag* flag = eventFlagFor(handle);
+    if (flag == nullptr) {
+        returnValue(kUnknownEventFlagId);
+        return;
+    }
+    mMemory.write32(info, flag->attr);
+    mMemory.write32(info + 4, flag->option);
+    mMemory.write32(info + 8, flag->initialBits);
+    mMemory.write32(info + 12, flag->bits);
+    mMemory.write32(info + 16, waitingOn(IopWait::EventFlag, handle));
+    returnValue(0);
+}
+
+}  // namespace uee

@@ -1,0 +1,32 @@
+-- TEST BEGIN
+self: handle 1
+self status: 01, priority in user range 1
+refer self by 0: 1
+create: handle 1
+dormant: status 10, priority 40
+delete dormant: 0
+start: 0
+start twice: 0
+ran: 1, argument 0000
+delete finished: 0
+bad attr: -401
+no entry: 137
+priority 0: -403
+priority 127: -403
+no stack: -404
+unknown thid: -407 -407 -407
+wakeup unknown: -407
+priority unknown: -407
+change: 0
+took effect: 1, initial unchanged 1
+out of range: -403 -403
+dormant priority: 0
+bank a wakeup: 0
+sleep returns: 0
+cancel with none banked: 0
+bank then cancel: 0 1
+system time: 1
+one second: 1 0
+one and a half: 1 500000
+delay: 0
+-- TEST END

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "iop_server.h"
+#include "iop_hle_server.h"
 #include "memory.h"
 #include "types.h"
 
@@ -8,9 +8,9 @@ namespace uee {
 
 class Disc;
 
-class IopCdvdfsv final : public IopServer {
+class IopHleCdvdfsv final : public IopHleServer {
 public:
-    explicit IopCdvdfsv(Memory& memory);
+    explicit IopHleCdvdfsv(Memory& memory);
 
     void attachDisc(Disc& disc) { mDisc = &disc; }
 

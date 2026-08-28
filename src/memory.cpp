@@ -24,4 +24,10 @@ Memory makeMainMemory() {
     return Memory{std::move(regions), {true}};
 }
 
+Memory makeIopMemory() {
+    std::vector<Region> regions;
+    regions.push_back({0, std::vector<u8>(kIopRamSize)});
+    return Memory{std::move(regions), {true}};
+}
+
 }  // namespace uee

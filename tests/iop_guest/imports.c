@@ -1,0 +1,86 @@
+#include "irx.h"
+#include "intrman.h"
+#include "stdio.h"
+#include "sysclib.h"
+#include "sysmem.h"
+#include "thbase.h"
+#include "thevent.h"
+#include "thsemap.h"
+
+stdio_IMPORTS_start
+I_printf
+stdio_IMPORTS_end
+
+sysclib_IMPORTS_start
+I_look_ctype_table
+I_memcmp
+I_memcpy
+I_memset
+I_bzero
+I_sprintf
+I_strcat
+I_strcpy
+I_strlen
+I_strncmp
+I_strncpy
+I_strtol
+sysclib_IMPORTS_end
+
+sysmem_IMPORTS_start
+I_AllocSysMemory
+I_FreeSysMemory
+I_QueryMemSize
+I_QueryMaxFreeMemSize
+I_QueryTotalFreeMemSize
+I_QueryBlockSize
+I_QueryBlockTopAddress
+sysmem_IMPORTS_end
+
+thbase_IMPORTS_start
+I_CreateThread
+I_DeleteThread
+I_StartThread
+I_ExitThread
+I_TerminateThread
+I_ChangeThreadPriority
+I_GetThreadId
+I_ReferThreadStatus
+I_SleepThread
+I_WakeupThread
+I_CancelWakeupThread
+I_DelayThread
+I_GetSystemTime
+I_USec2SysClock
+I_SysClock2USec
+thbase_IMPORTS_end
+
+thsemap_IMPORTS_start
+I_CreateSema
+I_DeleteSema
+I_SignalSema
+I_WaitSema
+I_PollSema
+I_ReferSemaStatus
+thsemap_IMPORTS_end
+
+thevent_IMPORTS_start
+I_CreateEventFlag
+I_DeleteEventFlag
+I_SetEventFlag
+I_ClearEventFlag
+I_WaitEventFlag
+I_PollEventFlag
+I_ReferEventFlagStatus
+thevent_IMPORTS_end
+
+intrman_IMPORTS_start
+I_CpuSuspendIntr
+I_CpuResumeIntr
+I_CpuEnableIntr
+I_CpuDisableIntr
+I_QueryIntrContext
+I_RegisterIntrHandler
+I_ReleaseIntrHandler
+I_EnableIntr
+I_DisableIntr
+intrman_IMPORTS_end

@@ -19,9 +19,9 @@ struct RpcCall {
 // as they start, so serverIds may grow and Sif::registerServer may be called
 // again: an emulated IOP claims ids as its guest modules register them, and a
 // game shipping its own build of a module claims ids another one held.
-class IopServer {
+class IopHleServer {
 public:
-    virtual ~IopServer() = default;
+    virtual ~IopHleServer() = default;
 
     virtual std::string_view name() const = 0;
     virtual std::span<const u32> serverIds() const = 0;

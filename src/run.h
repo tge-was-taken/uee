@@ -3,32 +3,11 @@
 #include "interpreter.h"
 #include "kernel.h"
 #include "memory.h"
+#include "stop.h"
 #include "translate.h"
 #include "types.h"
 
-#include <string>
-
 namespace uee {
-
-enum class StopReason {
-    Exited,
-    Returned,
-    ReachedLimit,
-    Unimplemented,
-    Undecodable,
-    UnknownSyscall,
-    UnmappedAccess,
-    Deadlocked,
-    WentIdle,
-};
-
-struct Stop {
-    StopReason reason = StopReason::ReachedLimit;
-    u32 pc = 0;
-    std::string detail;
-};
-
-std::string describe(const Stop& stop);
 
 Stop run(Machine& machine, u64 instructionLimit);
 

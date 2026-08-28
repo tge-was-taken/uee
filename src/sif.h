@@ -1,13 +1,13 @@
 #pragma once
 
-#include "iop_cdvdfsv.h"
-#include "iop_fileio.h"
-#include "iop_loadfile.h"
-#include "iop_server.h"
-#include "iop_cdvdfsv.h"
-#include "iop_fileio.h"
-#include "iop_loadfile.h"
-#include "iop_server.h"
+#include "iop_hle_cdvdfsv.h"
+#include "iop_hle_fileio.h"
+#include "iop_hle_loadfile.h"
+#include "iop_hle_server.h"
+#include "iop_hle_cdvdfsv.h"
+#include "iop_hle_fileio.h"
+#include "iop_hle_loadfile.h"
+#include "iop_hle_server.h"
 #include "memory.h"
 #include "sbus.h"
 #include "types.h"
@@ -44,7 +44,7 @@ public:
 
     // A later registration takes the service ids off the one that held them,
     // which is what a game shipping its own build of a module does.
-    void registerServer(IopServer& server);
+    void registerServer(IopHleServer& server);
 
     void receive(u32 transfers, u32 count, u64 hsync);
 
@@ -69,16 +69,16 @@ private:
     void replyToRequest(u32 packet, u32 request, u32 server, u32 buffer);
     void send(std::vector<u32> packet);
 
-    IopServer* serverFor(u32 serverId) const;
+    IopHleServer* serverFor(u32 serverId) const;
     u32 serverAddress(u32 serverId);
     u32 serverIdAt(u32 address) const;
 
     Memory& mMemory;
     Sbus& mSbus;
-    IopFileio mFileIo;
-    IopLoadfile mLoadFile;
-    IopCdvdfsv mCdvd;
-    std::map<u32, IopServer*> mRegistered;
+    IopHleFileio mFileIo;
+    IopHleLoadfile mLoadFile;
+    IopHleCdvdfsv mCdvd;
+    std::map<u32, IopHleServer*> mRegistered;
 
     u32 mEeCommandBuffer = 0;
     u64 mRebootAt = 0;

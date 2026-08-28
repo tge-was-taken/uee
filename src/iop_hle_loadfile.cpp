@@ -1,6 +1,6 @@
 // LOADFILE md5 12335f3c69c0b335624dd0328bd8bee4.
 
-#include "iop_loadfile.h"
+#include "iop_hle_loadfile.h"
 
 #include "syscall_stubs.h"
 
@@ -30,11 +30,11 @@ constexpr u32 kEntryResult = 1;
 
 }  // namespace
 
-IopLoadfile::IopLoadfile(Memory& memory) : mMemory(memory) {}
+IopHleLoadfile::IopHleLoadfile(Memory& memory) : mMemory(memory) {}
 
-std::span<const u32> IopLoadfile::serverIds() const { return kServerIds; }
+std::span<const u32> IopHleLoadfile::serverIds() const { return kServerIds; }
 
-s32 IopLoadfile::call(u32 serverId, const RpcCall& call) {
+s32 IopHleLoadfile::call(u32 serverId, const RpcCall& call) {
     if (call.number == kVersion) {
         return static_cast<s32>(kVersion3100);
     }
@@ -47,7 +47,7 @@ s32 IopLoadfile::call(u32 serverId, const RpcCall& call) {
 
 // LOADFILE: LoadModuleFromFile @ 0x10dc. Nothing here runs IOP code, so the
 // module is answered for rather than loaded.
-s32 IopLoadfile::loadModule(const RpcCall& call) {
+s32 IopHleLoadfile::loadModule(const RpcCall& call) {
     std::string path;
     for (u32 i = 0; i < kPathLimit; ++i) {
         const char letter = static_cast<char>(mMemory.read8(call.argument + kPath + i));

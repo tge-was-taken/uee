@@ -1,14 +1,14 @@
 #pragma once
 
-#include "iop_server.h"
+#include "iop_hle_server.h"
 #include "memory.h"
 #include "types.h"
 
 namespace uee {
 
-class IopLoadfile final : public IopServer {
+class IopHleLoadfile final : public IopHleServer {
 public:
-    explicit IopLoadfile(Memory& memory);
+    explicit IopHleLoadfile(Memory& memory);
 
     std::string_view name() const override { return "LOADFILE"; }
     std::span<const u32> serverIds() const override;

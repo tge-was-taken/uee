@@ -2,6 +2,7 @@
 
 #include "fpu.h"
 #include "fpu_handlers.h"
+#include "instruction.h"
 #include "memory.h"
 #include "r5900.h"
 #include "types.h"
@@ -15,16 +16,6 @@
 #include <utility>
 
 namespace uee {
-
-namespace reg {
-constexpr u32 zero = 0, at = 1, v0 = 2, v1 = 3;
-constexpr u32 a0 = 4, a1 = 5, a2 = 6, a3 = 7;
-constexpr u32 t0 = 8, t1 = 9, t2 = 10, t3 = 11, t4 = 12, t5 = 13, t6 = 14, t7 = 15;
-constexpr u32 s0 = 16, s1 = 17, s2 = 18, s3 = 19, s4 = 20, s5 = 21, s6 = 22, s7 = 23;
-constexpr u32 t8 = 24, t9 = 25, k0 = 26, k1 = 27;
-constexpr u32 gp = 28, sp = 29, fp = 30, ra = 31;
-}  // namespace reg
-
 
 // The MMI unit is the same operation repeated across a register at one of three
 // widths, so the lane walk is written once and the op supplies the arithmetic.

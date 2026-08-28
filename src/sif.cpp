@@ -138,7 +138,7 @@ void Sif::initialiseCommand(u32 packet) {
 }
 
 // SIFCMD: sifcmd_SifRegisterRpc @ 0x1130
-void Sif::registerServer(IopServer& server) {
+void Sif::registerServer(IopHleServer& server) {
     for (const u32 serverId : server.serverIds()) {
         const auto held = mRegistered.find(serverId);
         if (held != mRegistered.end() && held->second != &server) {
@@ -149,7 +149,7 @@ void Sif::registerServer(IopServer& server) {
     }
 }
 
-IopServer* Sif::serverFor(u32 serverId) const {
+IopHleServer* Sif::serverFor(u32 serverId) const {
     const auto found = mRegistered.find(serverId);
     return found == mRegistered.end() ? nullptr : found->second;
 }
@@ -189,7 +189,7 @@ void Sif::callServer(u32 packet, const std::optional<Transfer>& payload) {
     const u32 receiveSize = mMemory.read32(packet + kCallReceiveSize * 4);
     const RpcCall call{number, payload ? payload->source : 0, receive, receiveSize};
 
-    IopServer* server = serverFor(serverId);
+    IopHleServer* server = serverFor(serverId);
     if (server == nullptr) {
         reportStub(std::format("sif server {:08x} call {}", serverId, number));
     }

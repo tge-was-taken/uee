@@ -1,0 +1,17 @@
+-- TEST BEGIN
+create: handle 1
+refer: init 0000000f, current 0000000f, waiting 0
+delete: 0
+delete twice: -409
+unknown: -409 -409 -409
+set unions: 000000ff
+clear keeps its mask: 0000000f
+poll or: 0 0000000c
+poll and met: 0 0000000c
+poll and unmet: -421
+poll or unmet: -421
+poll clear: 0 0000000c
+cleared: -421
+zero pattern: -423
+bad mode: -405
+-- TEST END

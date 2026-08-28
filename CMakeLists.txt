@@ -51,14 +51,19 @@ add_library(uee
     src/sbus.cpp
     src/dmac.cpp
     src/sif.cpp
-    src/iop_fileio.cpp
-    src/iop_loadfile.cpp
-    src/iop_cdvdfsv.cpp
+    src/iop_hle_fileio.cpp
+    src/iop_hle_loadfile.cpp
+    src/iop_hle_cdvdfsv.cpp
     src/disc.cpp
     src/patches.cpp
     src/vif.cpp
     src/gif.cpp
     src/vu_micro.cpp
+    src/irx.cpp
+    src/iop_interpreter.cpp
+    src/iop_kernel.cpp
+    src/iop_translate.cpp
+    src/iop_run.cpp
     src/run.cpp)
 target_include_directories(uee PUBLIC src)
 target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus)
@@ -87,6 +92,12 @@ target_link_libraries(test_autotest PRIVATE uee spdlog::spdlog)
 
 add_executable(translate_elf tests/translate_elf.cpp)
 target_link_libraries(translate_elf PRIVATE uee spdlog::spdlog)
+
+add_executable(test_iop_autotest tests/test_iop_autotest.cpp)
+target_link_libraries(test_iop_autotest PRIVATE uee spdlog::spdlog)
+
+add_executable(translate_irx tests/translate_irx.cpp)
+target_link_libraries(translate_irx PRIVATE uee spdlog::spdlog)
 
 set(AUTOTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps2autotests/tests)
 # Every vendored ELF that comes with recorded output, so a test category cannot
@@ -124,6 +135,61 @@ foreach(elf ${AUTOTEST_ELFS})
     add_test(NAME translated.${name}
              COMMAND translated_${name} ${elf} ${AUTOTEST_DIR}/${relative}.expected)
 endforeach()
+
+file(GLOB IOP_AUTOTEST_IRXS ${AUTOTEST_DIR}/cpu/iop/*.irx)
+foreach(irx ${IOP_AUTOTEST_IRXS})
+    file(RELATIVE_PATH relative ${AUTOTEST_DIR} ${irx})
+    string(REGEX REPLACE "\\.irx$" "" relative ${relative})
+    string(REPLACE "/" "." name ${relative})
+    add_test(NAME ${name} COMMAND test_iop_autotest ${irx} ${AUTOTEST_DIR}/${relative}.expected)
+
+    set(generated ${CMAKE_CURRENT_BINARY_DIR}/translated/${name}.cpp)
+    add_custom_command(OUTPUT ${generated}
+                       COMMAND ${CMAKE_COMMAND} -E make_directory
+                               ${CMAKE_CURRENT_BINARY_DIR}/translated
+                       COMMAND translate_irx ${irx} ${generated}
+                       DEPENDS translate_irx ${irx}
+                       COMMENT "Translating ${name}")
+    add_executable(translated_${name} tests/test_iop_translated.cpp ${generated})
+    target_link_libraries(translated_${name} PRIVATE uee spdlog::spdlog)
+    add_test(NAME translated.${name}
+             COMMAND translated_${name} ${irx} ${AUTOTEST_DIR}/${relative}.expected)
+endforeach()
+
+# IOP guest tests are IRX modules built with the IOP toolchain and run through
+# the same driver as the vendored IOP autotests. Their expected output is
+# derived from the resident IOP services recorded in the module IDBs.
+find_program(IOP_GCC mipsel-none-elf-gcc HINTS $ENV{PS2DEV}/iop/bin)
+if(IOP_GCC AND EXISTS "$ENV{PS2SDK}/iop/startup/linkfile")
+    set(PS2SDK $ENV{PS2SDK})
+    set(IOP_GUEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/iop_guest)
+    set(IOP_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/iop_guest)
+    # -mno-explicit-relocs keeps each high half next to its own low half, which
+    # is the only pairing the IRX loader relocates.
+    set(IOP_CFLAGS -D_IOP -fno-builtin -G0 -Os -Wall -msoft-float -mno-explicit-relocs
+                   -I${PS2SDK}/iop/include -I${PS2SDK}/common/include)
+    foreach(guest printf sysclib thsemap thevent thbase sysmem intrman)
+        set(irx ${IOP_BUILD_DIR}/${guest}.irx)
+        add_custom_command(OUTPUT ${irx}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${IOP_BUILD_DIR}
+            COMMAND ${IOP_GCC} ${IOP_CFLAGS} -fno-toplevel-reorder
+                    -c ${IOP_GUEST_DIR}/imports.c -o ${IOP_BUILD_DIR}/${guest}.imports.o
+            COMMAND ${IOP_GCC} ${IOP_CFLAGS}
+                    -c ${IOP_GUEST_DIR}/${guest}.c -o ${IOP_BUILD_DIR}/${guest}.o
+            COMMAND ${IOP_GCC} ${IOP_CFLAGS} -T${PS2SDK}/iop/startup/linkfile -Os -nostdlib -dc -r
+                    -o ${IOP_BUILD_DIR}/${guest}.elf
+                    ${IOP_BUILD_DIR}/${guest}.o ${IOP_BUILD_DIR}/${guest}.imports.o
+            COMMAND ${PS2SDK}/bin/iopfixup --rb --irx1 --allow-zero-text
+                    -o ${irx} ${IOP_BUILD_DIR}/${guest}.elf
+            DEPENDS ${IOP_GUEST_DIR}/${guest}.c ${IOP_GUEST_DIR}/imports.c
+            COMMENT "Building IOP guest test ${guest}")
+        add_custom_target(iop_guest_${guest} ALL DEPENDS ${irx})
+        add_test(NAME iop_guest.${guest}
+                 COMMAND test_iop_autotest ${irx} ${IOP_GUEST_DIR}/${guest}.expected)
+    endforeach()
+else()
+    message(STATUS "IOP toolchain not found; IOP guest tests are skipped")
+endif()
 
 # Guest tests are ps2sdk programs built with the PS2 toolchain and run through
 # the same driver as the vendored autotests. Their expected output is derived

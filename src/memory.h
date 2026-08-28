@@ -11,6 +11,7 @@
 namespace uee {
 
 constexpr u32 kMainRamSize = 32 * 1024 * 1024;
+constexpr u32 kIopRamSize = 2 * 1024 * 1024;
 constexpr u32 kScratchpadBase = 0x70000000;
 constexpr u32 kScratchpadSize = 16 * 1024;
 constexpr u32 kMmioBase = 0x10000000;
@@ -162,5 +163,6 @@ private:
 };
 
 Memory makeMainMemory();
+Memory makeIopMemory();
 
 }  // namespace uee

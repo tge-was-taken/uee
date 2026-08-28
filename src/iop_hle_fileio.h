@@ -1,6 +1,6 @@
 #pragma once
 
-#include "iop_server.h"
+#include "iop_hle_server.h"
 #include "memory.h"
 #include "types.h"
 
@@ -8,9 +8,9 @@
 
 namespace uee {
 
-class IopFileio final : public IopServer {
+class IopHleFileio final : public IopHleServer {
 public:
-    IopFileio(Memory& memory, std::string& console);
+    IopHleFileio(Memory& memory, std::string& console);
 
     std::string_view name() const override { return "FILEIO"; }
     std::span<const u32> serverIds() const override;

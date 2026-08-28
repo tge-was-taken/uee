@@ -4,15 +4,10 @@
 #include "instruction.h"
 #include "memory.h"
 #include "ee_context.h"
+#include "stop.h"
 #include "vu0_interpreter.h"
 
 namespace uee {
-
-enum class Status {
-    Executed,
-    Unimplemented,   // a real encoding this interpreter does not model yet
-    Undecodable,     // no source names this encoding
-};
 
 class Interpreter {
 public:

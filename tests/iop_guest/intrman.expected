@@ -1,0 +1,13 @@
+-- TEST BEGIN
+thread context: 0
+state written: 1 1
+nesting seen: 1
+restored: 1
+register: 1
+register twice refused: 1
+release: 1
+release twice refused: 1
+line past the end: 1
+negative line: 1
+no handler: 1
+-- TEST END
