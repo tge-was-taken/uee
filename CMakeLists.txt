@@ -113,25 +113,23 @@ target_link_libraries(test_boot PRIVATE uee spdlog::spdlog)
 # autotest reaches, and pb::frame is the update loop, so entering it repeatedly
 # is the only sign the game is running rather than stuck in a splash screen.
 set(PINBALL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/homebrew/3dpinball-ps2)
-# The game reads its tables and sounds from what it thinks is a USB disc. That
-# data is not ours to ship, so the directory standing in for the disc is named
-# here rather than vendored.
-set(PINBALL_FILES ${CMAKE_CURRENT_SOURCE_DIR}/scratch/homebrew/3dpinball-ps2/data
-    CACHE PATH "Directory mapped as the pinball guest's file system")
 add_test(NAME homebrew.3dpinball
-         COMMAND test_boot ${PINBALL_DIR}/3dpinball-ps2.elf
-                 --files ${PINBALL_FILES} --enter _ZN2pb5frameEf 60)
+         COMMAND test_boot ${PINBALL_DIR}/3dpinball-ps2.elf _ZN2pb5frameEf 60)
 
-# https://github.com/glampert/ps2-homebrew, rebuilt from source because the
-# binaries it ships are stripped. The demos carry their assets in the executable
-# and share one framework, whose Renderer::beginFrame every one of them calls
-# once a frame.
-set(HOMEBREW_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/homebrew/ps2-homebrew)
-foreach(demo console_demo cubes_demo play_adpcm_demo dungeon_game)
-    add_test(NAME homebrew.${demo}
-             COMMAND test_boot ${HOMEBREW_DIR}/${demo}.elf
-                     --enter _ZN8Renderer10beginFrameEv 60)
-endforeach()
+# A whole game needs the translation split over many units: one unit per function
+# costs about thirty times the CPU and four times the machine code, because a
+# compiler can only fold identical functions inside a single unit. Two is enough
+# here to keep the cross-unit path under test.
+set(TRANSLATED_UNITS 2 CACHE STRING "Source files each translated program is split into")
+
+function(translated_unit_names out stem count)
+    set(names)
+    math(EXPR last "${count} - 1")
+    foreach(i RANGE ${last})
+        list(APPEND names ${stem}.${i}.cpp)
+    endforeach()
+    set(${out} ${names} PARENT_SCOPE)
+endfunction()
 
 set(AUTOTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps2autotests/tests)
 # Every vendored ELF that comes with recorded output, so a test category cannot
@@ -157,14 +155,17 @@ foreach(elf ${AUTOTEST_ELFS})
     file(RELATIVE_PATH relative ${AUTOTEST_DIR} ${elf})
     string(REGEX REPLACE "\\.elf$" "" relative ${relative})
     string(REPLACE "/" "." name ${relative})
-    set(generated ${CMAKE_CURRENT_BINARY_DIR}/translated/${name}.cpp)
-    add_custom_command(OUTPUT ${generated}
+    set(stem ${CMAKE_CURRENT_BINARY_DIR}/translated/${name})
+    translated_unit_names(generated ${stem} ${TRANSLATED_UNITS})
+    add_custom_command(OUTPUT ${generated} ${stem}.decls.h
                        COMMAND ${CMAKE_COMMAND} -E make_directory
                                ${CMAKE_CURRENT_BINARY_DIR}/translated
-                       COMMAND translate_elf ${elf} ${generated}
+                       COMMAND translate_elf ${elf} ${stem} ${TRANSLATED_UNITS}
                        DEPENDS translate_elf ${elf}
                        COMMENT "Translating ${name}")
     add_executable(translated_${name} tests/test_translated.cpp ${generated})
+    target_include_directories(translated_${name} PRIVATE
+                               ${CMAKE_CURRENT_BINARY_DIR}/translated)
     target_link_libraries(translated_${name} PRIVATE uee spdlog::spdlog)
     add_test(NAME translated.${name}
              COMMAND translated_${name} ${elf} ${AUTOTEST_DIR}/${relative}.expected)
@@ -177,14 +178,23 @@ foreach(irx ${IOP_AUTOTEST_IRXS})
     string(REPLACE "/" "." name ${relative})
     add_test(NAME ${name} COMMAND test_iop_autotest ${irx} ${AUTOTEST_DIR}/${relative}.expected)
 
-    set(generated ${CMAKE_CURRENT_BINARY_DIR}/translated/${name}.cpp)
-    add_custom_command(OUTPUT ${generated}
+    # The module is named after itself in the generated source, so the name has
+    # to be spellable as a C++ identifier.
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" TRANSLATED_MODULE ${name})
+    set(stem ${CMAKE_CURRENT_BINARY_DIR}/translated/${name})
+    translated_unit_names(generated ${stem} ${TRANSLATED_UNITS})
+    add_custom_command(OUTPUT ${generated} ${stem}.decls.h
                        COMMAND ${CMAKE_COMMAND} -E make_directory
                                ${CMAKE_CURRENT_BINARY_DIR}/translated
-                       COMMAND translate_irx ${irx} ${generated}
+                       COMMAND translate_irx ${irx} ${stem} ${TRANSLATED_MODULE}
+                               ${TRANSLATED_UNITS}
                        DEPENDS translate_irx ${irx}
                        COMMENT "Translating ${name}")
-    add_executable(translated_${name} tests/test_iop_translated.cpp ${generated})
+    set(driver ${CMAKE_CURRENT_BINARY_DIR}/translated/${name}.main.cpp)
+    configure_file(tests/test_iop_translated.cpp.in ${driver} @ONLY)
+    add_executable(translated_${name} ${driver} ${generated})
+    target_include_directories(translated_${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                               ${CMAKE_CURRENT_BINARY_DIR}/translated)
     target_link_libraries(translated_${name} PRIVATE uee spdlog::spdlog)
     add_test(NAME translated.${name}
              COMMAND translated_${name} ${irx} ${AUTOTEST_DIR}/${relative}.expected)

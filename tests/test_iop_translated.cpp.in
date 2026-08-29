@@ -1,0 +1,9 @@
+#include "iop_autotest.h"
+
+namespace uee {
+extern TranslatedIrx @TRANSLATED_MODULE@Module;
+}
+
+int main(int argc, char** argv) {
+    return uee::autotest::runIop(argc, argv, &uee::@TRANSLATED_MODULE@Module);
+}

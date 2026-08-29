@@ -40,17 +40,39 @@ int main(int argc, char** argv) {
     const std::vector<u8> image{std::istreambuf_iterator<char>(file),
                                 std::istreambuf_iterator<char>()};
 
-    uee::Memory memory = uee::makeMainMemory();
-    uee::Interpreter interpreter(memory);
-    uee::Kernel kernel(interpreter.ee, memory);
-    interpreter.ee.cpu.pc = uee::loadElf(image, memory).entry;
+    uee::GameConfig config;
     if (argc > 3) {
         try {
-            uee::applyPatches(memory, uee::loadPatches(argv[3]));
+            config = uee::loadGameConfig(argv[3]);
         } catch (const std::exception& error) {
             log.fatal("{}", error.what());
             return 2;
         }
+    }
+
+    uee::Memory memory = uee::makeMainMemory();
+    uee::Interpreter interpreter(memory);
+    uee::Kernel kernel(interpreter.ee, memory, config);
+    interpreter.ee.cpu.pc = uee::loadElf(image, memory).entry;
+    uee::applyPatches(memory, config.patches);
+
+    // Resident before the game asks, so the reboot needs no modelling.
+    const std::filesystem::path root =
+        argc > 3 ? std::filesystem::path(argv[3]).parent_path() : std::filesystem::path();
+    for (const std::string& module : config.preload) {
+        const std::filesystem::path path = root / module;
+        std::ifstream irx(path, std::ios::binary);
+        if (!irx) {
+            log.fatal("cannot open preloaded module {}", path.string());
+            return 2;
+        }
+        const std::vector<u8> bytes{std::istreambuf_iterator<char>(irx),
+                                    std::istreambuf_iterator<char>()};
+        if (!kernel.iop().loadModule(path.stem().string(), bytes)) {
+            log.fatal("preloaded module {} did not start", path.string());
+            return 2;
+        }
+        log.info("preloaded {}", path.stem().string());
     }
 
     uee::Disc disc{argc > 2 ? argv[2] : ""};

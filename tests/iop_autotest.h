@@ -14,12 +14,13 @@
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
 namespace uee::autotest {
 
-inline int runIop(int argc, char** argv, IopFunctionRunner translated) {
+inline int runIop(int argc, char** argv, TranslatedIrx* translated) {
     configureLogging();
     if (argc < 3) {
         spdlog::error("usage: {} <test.irx> <test.expected>", argv[0]);
@@ -32,13 +33,23 @@ inline int runIop(int argc, char** argv, IopFunctionRunner translated) {
     Memory memory = makeIopMemory();
     IopInterpreter interpreter(memory);
     std::vector<Import> imports;
-    const IrxModule module = loadIrx(readFile(irxPath), memory, kIopModuleBase, {}, imports);
+    const u32 base = translated != nullptr ? translated->base : kIopModuleBase;
+    const IrxModule module = loadIrx(readFile(irxPath), memory, base, {}, imports);
+    if (translated != nullptr) {
+        translated->importBase = static_cast<u32>(imports.size());
+        for (const TranslatedImport& import : translated->imports) {
+            imports.push_back(Import{std::string(import.module), import.id});
+        }
+    }
     std::string console;
     IopKernel kernel(interpreter.iop, memory, imports,
                      {module.program.imageEnd, kIopStackTop - kIopStackSize}, console);
     enterModule(interpreter.iop, module);
 
-    IopMachine machine{interpreter, memory, kernel, translated};
+    TranslatedIrx* active[1] = {translated};
+    IopMachine machine{interpreter, memory, kernel,
+                       translated != nullptr ? std::span<TranslatedIrx* const>(active)
+                                             : std::span<TranslatedIrx* const>{}};
     const Symbols symbols;
     const Stop stop = run(machine, kInstructionLimit, symbols);
     const std::string& actual = console;
