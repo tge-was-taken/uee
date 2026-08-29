@@ -67,6 +67,9 @@ constexpr u32 kProcessorCycleEvent = 1;
 constexpr u32 kStatus = 12;
 constexpr u32 kCause = 13;
 constexpr u32 kEpc = 14;
+constexpr u32 kProcessorId = 15;
+// What an R5900 reports: revision 2.2 of implementation 0x2e.
+constexpr u32 kR5900Id = 0x00002e20;
 constexpr u32 kErrorEpc = 30;
 
 constexpr u32 kInterruptEnable = 1u << 0;

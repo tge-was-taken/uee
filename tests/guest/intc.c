@@ -70,7 +70,7 @@ int main(void)
     printf("cause 15: %d\n", syscall3(kAddIntcHandler, 15, (int)stampA, 0));
     printf("cause 1 reserved: %d\n", syscall3(kAddIntcHandler, 1, (int)stampA, 0));
 
-    // next 0 appends; next -1 puts the new handler in front of the whole chain.
+    // next -1 appends; next 0 puts the new handler in front of the whole chain.
     a = syscall3(kAddIntcHandler, 2, (int)stampA, 0);
     b = syscall3(kAddIntcHandler, 2, (int)stampB, 0);
     c = syscall3(kAddIntcHandler, 2, (int)stampC, -1);

@@ -28,7 +28,7 @@ constexpr u32 kCallbackReturn = 0xF0000000;
 constexpr u32 kNoHalt = 1;
 
 // Guest calls become host calls, so this carries the guest's own call depth.
-constexpr usize kThreadStackSize = 64 * 1024 * 1024;
+constexpr usize kThreadStackSize = 8 * 1024 * 1024;
 
 constexpr u64 kCallLimit = 1'000'000'000;
 
@@ -203,9 +203,10 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
             continue;
         }
 
-        if (kernel.countExecuted(1)) {
-            kernel.advanceClock();
-        }
+        // One instruction at a time is cheap enough to keep the clock exact here.
+        // The interval only spares emitted code, which reports a whole block.
+        kernel.countExecuted(1);
+        kernel.advanceClock();
         kernel.deliverInterrupts();
         if (idle != nullptr && (kernel.executed() & kIdleInterval) == 0) {
             idle->sample(cpu.pc);

@@ -4,13 +4,13 @@ cause 15: -1
 cause 1 reserved: -1
 ids valid and distinct: 1
 pool grew by: 3
-chain order: cab
+chain order: bac
 disable middle: 1
-without it: cb
+without it: bc
 enable middle: 1
-restored: cab
+restored: bac
 remove head: 2
-after removal: ab
+after removal: ba
 remove twice: -1
 remove id 0: -1
 remove id 200: -1

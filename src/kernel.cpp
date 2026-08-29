@@ -39,6 +39,9 @@ constexpr u32 kSyscallRegister = 3;
 constexpr u32 kStatusIntc = 1u << 12;
 constexpr u32 kStatusDmac = 1u << 13;
 constexpr u32 kStatusMasterEnable = 1u << 16;
+constexpr u32 kMachinePsMode = 0x8000;
+// KERNEL: SifSetDChain @ 0x8000c8b0 answers with the SIF0 channel control it left.
+constexpr u32 kSifDChainResult = 0x184;
 
 constexpr u32 kGsImrRegister = 0x12001010;
 constexpr s32 kDeci2Call = 124;
@@ -98,6 +101,7 @@ Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config)
     // INTC and DMAC interrupts. Nothing else here would ever set this up.
     mContext.cpu.cop0[cop0::kStatus] =
         cop0::kInterruptEnable | kStatusIntc | kStatusDmac | kStatusMasterEnable;
+    mContext.cpu.cop0[cop0::kProcessorId] = cop0::kR5900Id;
 
     // KERNEL: InitThreads @ 0x80004ec0 ends with CreateRomModuleThread("EENULL"),
     // which takes the first control block. Ids a guest sees therefore start at 1,
@@ -146,8 +150,8 @@ SyscallResult Kernel::handleSyscall() {
         return SyscallResult::Handled;
     }
 
-    log.trace("syscall {} a0={:08x} a1={:08x} thread {} status {} wait {} wakeups {} ra={:08x}",
-              number, readArgument(0), readArgument(1), mThreads.current(),
+    log.trace("syscall {} {} a0={:08x} a1={:08x} thread {} status {} wait {} wakeups {} ra={:08x}",
+              number, nameOfSyscall(number), readArgument(0), readArgument(1), mThreads.current(),
               mThreads.at(mThreads.current()).status, mThreads.at(mThreads.current()).waitType,
               mThreads.at(mThreads.current()).wakeupCount,
               static_cast<u32>(mContext.cpu.gpr[kReturnAddress].lo));
@@ -331,15 +335,28 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             return SyscallResult::Handled;
 
         case Syscall::MachineType:
+            returnValue(mMachineType);
+            return SyscallResult::Handled;
+
+        // PSMode raises a bit in the word MachineType reports.
         case Syscall::PSMode:
+            mMachineType |= kMachinePsMode;
+            returnValue(0);
+            return SyscallResult::Handled;
+
+        case Syscall::SetOsdConfigParam:
+        case Syscall::SetOsdConfigParam2:
+            mOsdConfig = mMemory.read32(arg(0));
+            returnValue(0);
+            return SyscallResult::Handled;
+
+        case Syscall::GetOsdConfigParam:
+        case Syscall::GetOsdConfigParam2:
+            mMemory.write32(arg(0), mOsdConfig);
             returnValue(0);
             return SyscallResult::Handled;
 
         case Syscall::FlushCache:
-        case Syscall::SetOsdConfigParam:
-        case Syscall::GetOsdConfigParam:
-        case Syscall::SetOsdConfigParam2:
-        case Syscall::GetOsdConfigParam2:
             returnValue(0);
             return SyscallResult::Handled;
 
@@ -407,7 +424,6 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
 
         case Syscall::SifSetReg:
             returnValue(writeSifRegister(arg(0), arg(1)));
-            returnValue(0);
             return SyscallResult::Handled;
 
         case Syscall::SifGetReg:
@@ -415,7 +431,7 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             return SyscallResult::Handled;
 
         case Syscall::SifSetDChain:
-            returnValue(0);
+            returnValue(kSifDChainResult);
             return SyscallResult::Handled;
 
         // Every transfer this kernel accepts has already finished by the time
@@ -749,11 +765,14 @@ s32 Kernel::terminateThread(s32 id, bool) {
 
 // KERNEL: iChangeThreadPriority @ 0x80004280
 s32 Kernel::changeThreadPriority(s32 id, s32 priority, bool) {
-    if (!mThreads.isValid(id) || priority < 0 || priority >= kPriorityLevels) {
+    if (!mThreads.isValid(id) || priority < 0 || priority >= kUserPriorities) {
         return -1;
     }
     const usize target = (id == 0) ? mThreads.current() : static_cast<usize>(id);
     ThreadControlBlock& thread = mThreads.at(target);
+    if (thread.status == status::kDormant) {
+        return -1;
+    }
     const s32 previous = thread.currentPriority;
     if (thread.status == status::kRun || thread.status == status::kReady) {
         mThreads.removeFromReadyQueue(target);
@@ -771,7 +790,7 @@ s32 Kernel::changeThreadPriority(s32 id, s32 priority, bool) {
 
 // KERNEL: iRotateThreadReadyQueue @ 0x80004380
 s32 Kernel::rotateReadyQueue(s32 priority, bool) {
-    if (priority < 0 || priority >= kPriorityLevels) {
+    if (priority < 0 || priority >= kUserPriorities) {
         return -1;
     }
     mThreads.rotateReadyQueue(priority);
@@ -938,8 +957,15 @@ SyscallResult Kernel::exitCurrentThread(bool andDelete) {
 
     const s32 next = mThreads.chooseNext();
     if (next < 0) {
-        return SyscallResult::Exited;
+        // A thread waiting on an interrupt can still be made ready, so only a
+        // table with nothing left in it ends the program.
+        if (!mThreads.anyWaiting()) {
+            return SyscallResult::Exited;
+        }
+        mIdle = true;
+        return SyscallResult::Handled;
     }
+    mIdle = false;
     // The reset context is the one a restart has to see, so the registers this
     // thread is exiting with are deliberately dropped.
     loadThread(static_cast<usize>(next));
@@ -1301,7 +1327,9 @@ void Kernel::advanceClock() {
     // A reply lands on a later tick, so a guest that starts a transfer and then
     // waits on its semaphore blocks first, as it would against real hardware.
     mMmio.gs().advanceScanline();
+    mIop.advance(kIopInstructionsPerHsync);
     if (mSif.advance()) {
+        log.trace("sif0 reply delivered");
         mMmio.interrupts().raiseDmac(dmac::kSif0);
     }
     publishTimers();
@@ -1317,6 +1345,7 @@ void Kernel::advanceClock() {
 
     // Timer 3 compare is INTC cause 12, so a guest handler on that line sees
     // the same event the alarm callbacks come from.
+    log.trace("timer 3 compare, {} alarms due", expired.size());
     mMmio.interrupts().raiseIntc(intc::kTimer3);
     for (const ExpiredAlarm& alarm : expired) {
         mPendingCalls.push_back(GuestCall{alarm.callback, static_cast<u32>(alarm.id),
@@ -1335,6 +1364,7 @@ void Kernel::raiseFieldInterrupts() {
     if (blanking) {
         mMmio.gs().startVblank();
     }
+    log.trace("{} at scanline {}", blanking ? "vblank start" : "vblank end", line);
     mMmio.interrupts().raiseIntc(blanking ? intc::kVblankStart : intc::kVblankEnd);
     if (!blanking) {
         mIop.tickVblank();

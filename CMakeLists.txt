@@ -113,8 +113,16 @@ target_link_libraries(test_boot PRIVATE uee spdlog::spdlog)
 # autotest reaches, and pb::frame is the update loop, so entering it repeatedly
 # is the only sign the game is running rather than stuck in a splash screen.
 set(PINBALL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/homebrew/3dpinball-ps2)
-add_test(NAME homebrew.3dpinball
-         COMMAND test_boot ${PINBALL_DIR}/3dpinball-ps2.elf _ZN2pb5frameEf 60)
+# The game reads its own data off the mount, so without it it waits on files it
+# cannot open. The tree is not in the repository, so the test needs it present.
+set(PINBALL_DATA ${CMAKE_CURRENT_SOURCE_DIR}/scratch/homebrew/3dpinball-ps2/data)
+if(EXISTS ${PINBALL_DATA})
+    add_test(NAME homebrew.3dpinball
+             COMMAND test_boot ${PINBALL_DIR}/3dpinball-ps2.elf --files ${PINBALL_DATA}
+                     --enter _ZN2pb5frameEf 60)
+else()
+    message(STATUS "3dpinball data not found; its boot test is skipped")
+endif()
 
 # A whole game needs the translation split over many units: one unit per function
 # costs about thirty times the CPU and four times the machine code, because a

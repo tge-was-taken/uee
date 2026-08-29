@@ -10,6 +10,8 @@ namespace uee {
 
 constexpr usize kThreadCount = 256;
 constexpr s32 kPriorityLevels = 129;
+// The top level belongs to the idle thread, so a caller may not ask for it.
+constexpr s32 kUserPriorities = kPriorityLevels - 1;
 constexpr u32 kContextReserve = 0x2A0;
 constexpr u32 kStackReserve = 0x20;
 
@@ -74,6 +76,10 @@ public:
     void rotateReadyQueue(s32 priority);
     // The first thread of the first non-empty level at or above the search hint.
     s32 chooseNext();
+
+    // A thread an interrupt could still make ready, which is not the same as
+    // one that could run now.
+    bool anyWaiting() const;
 
     bool rescheduleWanted() const { return mReschedule; }
     void requestReschedule() { mReschedule = true; }

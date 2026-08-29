@@ -68,6 +68,15 @@ void ThreadTable::rotateReadyQueue(s32 priority) {
 }
 
 // KERNEL: the ready-queue scan in DispatchNextThread @ 0x80003940
+bool ThreadTable::anyWaiting() const {
+    for (const ThreadControlBlock& thread : mThreads) {
+        if ((thread.status & (status::kWait | status::kSuspend)) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 s32 ThreadTable::chooseNext() {
     for (s32 priority = mPriorityHint; priority < kPriorityLevels; ++priority) {
         Link& level = mReadyQueue[static_cast<usize>(priority)];

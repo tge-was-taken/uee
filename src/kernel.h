@@ -213,6 +213,8 @@ private:
     u32 mHandlerDepth = 0;
     u64 mExecuted = 0;
     u64 mNextService = kServiceInterval;
+    u32 mMachineType = 0;
+    u32 mOsdConfig = 0;
     bool mIdle = false;
 
     struct SyscallReturn {
