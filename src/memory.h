@@ -92,8 +92,9 @@ public:
     }
 
     u32 read32(u32 address) {
-        if (mMmio != nullptr) {
-            if (const std::optional<u32> value = mMmio->read(mMirror.apply(address))) {
+        const u32 folded = mMirror.apply(address);
+        if (mMmio != nullptr && isRegister(folded)) {
+            if (const std::optional<u32> value = mMmio->read(folded)) {
                 return *value;
             }
         }
@@ -112,17 +113,28 @@ public:
     }
 
     void write32(u32 address, u32 value) {
-        if (mMmio != nullptr && mMmio->write(mMirror.apply(address), value)) {
+        const u32 folded = mMirror.apply(address);
+        if (mMmio != nullptr && isRegister(folded) && mMmio->write(folded, value)) {
             return;
         }
         store(resolve(address, 4), value);
     }
 
+    // Speculative: must not latch a fault the guest never took.
+    std::optional<u32> peek32(u32 address) {
+        const u8* p = locate(address, 4);
+        return p != nullptr ? std::optional(load<u32>(p)) : std::nullopt;
+    }
+
 private:
-    bool isMmio(u32 address) const {
-        const u32 folded = mMirror.apply(address);
+
+private:
+    // Asking the register file costs a call that cannot inline.
+    static constexpr bool isRegister(u32 folded) {
         return folded - kMmioBase < kMmioSize || folded - kGsPrivBase < kGsPrivSize;
     }
+
+    bool isMmio(u32 address) const { return isRegister(mMirror.apply(address)); }
 
     template <typename T>
     static T load(const u8* p) {
@@ -142,11 +154,15 @@ private:
 
     // The raw address decodes before the mirrored one, so the scratchpad still
     // reaches itself where the mask would fold it onto the hardware window.
-    u8* resolve(u32 address, u32 size) {
+    u8* locate(u32 address, u32 size) {
         if (u8* p = find(address, size)) {
             return p;
         }
-        if (u8* p = find(mMirror.apply(address), size)) {
+        return find(mMirror.apply(address), size);
+    }
+
+    u8* resolve(u32 address, u32 size) {
+        if (u8* p = locate(address, size)) {
             return p;
         }
         if (!mFault) {
