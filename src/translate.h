@@ -1,15 +1,19 @@
 #pragma once
 
 #include "elf.h"
+#include "translator.h"
 #include "interpreter.h"
-#include "kernel.h"
 #include "memory.h"
 #include "ee_context.h"
 #include "types.h"
 
 #include <string>
+#include <string_view>
 
 namespace uee {
+
+// Every translated unit includes this, and kernel.h reaches spdlog.
+class Kernel;
 
 struct Machine;
 using FunctionRunner = bool (*)(Machine& machine, u32 pc);
@@ -37,6 +41,11 @@ bool call(Machine& machine, u32 target, u32 returnTo);
 
 bool syscall(Machine& machine, s32 number, u32 resumePc);
 
-std::string translate(Memory& memory, const Program& program);
+// What a block of emitted code ran. The clock, the interrupt handlers and the
+// other threads all depend on being told.
+void countExecuted(Machine& machine, u32 instructions);
+
+TranslatedSource translate(Memory& memory, const Program& program, usize units,
+                           std::string_view declarationsHeader);
 
 }  // namespace uee

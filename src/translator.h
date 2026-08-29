@@ -6,6 +6,7 @@
 #include "types.h"
 
 #include <map>
+#include <unordered_map>
 #include <optional>
 #include <set>
 #include <string>
@@ -21,12 +22,19 @@ struct Trap {
     bool continues = false;
 };
 
+// The source files a program was split into, and the declarations they share.
+struct TranslatedSource {
+    std::string declarations;
+    std::vector<std::string> units;
+};
+
 class Translator {
 public:
     Translator(Memory& memory, const Program& program);
     virtual ~Translator() = default;
 
-    std::string run();
+    // One unit per function costs 30x the CPU and 4x the machine code.
+    TranslatedSource run(usize units, std::string_view declarationsHeader);
 
 protected:
     virtual std::string_view getMachineType() const = 0;
@@ -45,6 +53,12 @@ protected:
     virtual std::string emitBeforeInstruction() const { return {}; }
     virtual std::string countInstructions(u32 count) const;
 
+    // The namespace opens in every unit; the module is defined in one.
+    virtual std::string emitNamespaceOpen() const { return {}; }
+    virtual std::string emitNamespaceClose() const { return {}; }
+    virtual std::string emitBeforeNamespace() const { return {}; }
+    virtual std::string emitDefinitions() const { return {}; }
+
 private:
     bool inCode(u32 address) const;
     void seed(u32 function);
@@ -59,9 +73,12 @@ private:
     std::vector<u32> recoverJumpTable(u32 jrPc, u32 source);
     std::optional<Instruction> fetch(u32 pc);
     void discoverFrom(std::vector<u32> seeds);
-    void claim(u32 function);
-    std::vector<u32> successorsOf(u32 blockStart);
+    void partitionBlocks();
+    std::vector<u32> claimFrom(u32 function);
+    const std::vector<u32>& successorsOf(u32 blockStart);
+    std::vector<u32> computeSuccessors(u32 blockStart);
     bool owns(u32 function, u32 target) const;
+    u32 wordOf(u32 pc) const { return (pc - mProgram.codeStart) / 4; }
     std::string go(u32 target, u32 function) const;
     static void dropJumpToNext(std::string& text, u32 next);
     static std::string annotate(const std::string& statement, u32 pc, Instruction insn,
@@ -73,7 +90,10 @@ private:
     std::string counted(const std::string& body) const;
     std::string emitBlock(u32 blockStart, u32 function);
     std::string emitExit(const ControlFlow& cf, Op op, Instruction insn, u32 pc, u32 function);
-    std::string render();
+    std::string emitFunction(u32 function, const std::vector<u32>& blockStarts);
+    std::string emitDeclarations() const;
+    std::string emitDispatch() const;
+    TranslatedSource render(usize units, std::string_view declarationsHeader);
 
     static constexpr s32 kCommentColumn = 60;
 
@@ -82,7 +102,12 @@ private:
     std::vector<bool> mCovered;
     std::set<u32> mFunctions;
     std::set<u32> mBlockStarts;
-    std::map<u32, std::set<u32>> mOwned;
+    std::map<u32, std::vector<u32>> mOwned;
+    // Which function each block belongs to, so a block belongs to exactly one.
+    // No entry is kNoOwner.
+    static constexpr u32 kNoOwner = 0xFFFFFFFFu;
+    std::vector<u32> mOwner;
+    std::map<u32, std::vector<u32>> mSuccessors;
     std::map<u32, std::vector<u32>> mJumpTables;
     std::set<u32> mTableWords;
     std::set<u32> mWalked;

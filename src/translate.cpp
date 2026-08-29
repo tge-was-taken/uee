@@ -516,7 +516,7 @@ std::optional<Trap> EeTranslator::emitTrap(Instruction insn, Instruction previou
 
 
 std::string EeTranslator::countInstructions(u32 count) const {
-    return std::format("countPerformanceEvents(ee.cpu, {});", count);
+    return std::format("countExecuted(m, {});", count);
 }
 
 }  // namespace
@@ -528,7 +528,7 @@ std::string Translator::countInstructions(u32) const {
     return {};
 }
 
-std::string Translator::run() {
+TranslatedSource Translator::run(usize units, std::string_view declarationsHeader) {
     seed(mProgram.entry);
     walkSeeds();
     seedFromCodeConstants();
@@ -537,15 +537,15 @@ std::string Translator::run() {
     walkSeeds();
     sweepUnreached();
     promotePrologues();
-    for (u32 function : mFunctions) {
-        claim(function);
-    }
-    return render();
+    partitionBlocks();
+    return render(units, declarationsHeader);
 }
 
+
+// A lui/addiu pair can name an address close enough to the top to wrap.
 bool Translator::inCode(u32 address) const {
     return (address & 3) == 0 && address >= mProgram.codeStart &&
-           address + 4 <= mProgram.codeEnd;
+           address < mProgram.codeEnd && mProgram.codeEnd - address >= 4;
 }
 
 void Translator::seed(u32 function) {
@@ -590,7 +590,8 @@ void Translator::seedFromDataPointers() {
         if (!word) {
             return;
         }
-        if (inCode(word->word) && !mFunctions.count(word->word)) {
+        if (inCode(word->word) && !mFunctions.count(word->word) &&
+            allocatesFrame(word->word)) {
             seed(word->word);
         }
     }
@@ -623,7 +624,7 @@ void Translator::seedFromCodeConstants() {
             const u32 low = op == Op::ori ? insn->imm() : static_cast<u32>(insn->simm());
             const u32 address = upper[insn->rs()] + low;
             if (haveUpper[insn->rs()] && inCode(address) && !reached(address) &&
-                !mFunctions.count(address)) {
+                !mFunctions.count(address) && allocatesFrame(address)) {
                 seed(address);
             }
         }
@@ -635,16 +636,10 @@ void Translator::seedFromCodeConstants() {
 }
 
 // Whatever the walk never reached is a function nothing calls.
+// Only a stack frame tells an uncalled function from the data between them.
 void Translator::sweepUnreached() {
     for (u32 pc = mProgram.codeStart; pc + 4 <= mProgram.codeEnd; pc += 4) {
-        if (reached(pc)) {
-            continue;
-        }
-        const std::optional<Instruction> insn = fetch(pc);
-        if (!insn) {
-            return;
-        }
-        if (insn->word == 0) {
+        if (reached(pc) || !allocatesFrame(pc)) {
             continue;
         }
         seed(pc);
@@ -717,11 +712,8 @@ std::vector<u32> Translator::recoverJumpTable(u32 jrPc, u32 source) {
 }
 
 std::optional<Instruction> Translator::fetch(u32 pc) {
-    if (mMemory.fault()) {
-        return std::nullopt;
-    }
-    const Instruction insn{mMemory.read32(pc)};
-    return mMemory.fault() ? std::nullopt : std::optional(insn);
+    const std::optional<u32> word = mMemory.peek32(pc);
+    return word ? std::optional(Instruction{*word}) : std::nullopt;
 }
 
 void Translator::discoverFrom(std::vector<u32> seeds) {
@@ -790,28 +782,71 @@ void Translator::discoverFrom(std::vector<u32> seeds) {
     }
 }
 
-// A block two functions reach is emitted into both, so every branch target stays
-// inside the function that branches to it.
-void Translator::claim(u32 function) {
-    std::vector<u32> pending{function};
-    std::set<u32>& owned = mOwned[function];
-    while (!pending.empty()) {
-        const u32 blockStart = pending.back();
-        pending.pop_back();
-        if (!mBlockStarts.count(blockStart) || !owned.insert(blockStart).second) {
-            continue;
+// A blockStart two functions reach is emitted into both, so every branch target
+// stays inside the function that branches to it.
+// A block two functions reach becomes a function, rather than a copy in each.
+void Translator::partitionBlocks() {
+    for (;;) {
+        mOwner.assign(mCovered.size(), kNoOwner);
+        std::vector<u32> contested;
+        for (u32 function : mFunctions) {
+            for (u32 blockStart : claimFrom(function)) {
+                contested.push_back(blockStart);
+            }
         }
-        if (blockStart != function && mFunctions.count(blockStart)) {
-            owned.erase(blockStart);
-            continue;
+        if (contested.empty()) {
+            break;
         }
-        for (u32 successor : successorsOf(blockStart)) {
-            pending.push_back(successor);
+        mFunctions.insert(contested.begin(), contested.end());
+    }
+
+    for (u32 blockStart : mBlockStarts) {
+        const u32 owner = mOwner[wordOf(blockStart)];
+        if (owner != kNoOwner) {
+            mOwned[owner].push_back(blockStart);
         }
     }
 }
 
-std::vector<u32> Translator::successorsOf(u32 blockStart) {
+// Reachable without passing another entry, plus the ones already owned.
+std::vector<u32> Translator::claimFrom(u32 function) {
+    std::vector<u32> contested;
+    std::vector<u32> pending{function};
+    while (!pending.empty()) {
+        const u32 blockStart = pending.back();
+        pending.pop_back();
+        if (!mBlockStarts.count(blockStart)) {
+            continue;
+        }
+        if (blockStart != function && mFunctions.count(blockStart)) {
+            continue;
+        }
+        u32& owner = mOwner[wordOf(blockStart)];
+        if (owner == function) {
+            continue;
+        }
+        if (owner != kNoOwner) {
+            contested.push_back(blockStart);
+            continue;
+        }
+        owner = function;
+        for (u32 successor : successorsOf(blockStart)) {
+            pending.push_back(successor);
+        }
+    }
+    return contested;
+}
+
+// Claiming revisits blocks, and nothing they depend on moves after discovery.
+const std::vector<u32>& Translator::successorsOf(u32 blockStart) {
+    const auto found = mSuccessors.find(blockStart);
+    if (found != mSuccessors.end()) {
+        return found->second;
+    }
+    return mSuccessors.emplace(blockStart, computeSuccessors(blockStart)).first->second;
+}
+
+std::vector<u32> Translator::computeSuccessors(u32 blockStart) {
     std::vector<u32> out;
     u32 pc = blockStart;
     for (;;) {
@@ -850,8 +885,7 @@ std::vector<u32> Translator::successorsOf(u32 blockStart) {
 }
 
 bool Translator::owns(u32 function, u32 target) const {
-    const auto it = mOwned.find(function);
-    return it != mOwned.end() && it->second.count(target) != 0;
+    return inCode(target) && mOwner[wordOf(target)] == function;
 }
 
 std::string Translator::go(u32 target, u32 function) const {
@@ -882,8 +916,8 @@ void Translator::dropJumpToNext(std::string& text, u32 next) {
 std::string Translator::annotate(const std::string& statement, u32 pc, Instruction insn,
                             s32 depth) {
     const std::string line = std::string(depth * 4, ' ') + statement;
-    return std::format("{:<{}}// {:08x}  {}", line, kCommentColumn, pc,
-                       disassemble(insn, pc));
+    const usize column = std::max(line.size() + 1, static_cast<usize>(kCommentColumn));
+    return std::format("{:<{}}// {:08x}  {}", line, column, pc, disassemble(insn, pc));
 }
 
 // An instruction that did not land on the next one never completed, and emitted
@@ -1132,62 +1166,67 @@ std::string Translator::emitExit(const ControlFlow& cf, Op op, Instruction insn,
     return out;
 }
 
-std::string Translator::render() {
-    std::string out;
-    out += std::format("#include \"{}\"\n#include \"{}\"\n\n", getHandlersHeader(),
-                       getRuntimeHeader());
-    out += "#include <algorithm>\n\n";
-    out += "namespace uee {\n";
-    out += "using namespace reg;\n";
+std::string Translator::emitFunction(u32 function, const std::vector<u32>& blockStarts) {
+    std::vector<u32> order{function};
+    for (u32 blockStart : blockStarts) {
+        if (blockStart != function) {
+            order.push_back(blockStart);
+        }
+    }
+    std::map<u32, std::string> blocks;
+    for (u32 blockStart : order) {
+        blocks[blockStart] = emitBlock(blockStart, function);
+    }
+    for (usize i = 0; i + 1 < order.size(); ++i) {
+        dropJumpToNext(blocks[order[i]], order[i + 1]);
+    }
+    std::string all;
+    for (u32 blockStart : order) {
+        all += blocks[blockStart];
+    }
+    std::string body;
+    for (u32 blockStart : order) {
+        if (all.find(std::format("goto L_{:08x};", blockStart)) != std::string::npos) {
+            body += std::format("\nL_{:08x}:\n", blockStart);
+        } else {
+            body += "\n";
+        }
+        body += blocks[blockStart];
+    }
 
+    std::string out = std::format("\nbool func_{:08x}({}& m) {{\n", function, getMachineType());
+    out += std::format("    {0}& {1} = m.{1}();\n", getContextType(), getStateName());
+    if (body.find("mem") != std::string::npos) {
+        out += "    Memory& mem = m.memory;\n";
+    }
+    if (body.find("returnTo") != std::string::npos) {
+        out += std::format("    const u32 returnTo = {};\n", readGpr(reg::ra));
+    }
+    out += body;
+    out += "}\n";
+    return out;
+}
+
+// Trimming these to what each unit calls is worth about four percent.
+std::string Translator::emitDeclarations() const {
+    std::string out = std::format("#pragma once\n\n#include \"{}\"\n#include \"{}\"\n\n",
+                                  getHandlersHeader(), getRuntimeHeader());
+    out += "namespace uee {\nusing namespace reg;\n";
+    out += emitBeforeNamespace();
+    out += emitNamespaceOpen();
     for (const auto& [function, blockStarts] : mOwned) {
-        out += std::format("\nstatic bool func_{:08x}({}&);", function, getMachineType());
+        out += std::format("\nbool func_{:08x}({}&);", function, getMachineType());
     }
     out += "\n";
+    out += emitNamespaceClose();
+    out += "\n}  // namespace uee\n";
+    return out;
+}
 
-    for (const auto& [function, blockStarts] : mOwned) {
-        std::vector<u32> order{function};
-        for (u32 blockStart : blockStarts) {
-            if (blockStart != function) {
-                order.push_back(blockStart);
-            }
-        }
-        std::map<u32, std::string> blocks;
-        for (u32 blockStart : order) {
-            blocks[blockStart] = emitBlock(blockStart, function);
-        }
-        for (usize i = 0; i + 1 < order.size(); ++i) {
-            dropJumpToNext(blocks[order[i]], order[i + 1]);
-        }
-        std::string all;
-        for (u32 blockStart : order) {
-            all += blocks[blockStart];
-        }
-        std::string body;
-        for (u32 blockStart : order) {
-            if (all.find(std::format("goto L_{:08x};", blockStart)) != std::string::npos) {
-                body += std::format("\nL_{:08x}:\n", blockStart);
-            } else {
-                body += "\n";
-            }
-            body += blocks[blockStart];
-        }
-        out += std::format("\nstatic bool func_{:08x}({}& m) {{\n", function,
-                           getMachineType());
-        out += std::format("    {0}& {1} = m.{1}();\n", getContextType(), getStateName());
-        if (body.find("mem") != std::string::npos) {
-            out += "    Memory& mem = m.memory;\n";
-        }
-        if (body.find("returnTo") != std::string::npos) {
-            out += std::format("    const u32 returnTo = {};\n", readGpr(reg::ra));
-        }
-        out += body;
-        out += "}\n";
-    }
-
+std::string Translator::emitDispatch() const {
     // The addresses are data, not control flow the optimiser has to chew through.
-    out += std::format("\nstruct Function {{\n    u32 address;\n"
-                       "    bool (*run)({}&);\n}};\n", getMachineType());
+    std::string out = std::format("\nstruct Function {{\n    u32 address;\n"
+                                  "    bool (*run)({}&);\n}};\n", getMachineType());
     out += "\nconstexpr Function kFunctions[] = {\n";
     for (const auto& [function, blockStarts] : mOwned) {
         out += std::format("    {{0x{:08x}u, func_{:08x}}},\n", function, function);
@@ -1204,13 +1243,71 @@ std::string Translator::render() {
     out += "    }\n";
     out += "    found->run(m);\n";
     out += "    return true;\n";
-    out += "}\n\n";
-    out += "}  // namespace uee\n";
+    out += "}\n";
     return out;
 }
 
-std::string translate(Memory& memory, const Program& program) {
-    return EeTranslator(memory, program).run();
+// Address order, so functions that run together stay together.
+TranslatedSource Translator::render(usize units, std::string_view declarationsHeader) {
+    std::vector<std::string> bodies;
+    bodies.reserve(mOwned.size());
+    usize total = 0;
+    for (const auto& [function, blockStarts] : mOwned) {
+        bodies.push_back(emitFunction(function, blockStarts));
+        total += bodies.back().size();
+    }
+
+    TranslatedSource out;
+    out.declarations = emitDeclarations();
+
+    const auto open = [&] {
+        std::string unit = std::format("#include \"{}\"\n\n", declarationsHeader);
+        unit += "#include <algorithm>\n\nnamespace uee {\n";
+        unit += emitNamespaceOpen();
+        return unit;
+    };
+    const auto close = [&](std::string& unit) {
+        unit += emitNamespaceClose();
+        unit += "\n}  // namespace uee\n";
+    };
+
+    // The dispatch table and whatever defines the module go in the first unit,
+    // which is why its share of the functions is what is left after them.
+    std::string unit = open();
+    unit += emitDispatch();
+    unit += emitDefinitions();
+    // On a whole game the table is a unit's worth of work by itself.
+    const usize dispatch = unit.size();
+    const usize share = total / std::max<usize>(units, 1);
+    usize forFunctions = units;
+    if (dispatch > share && units > 1) {
+        close(unit);
+        out.units.push_back(std::move(unit));
+        unit = open();
+        --forFunctions;
+    }
+
+    // Cumulative, or the drift leaves the last units empty.
+    usize written = 0;
+    usize index = 0;
+    for (std::string& body : bodies) {
+        if (written >= total * (index + 1) / forFunctions && out.units.size() + 1 < units) {
+            close(unit);
+            out.units.push_back(std::move(unit));
+            unit = open();
+            ++index;
+        }
+        written += body.size();
+        unit += body;
+    }
+    close(unit);
+    out.units.push_back(std::move(unit));
+    return out;
+}
+
+TranslatedSource translate(Memory& memory, const Program& program, usize units,
+                           std::string_view declarationsHeader) {
+    return EeTranslator(memory, program).run(units, declarationsHeader);
 }
 
 }  // namespace uee

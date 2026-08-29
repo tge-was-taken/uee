@@ -3,16 +3,44 @@
 #include "irx.h"
 #include "translator.h"
 
+#include <cctype>
+#include <stdexcept>
 #include <format>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace uee {
 namespace {
 
+// The name is a namespace, a symbol and what the loader matches on.
+void requireIdentifier(std::string_view name) {
+    const auto usable = [](char letter, bool first) {
+        return letter == '_' || std::isalpha(static_cast<unsigned char>(letter)) != 0 ||
+               (!first && std::isdigit(static_cast<unsigned char>(letter)) != 0);
+    };
+    for (usize i = 0; i < name.size(); ++i) {
+        if (!usable(name[i], i == 0)) {
+            throw std::runtime_error(std::format(
+                "the module name \"{}\" cannot be a C++ identifier, which is what the "
+                "translated module is named after", name));
+        }
+    }
+    if (name.empty()) {
+        throw std::runtime_error("a translated module needs a name");
+    }
+}
+
 class IopTranslator final : public Translator {
 public:
-    using Translator::Translator;
+    IopTranslator(Memory& memory, const Program& program, std::string_view name,
+                  std::span<const Import> imports)
+        : Translator(memory, program), mName(name), mBase(program.codeStart),
+          mEnd(program.imageEnd), mImports(imports) {
+        requireIdentifier(mName);
+    }
 
 private:
     std::string_view getMachineType() const override { return "IopMachine"; }
@@ -27,7 +55,44 @@ private:
     std::optional<std::string> emitOne(Instruction insn) const override;
     std::optional<std::string> emitBranchCondition(Op op, Instruction insn) const override;
     std::optional<Trap> emitTrap(Instruction insn, Instruction previous, u32 pc) const override;
+    std::string emitNamespaceOpen() const override;
+    std::string emitNamespaceClose() const override;
+    std::string emitBeforeNamespace() const override;
+    std::string emitDefinitions() const override;
+
+    std::string mName;
+    u32 mBase;
+    u32 mEnd;
+    std::span<const Import> mImports;
 };
+
+std::string IopTranslator::emitBeforeNamespace() const {
+    return std::format("\nextern TranslatedIrx {}Module;\n", mName);
+}
+
+std::string IopTranslator::emitNamespaceOpen() const {
+    return std::format("\nnamespace translated {{\nnamespace {} {{\n", mName);
+}
+
+std::string IopTranslator::emitNamespaceClose() const {
+    return std::format("\n}}  // namespace {}\n}}  // namespace translated\n", mName);
+}
+
+// Named, not indexed: the index depends on where the loader puts this block.
+std::string IopTranslator::emitDefinitions() const {
+    std::string out = "\nconstexpr TranslatedImport kImports[] = {\n";
+    for (const Import& import : mImports) {
+        out += std::format("    {{\"{}\", {}}},\n", import.module, import.id);
+    }
+    out += "};\n";
+    out += std::format("\n}}  // namespace {0}\n}}  // namespace translated\n"
+                       "\nTranslatedIrx {0}Module{{\n"
+                       "    \"{0}\", 0x{1:08x}u, 0x{2:08x}u, translated::{0}::kImports,\n"
+                       "    translated::{0}::runFunction}};\n"
+                       "\nnamespace translated {{\nnamespace {0} {{\n",
+                       mName, mBase, mEnd);
+    return out;
+}
 
 std::optional<std::string> IopTranslator::emitOne(Instruction insn) const {
     const u32 rs = insn.rs();
@@ -149,15 +214,17 @@ std::optional<Trap> IopTranslator::emitTrap(Instruction insn, Instruction, u32 p
     if (opOf(insn) != Op::syscall) {
         return std::nullopt;
     }
-    return Trap{std::format("if (!hostCall(m, {}, 0x{:08x}u)) return false;",
-                            importIndex(insn.word), pc),
+    return Trap{std::format("if (!hostCall(m, {}Module.importBase + {}, 0x{:08x}u)) return false;",
+                            mName, importIndex(insn.word), pc),
                 false};
 }
 
 }  // namespace
 
-std::string translateIop(Memory& memory, const Program& program) {
-    return IopTranslator(memory, program).run();
+TranslatedSource translateIop(Memory& memory, const Program& program, std::string_view name,
+                              std::span<const Import> imports, usize units,
+                              std::string_view declarationsHeader) {
+    return IopTranslator(memory, program, name, imports).run(units, declarationsHeader);
 }
 
 }  // namespace uee
