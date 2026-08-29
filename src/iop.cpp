@@ -3,68 +3,129 @@
 
 #include "iop_run.h"
 
+#include <algorithm>
+#include <cctype>
 #include <format>
+#include <stdexcept>
 
 namespace uee {
 namespace {
 
 LoggerChannel log("iop");
 
-// Past this a module is waiting on hardware nothing here drives, and would
-// starve every thread the modules after it start.
+// A module that does not reach a blocking point in this many instructions is
+// waiting on hardware nothing here drives, and would starve every thread the
+// modules after it start.
 constexpr u64 kInstructionLimit = 20'000'000;
 constexpr u32 kFirstArgumentRegister = 4;
 constexpr u32 kResultRegister = 2;
 
 }  // namespace
 
-Iop::Iop(std::string& console)
+Iop::Iop(std::string& console, std::span<TranslatedIrx* const> translated,
+         std::span<const std::string> hostModules)
     : mKernel(mInterpreter.iop, mMemory, mImports,
-              {kIopHeapBase, kIopStackTop - kIopStackSize}, console) {}
+              {kIopHeapBase, kIopStackTop - kIopStackSize}, console),
+      mTranslated(translated), mHostModules(hostModules.begin(), hostModules.end()) {
+    for (const TranslatedIrx* module : mTranslated) {
+        mNextBase = std::max(mNextBase, (module->end + 0xFu) & ~0xFu);
+    }
+}
 
-// A started thread only runs once the entry that started it is out of the way.
+// "cdrom0:\\LIB31\\PADMAN.IRX" is configured as padman.
+ModuleSource Iop::sourceOf(const std::string& name) const {
+    std::string bare = name.substr(name.find_last_of(":\\/") + 1);
+    bare = bare.substr(0, bare.find('.'));
+    for (char& letter : bare) {
+        letter = static_cast<char>(std::tolower(static_cast<unsigned char>(letter)));
+    }
+    for (const std::string& host : mHostModules) {
+        if (host == bare) {
+            return ModuleSource::Host;
+        }
+    }
+    return ModuleSource::Guest;
+}
+
+TranslatedIrx* Iop::translationOf(const std::string& name) const {
+    for (TranslatedIrx* module : mTranslated) {
+        if (module->name == name) {
+            return module;
+        }
+    }
+    return nullptr;
+}
+
+// A started thread only runs once the entry that started it is out of the way,
+// so every entry into the IOP is followed by letting the rest of them reach
+// their first blocking point.
 bool Iop::settle() {
     mKernel.exitCurrentThread();
-    IopMachine machine{mInterpreter, mMemory, mKernel, nullptr};
+    IopMachine machine{mInterpreter, mMemory, mKernel, mActive};
     const Stop stop = run(machine, kInstructionLimit, mSymbols);
     if (stop.reason == StopReason::Deadlocked) {
         return true;
     }
-    log.stub("settle: {}", describe(stop));
+    log.stub("iop settle: {}", describe(stop));
     return false;
 }
 
 Stop Iop::enter() {
-    IopMachine machine{mInterpreter, mMemory, mKernel, nullptr};
+    IopMachine machine{mInterpreter, mMemory, mKernel, mActive};
     return run(machine, kInstructionLimit, mSymbols);
 }
 
 bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
-    const IrxModule module = loadIrx(image, mMemory, mNextBase, mLoaded, mImports);
+    // Loading it would bind later imports to its exports, not to the host.
+    if (sourceOf(name) == ModuleSource::Host) {
+        log.trace("{} is answered here, so its image is not loaded", name);
+        return true;
+    }
+    TranslatedIrx* const translated = translationOf(name);
+    const u32 base = translated != nullptr ? translated->base : mNextBase;
+    const IrxModule module = loadIrx(image, mMemory, base, mLoaded, mImports);
     if (module.program.imageEnd > kIopHeapBase) {
         throw std::runtime_error(std::format(
             "the module loaded at {:08x} ends at {:08x}, past the {:08x} the heap starts at",
-            mNextBase, module.program.imageEnd, kIopHeapBase));
+            base, module.program.imageEnd, kIopHeapBase));
     }
-    mSymbols.load(name, mNextBase, module.program.imageEnd - mNextBase);
-    mNextBase = (module.program.imageEnd + 0xF) & ~0xFu;
+    // Translated for a different image, it would name addresses past its end.
+    if (translated != nullptr && module.program.imageEnd != translated->end) {
+        throw std::runtime_error(std::format(
+            "{} was translated as {:08x}..{:08x} but the image loaded here ends at {:08x}",
+            name, translated->base, translated->end, module.program.imageEnd));
+    }
+    mSymbols.load(name, base, module.program.imageEnd - base);
+    if (translated == nullptr) {
+        mNextBase = (module.program.imageEnd + 0xF) & ~0xFu;
+    }
     mLoaded.push_back(module);
+    if (translated != nullptr) {
+        translated->importBase = static_cast<u32>(mImports.size());
+        for (const TranslatedImport& import : translated->imports) {
+            mImports.push_back(Import{std::string(import.module), import.id});
+        }
+        mActive.push_back(translated);
+    }
 
     const u32 sequence = mKernel.sequence();
     mKernel.enterHostThread();
     enterModule(mInterpreter.iop, module);
     const Stop stop = enter();
     if (stop.reason != StopReason::Exited || !settle()) {
-        log.stub("module entry: {}", describe(stop));
+        log.stub("iop module entry: {}", describe(stop));
         mKernel.dropThreadsAbove(sequence);
+        if (translated != nullptr) {
+            mActive.pop_back();
+        }
         return false;
     }
     return true;
 }
 
-// The EE's field is the only clock these modules get. Releasing the threads that
-// wait on it is enough; they run on the next call, which is soon enough because
-// nothing is waiting on an answer here.
+// The modules loaded here run on the field the EE is already counting, which is
+// the only clock reaching them. What it releases runs on the next entry rather
+// than here, because a field is not a point the EE is waiting on an answer.
 void Iop::tickVblank() {
     mKernel.raiseVblank();
 }
@@ -82,7 +143,7 @@ u32 Iop::callFunction(u32 address, u32 gp, std::span<const u32> arguments) {
 
     const Stop stop = enter();
     if (stop.reason != StopReason::Exited) {
-        log.stub("call {:08x}: {}", address, describe(stop));
+        log.stub("iop call {:08x}: {}", address, describe(stop));
         return 0;
     }
     const u32 result = cpu.gpr[kResultRegister];
