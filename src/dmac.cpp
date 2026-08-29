@@ -1,3 +1,4 @@
+#include "log.h"
 #include "dmac.h"
 
 #include "gif.h"
@@ -5,12 +6,13 @@
 
 #include "interrupts.h"
 #include "memory.h"
-#include "syscall_stubs.h"
 
 #include <format>
 
 namespace uee {
 namespace {
+
+LoggerChannel log("dmac");
 
 // SLUS-216.21: sceGsSyncPath @ 0x4f9ccc names these.
 constexpr u32 kChannelBase[dmac::kChannels] = {
@@ -208,19 +210,15 @@ void Dmac::start(usize index) {
         channel.address += channel.quadwords * kQuadwordBytes;
         channel.quadwords = 0;
     } else {
-        reportStub(std::format("dma channel {} mode {}", index, mode));
+        log.stub("dma channel {} mode {}", index, mode);
     }
 
     channel.control &= ~kStart;
     mInterrupts->raiseDmac(static_cast<u32>(index));
 }
 
-// Only the scratchpad channels have somewhere to put the data.
-// Interleave walks a run of quadwords then steps the address over a gap, which
-// is how the scratchpad channels move a rectangle out of a larger image.
-// Interleave walks a run of quadwords then steps over a gap, which is how the
-// scratchpad channels move a rectangle out of a larger image. The walking
-// cursor is local because the channel's own address is left where it started.
+// A run of quadwords then a gap, which is how the scratchpad channels move a
+// rectangle out of a larger image. The channel's own address stays put.
 void Dmac::interleave(usize index) {
     Channel& channel = mChannels[index];
     const u32 run = (mSkipQuadword >> 16) & 0xFFu;
@@ -323,11 +321,11 @@ void Dmac::followChain(usize index) {
                 channel.tagAddress = channel.returnAddress[channel.returnDepth];
                 break;
             default:
-                reportStub(std::format("dma tag id {}", tag.id));
+                log.stub("dma tag id {}", tag.id);
                 return;
         }
         if (tag.id == kReferenceStalled) {
-            reportStub("dma tag refs walked as ref");
+            log.stub("dma tag refs walked as ref");
         }
 
         channel.quadwords = 0;
@@ -337,7 +335,7 @@ void Dmac::followChain(usize index) {
             return;
         }
     }
-    reportStub(std::format("dma chain on channel {} does not end", index));
+    log.stub("dma chain on channel {} does not end", index);
 }
 
 }  // namespace uee

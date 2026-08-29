@@ -243,9 +243,8 @@ u32 findExport(const std::vector<IrxModule>& resident, const std::string& module
 
 // The IOP's linker turns a stub's `jr $ra` into a jump to the resident
 // function, leaving the delay slot holding the function number alone.
-std::vector<Import> linkImports(Memory& memory, u32 textStart, u32 textEnd,
-                                const std::vector<IrxModule>& resident) {
-    std::vector<Import> imports;
+void linkImports(Memory& memory, u32 textStart, u32 textEnd,
+                 const std::vector<IrxModule>& resident, std::vector<Import>& hostImports) {
     for (u32 address = textStart; address + 4 <= textEnd; address += 4) {
         if (memory.read32(address) != kImportMagic) {
             continue;
@@ -259,24 +258,19 @@ std::vector<Import> linkImports(Memory& memory, u32 textStart, u32 textEnd,
             if (resolved != 0) {
                 memory.write32(entry, 0x08000000u | ((resolved >> 2) & 0x03FFFFFFu));
             } else {
-                imports.push_back({module, id});
-                memory.write32(entry, importSyscall(static_cast<u32>(imports.size() - 1)));
+                hostImports.push_back({module, id});
+                memory.write32(entry, importSyscall(static_cast<u32>(hostImports.size() - 1)));
             }
             entry += kImportEntrySize;
         }
         address = entry;
     }
-    return imports;
 }
 
 }  // namespace
 
-IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base) {
-    return loadIrx(image, memory, base, {});
-}
-
 IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base,
-                  const std::vector<IrxModule>& resident) {
+                  const std::vector<IrxModule>& resident, std::vector<Import>& hostImports) {
     requireHeader(image);
     const std::vector<Section> sections = readSections(image);
     const ModuleHeader header = readModuleHeader(image, sections);
@@ -293,10 +287,9 @@ IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base,
 
     const u32 textEnd = base + header.textSize;
     const u32 imageEnd = base + header.textSize + header.dataSize + header.bssSize;
+    linkImports(memory, base, textEnd, resident, hostImports);
     return IrxModule{Program{base + header.entry, base, textEnd, base, imageEnd},
-                     base + header.gp,
-                     linkImports(memory, base, textEnd, resident),
-                     readExports(memory, base, textEnd)};
+                     base + header.gp, readExports(memory, base, textEnd)};
 }
 
 }  // namespace uee

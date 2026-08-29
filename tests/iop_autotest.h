@@ -1,5 +1,6 @@
 #pragma once
 
+#include "log.h"
 #include "autotest.h"
 #include "iop_interpreter.h"
 #include "iop_kernel.h"
@@ -19,6 +20,7 @@
 namespace uee::autotest {
 
 inline int runIop(int argc, char** argv, IopFunctionRunner translated) {
+    configureLogging();
     if (argc < 3) {
         spdlog::error("usage: {} <test.irx> <test.expected>", argv[0]);
         return 2;
@@ -29,14 +31,17 @@ inline int runIop(int argc, char** argv, IopFunctionRunner translated) {
 
     Memory memory = makeIopMemory();
     IopInterpreter interpreter(memory);
-    const IrxModule module = loadIrx(readFile(irxPath), memory, kIopModuleBase);
-    IopKernel kernel(interpreter.iop, memory, module.imports,
-                     {module.program.imageEnd, kIopStackTop - kIopStackSize});
+    std::vector<Import> imports;
+    const IrxModule module = loadIrx(readFile(irxPath), memory, kIopModuleBase, {}, imports);
+    std::string console;
+    IopKernel kernel(interpreter.iop, memory, imports,
+                     {module.program.imageEnd, kIopStackTop - kIopStackSize}, console);
     enterModule(interpreter.iop, module);
 
     IopMachine machine{interpreter, memory, kernel, translated};
-    const Stop stop = run(machine, kInstructionLimit);
-    const std::string& actual = kernel.readOutput();
+    const Symbols symbols;
+    const Stop stop = run(machine, kInstructionLimit, symbols);
+    const std::string& actual = console;
     const std::vector<u8> expectedBytes = readFile(argv[2]);
     const std::string expected(expectedBytes.begin(), expectedBytes.end());
 

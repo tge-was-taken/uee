@@ -27,6 +27,8 @@ Memory makeMainMemory() {
 Memory makeIopMemory() {
     std::vector<Region> regions;
     regions.push_back({0, std::vector<u8>(kIopRamSize)});
+    regions.push_back({kIopHardwareBase, std::vector<u8>(kIopHardwareSize)});
+    regions.push_back({kSpu2Base, std::vector<u8>(kSpu2Size)});
     return Memory{std::move(regions), {true}};
 }
 

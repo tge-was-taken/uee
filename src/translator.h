@@ -60,7 +60,7 @@ private:
     std::optional<Instruction> fetch(u32 pc);
     void discoverFrom(std::vector<u32> seeds);
     void claim(u32 function);
-    std::vector<u32> successorsOf(u32 leader);
+    std::vector<u32> successorsOf(u32 blockStart);
     bool owns(u32 function, u32 target) const;
     std::string go(u32 target, u32 function) const;
     static void dropJumpToNext(std::string& text, u32 next);
@@ -71,7 +71,7 @@ private:
     bool delaySlotTransfers(u32 pc);
     std::string emitTransferringSlot(const std::string& pending, u32 pc, s32 depth) const;
     std::string counted(const std::string& body) const;
-    std::string emitBlock(u32 leader, u32 function);
+    std::string emitBlock(u32 blockStart, u32 function);
     std::string emitExit(const ControlFlow& cf, Op op, Instruction insn, u32 pc, u32 function);
     std::string render();
 
@@ -81,7 +81,7 @@ private:
     const Program& mProgram;
     std::vector<bool> mCovered;
     std::set<u32> mFunctions;
-    std::set<u32> mLeaders;
+    std::set<u32> mBlockStarts;
     std::map<u32, std::set<u32>> mOwned;
     std::map<u32, std::vector<u32>> mJumpTables;
     std::set<u32> mTableWords;

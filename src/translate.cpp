@@ -152,6 +152,9 @@ std::optional<std::string> EeTranslator::emitOne(Instruction insn) const {
     const auto vuField = [&](const char* name, u32 field, u32 a, u32 b) {
         return std::format("{}(ee.vu0, 0x{:x}u, {}, {});", name, field, a, b);
     };
+    const auto vuFixed = [&](const char* name, u32 field, u32 a, u32 b, s32 fraction) {
+        return std::format("{}(ee.vu0, 0x{:x}u, {}, {}, {});", name, field, a, b, fraction);
+    };
     const auto vuAccess = [&](const char* name, u32 field, u32 a, u32 b) {
         return std::format("{}(ee.vu0, mem, 0x{:x}u, {}, {});", name, field, a, b);
     };
@@ -401,9 +404,16 @@ std::optional<std::string> EeTranslator::emitOne(Instruction insn) const {
         case Op::c_le_s: return fpu2("c_le_s", insn.fs(), insn.ft());
 
         case Op::vmove: return vuField("vmove", insn.dest(), insn.vt(), insn.vs());
+        case Op::vmr32: return vuField("vmr32", insn.dest(), insn.vt(), insn.vs());
         case Op::vabs: return vuField("vabs", insn.dest(), insn.vt(), insn.vs());
-        case Op::vitof0: return vuField("vitof0", insn.dest(), insn.vt(), insn.vs());
-        case Op::vftoi0: return vuField("vftoi0", insn.dest(), insn.vt(), insn.vs());
+        case Op::vitof0: return vuFixed("vitof", insn.dest(), insn.vt(), insn.vs(), 0);
+        case Op::vitof4: return vuFixed("vitof", insn.dest(), insn.vt(), insn.vs(), 4);
+        case Op::vitof12: return vuFixed("vitof", insn.dest(), insn.vt(), insn.vs(), 12);
+        case Op::vitof15: return vuFixed("vitof", insn.dest(), insn.vt(), insn.vs(), 15);
+        case Op::vftoi0: return vuFixed("vftoi", insn.dest(), insn.vt(), insn.vs(), 0);
+        case Op::vftoi4: return vuFixed("vftoi", insn.dest(), insn.vt(), insn.vs(), 4);
+        case Op::vftoi12: return vuFixed("vftoi", insn.dest(), insn.vt(), insn.vs(), 12);
+        case Op::vftoi15: return vuFixed("vftoi", insn.dest(), insn.vt(), insn.vs(), 15);
         case Op::viadd: return vu3("viadd", insn.vid(), insn.vis(), insn.vit());
         case Op::visub: return vu3("visub", insn.vid(), insn.vis(), insn.vit());
         case Op::viand: return vu3("viand", insn.vid(), insn.vis(), insn.vit());
@@ -540,7 +550,7 @@ bool Translator::inCode(u32 address) const {
 
 void Translator::seed(u32 function) {
     mFunctions.insert(function);
-    mLeaders.insert(function);
+    mBlockStarts.insert(function);
     mSeeds.push_back(function);
 }
 
@@ -643,9 +653,9 @@ void Translator::sweepUnreached() {
 }
 
 void Translator::promotePrologues() {
-    for (u32 leader : mLeaders) {
-        if (allocatesFrame(leader)) {
-            mFunctions.insert(leader);
+    for (u32 blockStart : mBlockStarts) {
+        if (allocatesFrame(blockStart)) {
+            mFunctions.insert(blockStart);
         }
     }
 }
@@ -727,7 +737,7 @@ void Translator::discoverFrom(std::vector<u32> seeds) {
             if (!inCode(target)) {
                 return;
             }
-            mLeaders.insert(target);
+            mBlockStarts.insert(target);
             pending.push_back(target);
         };
         u32 pc = start;
@@ -741,7 +751,7 @@ void Translator::discoverFrom(std::vector<u32> seeds) {
             const ControlFlow cf = controlFlow(op, *insn, pc);
             if (cf.flow == Flow::Next || (cf.flow == Flow::Trap && op == Op::syscall)) {
                 pc += 4;
-                if (mLeaders.count(pc)) {
+                if (mBlockStarts.count(pc)) {
                     break;
                 }
                 continue;
@@ -780,30 +790,30 @@ void Translator::discoverFrom(std::vector<u32> seeds) {
     }
 }
 
-// A leader two functions reach is emitted into both, so every branch target
-// stays inside the function that branches to it.
+// A block two functions reach is emitted into both, so every branch target stays
+// inside the function that branches to it.
 void Translator::claim(u32 function) {
     std::vector<u32> pending{function};
     std::set<u32>& owned = mOwned[function];
     while (!pending.empty()) {
-        const u32 leader = pending.back();
+        const u32 blockStart = pending.back();
         pending.pop_back();
-        if (!mLeaders.count(leader) || !owned.insert(leader).second) {
+        if (!mBlockStarts.count(blockStart) || !owned.insert(blockStart).second) {
             continue;
         }
-        if (leader != function && mFunctions.count(leader)) {
-            owned.erase(leader);
+        if (blockStart != function && mFunctions.count(blockStart)) {
+            owned.erase(blockStart);
             continue;
         }
-        for (u32 successor : successorsOf(leader)) {
+        for (u32 successor : successorsOf(blockStart)) {
             pending.push_back(successor);
         }
     }
 }
 
-std::vector<u32> Translator::successorsOf(u32 leader) {
+std::vector<u32> Translator::successorsOf(u32 blockStart) {
     std::vector<u32> out;
-    u32 pc = leader;
+    u32 pc = blockStart;
     for (;;) {
         const std::optional<Instruction> insn = fetch(pc);
         if (!insn) {
@@ -813,7 +823,7 @@ std::vector<u32> Translator::successorsOf(u32 leader) {
         const ControlFlow cf = controlFlow(op, *insn, pc);
         if (cf.flow == Flow::Next || (cf.flow == Flow::Trap && op == Op::syscall)) {
             pc += 4;
-            if (mLeaders.count(pc)) {
+            if (mBlockStarts.count(pc)) {
                 out.push_back(pc);
                 return out;
             }
@@ -876,9 +886,8 @@ std::string Translator::annotate(const std::string& statement, u32 pc, Instructi
                        disassemble(insn, pc));
 }
 
-// An interpreted instruction that did not land on the next one never
-// completed: it was unimplemented, faulted, or transferred control. Emitted
-// code cannot carry on past any of those.
+// An instruction that did not land on the next one never completed, and emitted
+// code cannot carry on past that.
 std::string Translator::stepAt(u32 pc, s32 depth) const {
     const std::string indent(4 * static_cast<usize>(depth), ' ');
     return std::format("{0}step(m, 0x{2:08x}u);\n{0}if ({1}.cpu.pc != 0x{3:08x}u) {{\n"
@@ -894,9 +903,8 @@ std::string Translator::emitBeforeInstructionAt(s32 depth) const {
     return std::format("{}{}\n", std::string(4 * static_cast<usize>(depth), ' '), statement);
 }
 
-// A delay slot that can transfer control of its own resolves the pc rather
-// than falling through, so emitted code cannot carry on to a target it
-// picked before the slot ran.
+// Such a slot resolves the pc itself, so emitted code cannot carry on to a
+// target picked before the slot ran.
 bool Translator::delaySlotTransfers(u32 pc) {
     const std::optional<Instruction> delayed = fetch(pc + 4);
     return delayed && controlFlow(opOf(*delayed), *delayed, pc + 4).flow != Flow::Next;
@@ -911,10 +919,8 @@ std::string Translator::emitTransferringSlot(const std::string& pending, u32 pc,
                        indent, getStateName(), pending, pc + 4);
 }
 
-// The performance counters advance a block at a time here where the
-// interpreter advances one instruction at a time; the totals agree at every
-// block boundary. Instructions handed to step or call are left out because
-// the interpreter counts those itself.
+// A block at a time where the interpreter counts one instruction at a time, so
+// the totals agree at every block boundary. What step and call run is theirs.
 std::string Translator::counted(const std::string& body) const {
     if (mInlineInstructions == 0) {
         return body;
@@ -926,10 +932,10 @@ std::string Translator::counted(const std::string& body) const {
     return std::format("    {}\n", statement) + body;
 }
 
-std::string Translator::emitBlock(u32 leader, u32 function) {
+std::string Translator::emitBlock(u32 blockStart, u32 function) {
     std::string out;
     mInlineInstructions = 0;
-    u32 pc = leader;
+    u32 pc = blockStart;
     for (;;) {
         const std::optional<Instruction> insn = fetch(pc);
         if (!insn) {
@@ -953,7 +959,7 @@ std::string Translator::emitBlock(u32 leader, u32 function) {
                                                          "returnTo);\n", getStateName()));
                     }
                     pc += 4;
-                    if (mLeaders.count(pc)) {
+                    if (mBlockStarts.count(pc)) {
                         return counted(out + std::format("    {}\n", go(pc, function)));
                     }
                     continue;
@@ -972,7 +978,7 @@ std::string Translator::emitBlock(u32 leader, u32 function) {
                                    getStateName(), pc + 4);
             }
             pc += 4;
-            if (mLeaders.count(pc)) {
+            if (mBlockStarts.count(pc)) {
                 return counted(out + std::format("    {}\n", go(pc, function)));
             }
             continue;
@@ -1005,9 +1011,8 @@ std::string Translator::emitExit(const ControlFlow& cf, Op op, Instruction insn,
     };
     const bool slotTransfers = delaySlotTransfers(pc);
 
-    // The transfer runs whatever happens. Its delay slot runs too unless a
-    // likely branch nullifies it, which is only known at run time, so that
-    // one is counted where it actually executes.
+    // Only a likely branch can nullify its slot, and only at run time, so that
+    // one is counted where it executes.
     ++mInlineInstructions;
     const bool slotAlwaysRuns = cf.flow != Flow::BranchLikely;
     if (inlineSlot && slotAlwaysRuns) {
@@ -1135,37 +1140,37 @@ std::string Translator::render() {
     out += "namespace uee {\n";
     out += "using namespace reg;\n";
 
-    for (const auto& [function, leaders] : mOwned) {
+    for (const auto& [function, blockStarts] : mOwned) {
         out += std::format("\nstatic bool func_{:08x}({}&);", function, getMachineType());
     }
     out += "\n";
 
-    for (const auto& [function, leaders] : mOwned) {
+    for (const auto& [function, blockStarts] : mOwned) {
         std::vector<u32> order{function};
-        for (u32 leader : leaders) {
-            if (leader != function) {
-                order.push_back(leader);
+        for (u32 blockStart : blockStarts) {
+            if (blockStart != function) {
+                order.push_back(blockStart);
             }
         }
         std::map<u32, std::string> blocks;
-        for (u32 leader : order) {
-            blocks[leader] = emitBlock(leader, function);
+        for (u32 blockStart : order) {
+            blocks[blockStart] = emitBlock(blockStart, function);
         }
         for (usize i = 0; i + 1 < order.size(); ++i) {
             dropJumpToNext(blocks[order[i]], order[i + 1]);
         }
         std::string all;
-        for (u32 leader : order) {
-            all += blocks[leader];
+        for (u32 blockStart : order) {
+            all += blocks[blockStart];
         }
         std::string body;
-        for (u32 leader : order) {
-            if (all.find(std::format("goto L_{:08x};", leader)) != std::string::npos) {
-                body += std::format("\nL_{:08x}:\n", leader);
+        for (u32 blockStart : order) {
+            if (all.find(std::format("goto L_{:08x};", blockStart)) != std::string::npos) {
+                body += std::format("\nL_{:08x}:\n", blockStart);
             } else {
                 body += "\n";
             }
-            body += blocks[leader];
+            body += blocks[blockStart];
         }
         out += std::format("\nstatic bool func_{:08x}({}& m) {{\n", function,
                            getMachineType());
@@ -1184,7 +1189,7 @@ std::string Translator::render() {
     out += std::format("\nstruct Function {{\n    u32 address;\n"
                        "    bool (*run)({}&);\n}};\n", getMachineType());
     out += "\nconstexpr Function kFunctions[] = {\n";
-    for (const auto& [function, leaders] : mOwned) {
+    for (const auto& [function, blockStarts] : mOwned) {
         out += std::format("    {{0x{:08x}u, func_{:08x}}},\n", function, function);
     }
     out += "};\n";

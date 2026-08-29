@@ -529,9 +529,6 @@ inline void psraw(R5900& cpu, u32 rd, u32 rt, u32 sa) {
     }));
 }
 
-// The variable-shift forms work on one word of each doubleword, take their
-// shift from the matching word of rs, and sign-extend each result back across
-// the whole doubleword.
 template <typename F>
 inline void shiftEachDoubleword(R5900& cpu, u32 rd, u32 rt, u32 rs, F shift) {
     const Reg128 a = cpu.gpr[rt], b = cpu.gpr[rs];
@@ -703,10 +700,9 @@ inline void pmsubh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
     spreadHalfProducts(cpu, rd, products);
 }
 
-// Each neighbouring pair of products collapses into one sum. Only the four
-// sums reach rd; HI and LO keep the sum alongside the upper product it came
-// from, LO taking the even pairs and HI the odd ones. The subtracting form
-// stores that product as it enters the adder, which is one's complement.
+// HI and LO keep each sum alongside the upper product it came from. The
+// subtracting form stores that product as it enters the adder, in one's
+// complement.
 inline void horizontalHalfMultiply(R5900& cpu, u32 rd, u32 rs, u32 rt, bool subtract) {
     const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
     u32 sums[4];

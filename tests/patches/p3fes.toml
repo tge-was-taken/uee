@@ -1,8 +1,24 @@
-# SLUS_216.21, md5 9074ba25f5a100940ed233c9f8f675ab.
-#
-# H_Dbprt_FmtLog @ 0x1052b0 formats into the sLogs ring that H_Dbprt_DrawLogs
-# draws on screen, and never reaches the console. Tail call scePrintf @ 0x505e48
-# instead, which takes the same varargs and ends at the kernel TTY.
+# SLUS_216.21 md5 9074ba25f5a100940ed233c9f8f675ab: H_Dbprt_FmtLog @ 0x1052b0
+# reaches scePrintf @ 0x505e48. The newline goes first because printing after
+# the message would move the stack scePrintf reads its fifth argument from.
 [[patch]]
 address = 0x1052b0
-words = [0x08141792, 0x00000000]
+words = [
+    0x27BDFFD0,  # addiu $sp, $sp, -48
+    0xAFBF0010,  # sw    $ra, 16($sp)
+    0xAFA40014,  # sw    $a0, 20($sp)
+    0xAFA50018,  # sw    $a1, 24($sp)
+    0xAFA6001C,  # sw    $a2, 28($sp)
+    0xAFA70020,  # sw    $a3, 32($sp)
+    0x3C040010,  # lui   $a0, 0x0010
+    0x0C141792,  # jal   scePrintf
+    0x348452F0,  # ori   $a0, $a0, 0x52f0
+    0x8FBF0010,  # lw    $ra, 16($sp)
+    0x8FA40014,  # lw    $a0, 20($sp)
+    0x8FA50018,  # lw    $a1, 24($sp)
+    0x8FA6001C,  # lw    $a2, 28($sp)
+    0x8FA70020,  # lw    $a3, 32($sp)
+    0x08141792,  # j     scePrintf
+    0x27BD0030,  # addiu $sp, $sp, 48
+    0x0000000A,  # "\n" at 0x1052f0
+]

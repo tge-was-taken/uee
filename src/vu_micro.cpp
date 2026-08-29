@@ -212,8 +212,14 @@ void VuMicro::executeUpper(u32 code) {
     }
 
     switch (((code >> 6) & 0x1Fu) << 6 | (code & 0x3Fu)) {
-        case 0x13C: vitof0(mState, dest, ft, fs); return;
-        case 0x17C: vftoi0(mState, dest, ft, fs); return;
+        case 0x13C: vitof(mState, dest, ft, fs, 0); return;
+        case 0x13D: vitof(mState, dest, ft, fs, 4); return;
+        case 0x13E: vitof(mState, dest, ft, fs, 12); return;
+        case 0x13F: vitof(mState, dest, ft, fs, 15); return;
+        case 0x17C: vftoi(mState, dest, ft, fs, 0); return;
+        case 0x17D: vftoi(mState, dest, ft, fs, 4); return;
+        case 0x17E: vftoi(mState, dest, ft, fs, 12); return;
+        case 0x17F: vftoi(mState, dest, ft, fs, 15); return;
         case 0x1FD: vabs(mState, dest, ft, fs); return;
         case 0x1FF: vclip(mState, fs, ft); return;
         case 0x2FC: vopmula(mState, dest, fs, ft); return;
@@ -370,6 +376,7 @@ void VuMicro::executeLower(u32 code) {
             const u32 dest = destOf(code);
             switch (wide) {
                 case lower::kMove: vmove(mState, dest, ft, fs); return;
+                case lower::kMr32: vmr32(mState, dest, ft, fs); return;
                 case lower::kMfir: vmfir(mState, dest, ft, fs); return;
                 case lower::kMtir:
                     vmtir(mState, ft, fs, static_cast<s32>((code >> 21) & 3u));

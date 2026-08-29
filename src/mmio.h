@@ -2,6 +2,7 @@
 
 #include "dmac.h"
 #include "gif.h"
+#include "gs.h"
 #include "interrupts.h"
 #include "r5900.h"
 #include "sbus.h"
@@ -19,7 +20,7 @@ class Mmio {
 public:
     void attach(Memory& memory, R5900& cpu) {
         mCpu = &cpu;
-        mGif.attach(memory);
+        mGif.attach(memory, mGs);
         mVif[0].attach(memory, mGif, 0);
         mVif[1].attach(memory, mGif, 1);
         mDmac.attach(memory, mInterrupts, mGif, mVif[0], mVif[1]);
@@ -43,6 +44,7 @@ public:
     Sbus& sbus() { return mSbus; }
     Dmac& dmac() { return mDmac; }
     Gif& gif() { return mGif; }
+    Gs& gs() { return mGs; }
     Vif& vif(u32 unit) { return mVif[unit]; }
     const Sbus& sbus() const { return mSbus; }
 
@@ -51,6 +53,7 @@ private:
     Interrupts mInterrupts;
     Sbus mSbus;
     Gif mGif;
+    Gs mGs;
     Vif mVif[2];
     Dmac mDmac;
     R5900* mCpu = nullptr;

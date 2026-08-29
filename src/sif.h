@@ -1,19 +1,19 @@
 #pragma once
 
+#include "iop.h"
 #include "iop_hle_cdvdfsv.h"
 #include "iop_hle_fileio.h"
 #include "iop_hle_loadfile.h"
-#include "iop_hle_server.h"
-#include "iop_hle_cdvdfsv.h"
-#include "iop_hle_fileio.h"
-#include "iop_hle_loadfile.h"
-#include "iop_hle_server.h"
+#include "iop_rpc.h"
 #include "memory.h"
 #include "sbus.h"
+#include "sif_server.h"
 #include "types.h"
 
 #include <deque>
+#include <filesystem>
 #include <map>
+#include <set>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +31,7 @@ constexpr u32 kResetCommand = 0x80000003;
 constexpr u32 kRpcEnd = 0x80000008;
 constexpr u32 kRpcBind = 0x80000009;
 constexpr u32 kRpcCall = 0x8000000A;
+constexpr u32 kRpcReadData = 0x8000000C;
 
 }  // namespace sifcmd
 
@@ -38,18 +39,23 @@ constexpr u32 kRpcCall = 0x8000000A;
 // back as command packets so the guest's own SIF library parses them.
 class Sif {
 public:
-    Sif(Memory& memory, Sbus& sbus, std::string& console);
+    Sif(Memory& memory, Sbus& sbus, std::string& console, Iop& iop);
 
-    void attachDisc(Disc& disc) { mCdvd.attachDisc(disc); }
+    void attachDisc(Disc& disc) {
+        mCdvd.attachDisc(disc);
+        mLoadFile.attachDisc(disc);
+    }
+
+    void attachFiles(std::filesystem::path root) { mFileIo.attachFiles(std::move(root)); }
 
     // A later registration takes the service ids off the one that held them,
     // which is what a game shipping its own build of a module does.
-    void registerServer(IopHleServer& server);
+    void registerServer(SifServer& server);
 
-    void receive(u32 transfers, u32 count, u64 hsync);
+    void receive(u32 transfers, u32 count);
 
     // True when a packet landed and the SIF0 interrupt is owed.
-    bool advance(u64 hsync);
+    bool advance();
 
 private:
     struct Transfer {
@@ -60,30 +66,34 @@ private:
     };
 
     Transfer readTransfer(u32 address) const;
-    void handleCommand(const Transfer& command, const std::optional<Transfer>& payload,
-                       u64 hsync);
-    void reset(u64 hsync);
+    void handleCommand(const Transfer& command, const std::optional<Transfer>& payload);
+    void reset();
     void initialiseCommand(u32 packet);
     void bindServer(u32 packet);
     void callServer(u32 packet, const std::optional<Transfer>& payload);
+    void readOtherData(u32 packet);
     void replyToRequest(u32 packet, u32 request, u32 server, u32 buffer);
     void send(std::vector<u32> packet);
+    // Deduplicate stub logs to reduce spam
+    void reportOnce(u32 serverId, u32 number);
 
-    IopHleServer* serverFor(u32 serverId) const;
+    SifServer* serverFor(u32 serverId) const;
     u32 serverAddress(u32 serverId);
     u32 serverIdAt(u32 address) const;
 
     Memory& mMemory;
     Sbus& mSbus;
+    Iop& mIop;
     IopHleFileio mFileIo;
     IopHleLoadfile mLoadFile;
     IopHleCdvdfsv mCdvd;
-    std::map<u32, IopHleServer*> mRegistered;
+    IopRpc mIopRpc;
+    std::map<u32, SifServer*> mRegistered;
 
     u32 mEeCommandBuffer = 0;
-    u64 mRebootAt = 0;
     bool mRebooting = false;
-    std::vector<u32> mBound;
+    std::map<u32, u32> mBound;
+    std::set<std::pair<u32, u32>> mReported;
     std::deque<std::vector<u32>> mPending;
 };
 

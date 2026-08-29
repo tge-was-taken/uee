@@ -11,12 +11,16 @@ constexpr u32 kTimerBase = 0x10000000;
 constexpr u32 kTimerStride = 0x800;
 constexpr usize kTimerCount = 4;
 
-// NTSC H-SYNC is 15.734 kHz against a 294.912 MHz core, and the runtime retires
-// one instruction per cycle, so this many instructions make one tick.
-constexpr u64 kInstructionsPerHsync = 18742;
+constexpr u64 kCoreClockHz = 294'912'000;
+constexpr u64 kBusClockHz = 147'456'000;
+constexpr double kFieldsPerSecond = 59.94;
+constexpr double kLinesPerField = 262.5;
 
-// NTSC draws 262.5 lines per field at 59.94 Hz, so a field is this many H-SYNC
-// ticks and VBLANK starts once the visible lines are done.
+constexpr u64 kInstructionsPerSecond = kCoreClockHz;
+constexpr u64 kInstructionsPerBusCycle = kInstructionsPerSecond / kBusClockHz;
+constexpr u64 kInstructionsPerHsync =
+    static_cast<u64>(kInstructionsPerSecond / (kFieldsPerSecond * kLinesPerField));
+
 constexpr u32 kHsyncPerField = 263;
 constexpr u32 kVisibleLines = 240;
 
@@ -25,6 +29,10 @@ struct Timer {
     u32 mode = 0;
     u32 comp = 0xFFFF;
     u32 hold = 0;
+    // Instructions already turned into ticks. Kept per timer because they do
+    // not share a rate, and as a count rather than a tick number so changing
+    // the tick rate carries the remainder of the duration over.
+    u64 counted = 0;
 };
 
 // The four EE timers plus the instruction-driven clock that advances them.
@@ -34,7 +42,7 @@ public:
     Timers();
 
     // True when at least one H-SYNC tick elapsed, so callers can skip work.
-    bool advanceTo(u64 retiredInstructions);
+    bool advanceTo(u64 executed);
 
     u16 hsyncCount() const { return static_cast<u16>(mTimers[3].count); }
 
@@ -46,7 +54,8 @@ public:
 
 private:
     std::array<Timer, kTimerCount> mTimers;
-    u64 mLastTick = 0;
+    u64 mScanlines = 0;
+    u64 mNextTick = 0;
 };
 
 }  // namespace uee

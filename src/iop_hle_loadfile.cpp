@@ -1,14 +1,18 @@
 // LOADFILE md5 12335f3c69c0b335624dd0328bd8bee4.
 
+#include "log.h"
 #include "iop_hle_loadfile.h"
 
-#include "syscall_stubs.h"
+#include "disc.h"
 
 #include <format>
 #include <string>
+#include <vector>
 
 namespace uee {
 namespace {
+
+LoggerChannel log("loadfile");
 
 // LOADFILE: LoadFileRpcServerThread @ 0xc8
 constexpr u32 kLoadFile = 0x80000006;
@@ -16,6 +20,7 @@ constexpr u32 kServerIds[] = {kLoadFile};
 
 // LOADFILE: RpcServeLoop @ 0x4c4, table at 0x1bc8
 constexpr u32 kLoadModule = 0;
+constexpr u32 kLoadModuleBuffer = 6;
 
 // That build answers 0 above the table, but SLUS-216.21: lf_version @ 0x50bbe8
 // refuses anything but "3100": the game replaces the IOP modules at run time
@@ -30,7 +35,7 @@ constexpr u32 kEntryResult = 1;
 
 }  // namespace
 
-IopHleLoadfile::IopHleLoadfile(Memory& memory) : mMemory(memory) {}
+IopHleLoadfile::IopHleLoadfile(Memory& memory, Iop& iop) : mMemory(memory), mIop(iop) {}
 
 std::span<const u32> IopHleLoadfile::serverIds() const { return kServerIds; }
 
@@ -41,23 +46,55 @@ s32 IopHleLoadfile::call(u32 serverId, const RpcCall& call) {
     if (call.number == kLoadModule) {
         return loadModule(call);
     }
-    reportStub(std::format("LOADFILE {:08x} call {}", serverId, call.number));
+    if (call.number == kLoadModuleBuffer) {
+        return loadModuleBuffer(call);
+    }
+    log.stub("{:08x} call {}", serverId, call.number);
     return -1;
 }
 
-// LOADFILE: LoadModuleFromFile @ 0x10dc. Nothing here runs IOP code, so the
-// module is answered for rather than loaded.
-s32 IopHleLoadfile::loadModule(const RpcCall& call) {
+std::string IopHleLoadfile::readPath(u32 address) {
     std::string path;
     for (u32 i = 0; i < kPathLimit; ++i) {
-        const char letter = static_cast<char>(mMemory.read8(call.argument + kPath + i));
+        const char letter = static_cast<char>(mMemory.read8(address + i));
         if (letter == '\0') {
             break;
         }
         path.push_back(letter);
     }
-    reportStub(std::format("module {}", path));
+    return path;
+}
 
+// LOADFILE: LoadModuleFromFile @ 0x10dc
+s32 IopHleLoadfile::loadModule(const RpcCall& call) {
+    const std::string path = readPath(call.argument + kPath);
+    log.trace("LoadModuleFromFile(path={})", path);
+    if (call.receiveSize >= 8) {
+        mMemory.write32(call.receive + kEntryResult * 4, 0);
+    }
+
+    std::optional<DiscFile> file;
+    if (mDisc != nullptr) {
+        file = mDisc->find(path);
+    }
+    if (!file) {
+        log.stub("module {}", path);
+        return static_cast<s32>(++mModules);
+    }
+
+    std::vector<u8> image;
+    const u32 sectors = (file->size + kSectorBytes - 1) / kSectorBytes;
+    const std::string module = file->name.substr(0, file->name.find(';'));
+    if (!mDisc->read(file->sector, sectors, image) || !mIop.loadModule(module, image)) {
+        log.stub("module {}", path);
+        return static_cast<s32>(++mModules);
+    }
+    return static_cast<s32>(++mModules);
+}
+
+s32 IopHleLoadfile::loadModuleBuffer(const RpcCall& call) {
+    constexpr u32 kBuffer = 0;
+    log.stub("module buffer at {:08x}", mMemory.read32(call.argument + kBuffer * 4));
     if (call.receiveSize >= 8) {
         mMemory.write32(call.receive + kEntryResult * 4, 0);
     }

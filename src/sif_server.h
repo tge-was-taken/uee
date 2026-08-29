@@ -11,17 +11,19 @@ namespace uee {
 struct RpcCall {
     u32 number = 0;
     u32 argument = 0;
+    u32 argumentSize = 0;
+    // Where the caller addressed the arguments on the IOP, which only a server
+    // that runs there can do anything with.
+    u32 destination = 0;
     u32 receive = 0;
     u32 receiveSize = 0;
 };
 
-// One IOP module's RPC servers. Modules register their ids with SifRegisterRpc
-// as they start, so serverIds may grow and Sif::registerServer may be called
-// again: an emulated IOP claims ids as its guest modules register them, and a
-// game shipping its own build of a module claims ids another one held.
-class IopHleServer {
+// What answers an RPC call the EE makes over the SIF, on the emulated IOP or
+// standing in for it. Modules register ids as they start, so serverIds grows.
+class SifServer {
 public:
-    virtual ~IopHleServer() = default;
+    virtual ~SifServer() = default;
 
     virtual std::string_view name() const = 0;
     virtual std::span<const u32> serverIds() const = 0;

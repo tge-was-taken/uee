@@ -18,6 +18,9 @@ enum class IopWait : u32 {
     Sleep = 1,
     Semaphore = 2,
     EventFlag = 3,
+    RpcQueue = 4,
+    Vblank = 5,
+    RpcReply = 6,
 };
 
 struct IopThread {

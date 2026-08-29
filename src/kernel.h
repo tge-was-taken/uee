@@ -4,7 +4,9 @@
 #include "mmio.h"
 #include "sif.h"
 #include "memory.h"
+#include "hooks.h"
 #include "semaphores.h"
+#include "symbols.h"
 #include "thread.h"
 #include "ee_context.h"
 #include "types.h"
@@ -62,15 +64,22 @@ public:
     void dispatchAfterInterrupt();
     void reportNoActiveThreads();
     void attachDisc(Disc& disc) { mSif.attachDisc(disc); }
+    void attachFiles(std::filesystem::path root) { mSif.attachFiles(std::move(root)); }
 
     // Advances the timers and queues any alarm that has expired.
-    void advanceClock(u64 retiredInstructions);
+    void advanceClock(u64 executed);
 
     // Restores the register the guest handler was called through and resumes
     // the instruction after the syscall.
     bool resumeFromSyscallHandler();
 
     usize currentThread() const { return mThreads.current(); }
+    Symbols& symbols() { return mSymbols; }
+    Hooks& hooks() { return mHooks; }
+    Symbols& iopSymbols() { return mIop.symbols(); }
+
+    // Everything a stop that was not clean needs explaining.
+    void reportThreads() const;
     const std::string& readOutput() const { return mOutput; }
 
 
@@ -149,7 +158,10 @@ private:
     AlarmTable mAlarms;
     Mmio mMmio;
     std::string mOutput;
-    Sif mSif{mMemory, mMmio.sbus(), mOutput};
+    Symbols mSymbols;
+    Hooks mHooks;
+    Iop mIop{mOutput};
+    Sif mSif{mMemory, mMmio.sbus(), mOutput, mIop};
 
     u32 mHandlerCount = 0;
     u32 mRootThread = 0;

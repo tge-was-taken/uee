@@ -57,8 +57,8 @@ constexpr u32 widthOf(u32 format) {
 
 u32 Vif::registerBase() const { return mUnit == 0 ? 0x10003800u : 0x10003C00u; }
 u32 Vif::fifoBase() const { return mUnit == 0 ? 0x10004000u : 0x10005000u; }
-u32 Vif::memoryBase() const { return mUnit == 0 ? 0x11004000u : 0x1100C000u; }
-u32 Vif::memorySize() const { return mUnit == 0 ? 4u * 1024u : 16u * 1024u; }
+u32 Vif::memoryBase() const { return mUnit == 0 ? kVu0DataBase : kVu1DataBase; }
+u32 Vif::memorySize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
 
 std::optional<u32> Vif::read(u32 address) const {
     if (address < registerBase() || address >= registerBase() + kRegisterSpan) {

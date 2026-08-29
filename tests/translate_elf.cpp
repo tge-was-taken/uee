@@ -1,3 +1,4 @@
+#include "log.h"
 #include "elf.h"
 #include "memory.h"
 #include "translate.h"
@@ -23,6 +24,7 @@ std::vector<u8> readFile(const std::filesystem::path& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    uee::configureLogging();
     if (argc < 3) {
         spdlog::error("usage: {} <test.elf> <out.cpp>", argv[0]);
         return 2;

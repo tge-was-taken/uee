@@ -1,12 +1,23 @@
 #include "timers.h"
 
+#include <algorithm>
+
 namespace uee {
 namespace {
 
+constexpr u32 kClockSelectMask = 3u;
+constexpr u32 kHblankClock = 3u;
 constexpr u32 kCountEnable = 1u << 7;
 constexpr u32 kZeroReturn = 1u << 6;
 constexpr u32 kEqualFlag = 1u << 10;
 constexpr u32 kOverflowFlag = 1u << 11;
+
+constexpr u64 kInstructionsPerTick[4] = {
+    kInstructionsPerBusCycle,
+    kInstructionsPerBusCycle * 16,
+    kInstructionsPerBusCycle * 256,
+    kInstructionsPerHsync,
+};
 
 struct Slot {
     usize timer;
@@ -28,32 +39,40 @@ std::optional<Slot> decode(u32 address) {
 
 }  // namespace
 
-// The modes InitTimers programs at boot. T0 and T1 are left stopped; T2 and T3
-// count, and T3 is the H-SYNC source alarms are scheduled against.
 // KERNEL: InitTimers @ 0x8000e648
 Timers::Timers() {
-    mTimers[0].mode = 3072;
-    mTimers[1].mode = 3072;
-    mTimers[2].mode = 3200;
-    mTimers[3].mode = 3203;
+    mTimers[0].mode = 0;
+    mTimers[1].mode = 0;
+    mTimers[2].mode = kCountEnable;
+    mTimers[3].mode = kCountEnable | kHblankClock;
     for (Timer& timer : mTimers) {
         timer.count = 0;
         timer.comp = 0xFFFF;
     }
 }
 
-bool Timers::advanceTo(u64 retiredInstructions) {
-    const u64 ticks = retiredInstructions / kInstructionsPerHsync;
-    if (ticks == mLastTick) {
+bool Timers::advanceTo(u64 executed) {
+    if (executed < mNextTick) {
         return false;
     }
-    const u32 elapsed = static_cast<u32>(ticks - mLastTick);
-    mLastTick = ticks;
 
+    u64 next = executed + kInstructionsPerHsync;
     for (Timer& timer : mTimers) {
+        // Check for stopped timer
         if ((timer.mode & kCountEnable) == 0) {
+            timer.counted = executed;
             continue;
         }
+
+        const u64 period = kInstructionsPerTick[timer.mode & kClockSelectMask];
+        const u64 ticks = (executed - timer.counted) / period;
+        timer.counted += ticks * period;
+        next = std::min(next, timer.counted + period);
+        if (ticks == 0) {
+            continue;
+        }
+
+        const u32 elapsed = static_cast<u32>(std::min<u64>(ticks, 0x10000));
         const u64 raised = static_cast<u64>(timer.count) + elapsed;
         if (raised > 0xFFFF) {
             timer.mode |= kOverflowFlag;
@@ -68,7 +87,14 @@ bool Timers::advanceTo(u64 retiredInstructions) {
             timer.count = static_cast<u32>(raised & 0xFFFF);
         }
     }
-    return true;
+
+    // The scanline the kernel schedules against is counted here rather than
+    // read off timer 3, so a guest reprogramming that timer cannot stop it.
+    const u64 scanlines = executed / kInstructionsPerHsync;
+    const bool passed = scanlines != mScanlines;
+    mScanlines = scanlines;
+    mNextTick = std::min(next, (scanlines + 1) * kInstructionsPerHsync);
+    return passed;
 }
 
 std::optional<u32> Timers::read(u32 address) const {
@@ -90,11 +116,13 @@ bool Timers::write(u32 address, u32 value) {
     if (!slot) {
         return false;
     }
+    // A mode write can change how fast the timer runs, so when it next needs
+    // looking at is no longer known.
+    mNextTick = 0;
     Timer& timer = mTimers[slot->timer];
     switch (slot->field) {
         case 0x00: timer.count = value & 0xFFFF; break;
-        // The equal and overflow flags are write-one-to-clear, so a mode write
-        // clears exactly the flags it sets.
+        // A mode write clears the flags it sets.
         case 0x10: {
             const u32 cleared = timer.mode & ~(value & (kEqualFlag | kOverflowFlag));
             timer.mode = (value & ~(kEqualFlag | kOverflowFlag)) | (cleared & (kEqualFlag | kOverflowFlag));

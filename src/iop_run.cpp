@@ -1,5 +1,7 @@
 #include "iop_run.h"
 
+#include "idle.h"
+
 #include "instruction.h"
 
 #include <minicoro.h>
@@ -71,7 +73,10 @@ Step runDelaySlot(IopMachine& machine, u32 pc) {
     return step;
 }
 
-Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLimit) {
+constexpr u64 kIdleInterval = 0xFFFF;
+
+Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
+              Idle* idle = nullptr) {
     R3000A& cpu = machine.iop().cpu;
 
     while (executed < instructionLimit) {
@@ -92,6 +97,9 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLim
         }
 
         const u32 pc = cpu.pc;
+        if (idle != nullptr && (executed & kIdleInterval) == 0) {
+            idle->sample(cpu.pc);
+        }
         const usize self = machine.kernel.currentThread();
         const Step step = stepOnce(machine, pc);
         if (step.stop) {
@@ -99,7 +107,7 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLim
         }
         ++executed;
         // The call gave the processor away; wait until it comes back.
-        while (machine.kernel.currentThread() != self) {
+        while (!machine.kernel.isCurrent(self)) {
             mco_yield(mco_running());
         }
 
@@ -119,8 +127,8 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLim
 // where it left off.
 class Scheduler {
 public:
-    Scheduler(IopMachine& machine, u64 instructionLimit)
-        : mMachine(machine), mInstructionLimit(instructionLimit) {}
+    Scheduler(IopMachine& machine, u64 instructionLimit, const Symbols& symbols)
+        : mMachine(machine), mInstructionLimit(instructionLimit), mIdle("iop", symbols) {}
 
     ~Scheduler() {
         for (mco_coro* coroutine : mCoroutines) {
@@ -154,7 +162,8 @@ private:
     }
 
     void runThread() {
-        mStop = runUntil(mMachine, kIopModuleReturn, mExecuted, mInstructionLimit);
+        mStop = runUntil(mMachine, kIopModuleReturn, mExecuted, mInstructionLimit,
+                         &mIdle);
         mStopped = true;
     }
 
@@ -172,6 +181,7 @@ private:
 
     IopMachine& mMachine;
     u64 mInstructionLimit;
+    Idle mIdle;
     std::vector<mco_coro*> mCoroutines;
     u64 mExecuted = 0;
     Stop mStop;
@@ -185,6 +195,10 @@ void enterModule(IopContext& iop, const IrxModule& module) {
     iop.cpu.gpr[reg::gp] = module.gp;
     iop.cpu.gpr[reg::sp] = kIopStackTop;
     iop.cpu.gpr[reg::ra] = kIopModuleReturn;
+    // A negative argc unloads rather than starts: CRI_ADXI.IRX md5
+    // df850012de771767b5cd88b6263a25c1 branches on it in module_start @ 0x57c.
+    iop.cpu.gpr[reg::a0] = 0;
+    iop.cpu.gpr[reg::a1] = 0;
 }
 
 // The caller commits the load delay, so $ra is still the value from before a
@@ -223,8 +237,8 @@ bool call(IopMachine& machine, u32 target, u32 returnTo) {
     return machine.iop().cpu.pc == returnTo;
 }
 
-Stop run(IopMachine& machine, u64 instructionLimit) {
-    Stop stop = Scheduler(machine, instructionLimit).run();
+Stop run(IopMachine& machine, u64 instructionLimit, const Symbols& symbols) {
+    Stop stop = Scheduler(machine, instructionLimit, symbols).run();
     if (stop.reason == StopReason::Returned) {
         stop.reason = StopReason::Exited;
     }

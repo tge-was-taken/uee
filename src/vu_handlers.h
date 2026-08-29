@@ -3,7 +3,6 @@
 #include "memory.h"
 #include "opcodes.h"
 #include "single.h"
-#include "syscall_stubs.h"
 #include "types.h"
 #include "vu.h"
 #include "vu_micro.h"
@@ -159,16 +158,36 @@ inline void vrget(Vu& vu0, u32 dest, u32 vt) {
 inline void vmove(Vu& vu0, u32 dest, u32 vt, u32 vs) {
     vectorUnary(vu0, dest, vt, vs, [](u32 word) { return word; });
 }
+// Every field takes the one above it and the top wraps round to the bottom.
+// The source is read whole first, so rotating a register onto itself works.
+inline void vmr32(Vu& vu0, u32 dest, u32 vt, u32 vs) {
+    const Reg128 source = vu0.readVf(vs);
+    const u32 out[4] = {source.word(1), source.word(2), source.word(3), source.word(0)};
+    vu0.writeVf(vt, dest, out);
+}
 inline void vabs(Vu& vu0, u32 dest, u32 vt, u32 vs) {
     vectorUnary(vu0, dest, vt, vs, [](u32 word) { return word & ~single::kSignMask; });
 }
-inline void vitof0(Vu& vu0, u32 dest, u32 vt, u32 vs) {
-    vectorUnary(vu0, dest, vt, vs,
-                [](u32 word) { return single::fromInt32(static_cast<s32>(word)); });
+// The scaled conversions read and write fixed point
+constexpr u32 powerOfTwo(s32 exponent) { return static_cast<u32>(127 + exponent) << 23; }
+
+inline void vitof(Vu& vu0, u32 dest, u32 vt, u32 vs, s32 fraction) {
+    vectorUnary(vu0, dest, vt, vs, [fraction](u32 word) {
+        const u32 value = single::fromInt32(static_cast<s32>(word));
+        if (fraction == 0) {
+            return value;
+        }
+        return single::clampToVu(single::mul(value, powerOfTwo(-fraction)).bits);
+    });
 }
-inline void vftoi0(Vu& vu0, u32 dest, u32 vt, u32 vs) {
-    vectorUnary(vu0, dest, vt, vs,
-                [](u32 word) { return static_cast<u32>(single::toInt32(word)); });
+
+inline void vftoi(Vu& vu0, u32 dest, u32 vt, u32 vs, s32 fraction) {
+    vectorUnary(vu0, dest, vt, vs, [fraction](u32 word) {
+        const u32 scaled =
+            fraction == 0 ? word
+                          : single::clampToVu(single::mul(word, powerOfTwo(fraction)).bits);
+        return static_cast<u32>(single::toInt32(scaled));
+    });
 }
 
 inline void viadd(Vu& vu0, u32 vid, u32 vis, u32 vit) {

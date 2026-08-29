@@ -1,4 +1,6 @@
 #include "alarm.h"
+#include "gif.h"
+#include "gs.h"
 #include "ee_context.h"
 #include "interrupts.h"
 #include "kernel.h"
@@ -132,9 +134,15 @@ void checkAlarmSlotsRunOut() {
     checkEqual(alarms.set(100, 0x1000, 0, 0, 0), -1, "the sixty-fifth alarm is refused");
 }
 
+// Mode bits 0 and 1 pick the clock, and 3 is the one that counts scanlines.
+constexpr u32 kCountHsync = 0x83;
+constexpr u32 kCountBusClock = 0x80;
+constexpr u32 kCountBusClockOver16 = 0x81;
+constexpr u32 kCountBusClockOver256 = 0x82;
+
 void checkTimersCountHsync() {
     uee::Timers timers;
-    timers.at(3).mode = 0x80;
+    timers.at(3).mode = kCountHsync;
     timers.advanceTo(uee::kInstructionsPerHsync * 5);
     checkEqual<u32>(timers.hsyncCount(), 5, "five ticks after five H-SYNC periods");
 
@@ -145,10 +153,34 @@ void checkTimersCountHsync() {
 void checkTimersIgnoreDisabledCounters() {
     uee::Timers timers;
     timers.at(0).mode = 0;
-    timers.at(1).mode = 0x80;
+    timers.at(1).mode = kCountHsync;
     timers.advanceTo(uee::kInstructionsPerHsync * 3);
     checkEqual<u32>(timers.at(0).count, 0, "a stopped timer does not count");
     checkEqual<u32>(timers.at(1).count, 3, "a running timer does");
+}
+
+// A guest that asks for a bus clock and gets scanlines reads a clock tens of
+// times too slow, which looks like a hang rather than a wrong number.
+void checkTimerClockSelectSetsTheRate() {
+    uee::Timers timers;
+    timers.at(0).mode = kCountBusClock;
+    timers.at(1).mode = kCountBusClockOver16;
+    timers.at(2).mode = kCountBusClockOver256;
+    timers.advanceTo(4096);
+    checkEqual<u32>(timers.at(0).count, 2048, "the bus clock is half the core clock");
+    checkEqual<u32>(timers.at(1).count, 128, "a sixteenth of the bus clock");
+    checkEqual<u32>(timers.at(2).count, 8, "a two hundred and fifty sixth of it");
+}
+
+// Changing the clock mid-run must not spend the instructions twice.
+void checkTimerKeepsItsPlaceAcrossAClockChange() {
+    uee::Timers timers;
+    timers.at(0).mode = kCountBusClockOver256;
+    timers.advanceTo(1024);
+    checkEqual<u32>(timers.at(0).count, 2, "two ticks at a period of 512");
+    timers.write(uee::kTimerBase + 0x10, kCountBusClock);
+    timers.advanceTo(1028);
+    checkEqual<u32>(timers.at(0).count, 2 + 2, "the faster clock carries on from there");
 }
 
 void checkTimerRegisterWindow() {
@@ -315,6 +347,100 @@ void checkUnclaimedSlotsAreUndefinedSyscall() {
 
 }  // namespace
 
+// A GIFtag's loop count is in registers, not quadwords, and how many quadwords
+// those take depends on the format. Miscounting runs the packet past its end and
+// swallows whatever follows, which is silent: no register decodes wrongly, they
+// just never arrive.
+uee::Gif makeGif(uee::Memory& memory, uee::Gs& gs) {
+    uee::Gif gif;
+    gif.attach(memory, gs);
+    return gif;
+}
+
+constexpr u64 tag(u64 loops, u64 format, u64 registers) {
+    return loops | (format << 58) | (registers << 60);
+}
+
+// The GS register that reports drawing is done, which arrives as an address and
+// data pair and so is only seen if the packet before it consumed exactly right.
+constexpr u64 kFinishRegister = 0x61;
+constexpr u32 kCsrFinish = 1u << 1;
+constexpr u64 kAddressData = 0xE;
+
+void feedFinish(uee::Gif& gif, uee::Gs& gs) {
+    gif.writeQuadword(tag(1, 0, 1), kAddressData);
+    gif.writeQuadword(0, kFinishRegister);
+    gs.advanceScanline();
+}
+
+void checkRegisterListPacksTwoRegistersPerQuadword() {
+    uee::Memory memory = uee::makeMainMemory();
+    uee::Gs gs;
+    uee::Gif gif = makeGif(memory, gs);
+
+    // Four registers over three loops is twelve registers, so six quadwords.
+    gif.writeQuadword(tag(3, 1, 4), 0);
+    for (int i = 0; i < 6; ++i) {
+        gif.writeQuadword(0, 0);
+    }
+    feedFinish(gif, gs);
+    checkEqual(gs.csr() & kCsrFinish, static_cast<u64>(kCsrFinish),
+               "a register list ends after half as many quadwords as registers");
+}
+
+void checkPackedSpendsAQuadwordPerRegister() {
+    uee::Memory memory = uee::makeMainMemory();
+    uee::Gs gs;
+    uee::Gif gif = makeGif(memory, gs);
+
+    gif.writeQuadword(tag(3, 0, 2), 0);
+    for (int i = 0; i < 6; ++i) {
+        gif.writeQuadword(0, 0);
+    }
+    feedFinish(gif, gs);
+    checkEqual(gs.csr() & kCsrFinish, static_cast<u64>(kCsrFinish),
+               "a packed packet ends after one quadword per register");
+}
+
+void checkImageCountsQuadwordsNotRegisters() {
+    uee::Memory memory = uee::makeMainMemory();
+    uee::Gs gs;
+    uee::Gif gif = makeGif(memory, gs);
+
+    // An image carries pixels, so the register count says nothing about length.
+    gif.writeQuadword(tag(4, 2, 3), 0);
+    for (int i = 0; i < 4; ++i) {
+        gif.writeQuadword(0, 0);
+    }
+    feedFinish(gif, gs);
+    checkEqual(gs.csr() & kCsrFinish, static_cast<u64>(kCsrFinish),
+               "an image packet is as many quadwords as it has loops");
+}
+
+// A guest clears the bit it is about to wait on after submitting the work, so
+// answering before it does that loses the answer.
+void checkGsHoldsFinishUntilTheScanlineIsOut() {
+    uee::Gs gs;
+    gs.raiseFinish();
+    checkEqual(gs.csr() & 2u, static_cast<u64>(0), "drawing is not done on submission");
+    gs.advanceScanline();
+    checkEqual(gs.csr() & 2u, static_cast<u64>(2), "a scanline later it is");
+}
+
+void checkGsCsrClearsOnWritingOne() {
+    uee::Gs gs;
+    gs.raiseFinish();
+    gs.advanceScanline();
+    gs.raiseSignal();
+    checkEqual(gs.csr() & 3u, static_cast<u64>(3), "both interrupts are reported");
+
+    gs.write(0x12001000, kCsrFinish);
+    checkEqual(gs.csr() & 3u, static_cast<u64>(1),
+               "writing a one clears only the bit it names");
+    gs.write(0x12001000, 0);
+    checkEqual(gs.csr() & 3u, static_cast<u64>(1), "writing a zero clears nothing");
+}
+
 int main() {
     checkQueueIsFifo();
     checkQueueRotatesOldestToNewest();
@@ -325,6 +451,8 @@ int main() {
     checkAlarmSlotsRunOut();
     checkTimersCountHsync();
     checkTimersIgnoreDisabledCounters();
+    checkTimerClockSelectSetsTheRate();
+    checkTimerKeepsItsPlaceAcrossAClockChange();
     checkTimerRegisterWindow();
     checkInterruptMasksToggle();
     checkStatusIsWriteOneToClear();
@@ -336,6 +464,11 @@ int main() {
     checkTheTableIndexIsUnchecked();
     checkGuestHandlersAreCalledNotEntered();
     checkUnclaimedSlotsAreUndefinedSyscall();
+    checkRegisterListPacksTwoRegistersPerQuadword();
+    checkPackedSpendsAQuadwordPerRegister();
+    checkImageCountsQuadwordsNotRegisters();
+    checkGsHoldsFinishUntilTheScanlineIsOut();
+    checkGsCsrClearsOnWritingOne();
 
     if (gFailures != 0) {
         spdlog::error("{} checks failed", gFailures);

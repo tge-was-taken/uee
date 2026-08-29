@@ -6,12 +6,17 @@
 #include <bit>
 #include <cstring>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace uee {
 
 constexpr u32 kMainRamSize = 32 * 1024 * 1024;
 constexpr u32 kIopRamSize = 2 * 1024 * 1024;
+constexpr u32 kIopHardwareBase = 0x1F800000;
+constexpr u32 kIopHardwareSize = 0x00010000;
+constexpr u32 kSpu2Base = 0x1F900000;
+constexpr u32 kSpu2Size = 0x00001000;
 constexpr u32 kScratchpadBase = 0x70000000;
 constexpr u32 kScratchpadSize = 16 * 1024;
 constexpr u32 kMmioBase = 0x10000000;
@@ -66,12 +71,19 @@ public:
 
     std::optional<u32> fault() const { return mFault; }
 
-    // Translated code reaches these on nearly every guest instruction.
+    std::optional<u8> peek8(u32 address) const {
+        const u8* p = find(address, 1);
+        if (p == nullptr) {
+            p = find(mMirror.apply(address), 1);
+        }
+        return p == nullptr ? std::nullopt : std::optional<u8>{*p};
+    }
+
     u8 read8(u32 address) { return load<u8>(resolve(address, 1)); }
     u16 read16(u32 address) { return load<u16>(resolve(address, 2)); }
-    // A quadword store lands here as two of these, and a register window only
-    // decodes a word at a time, so a hardware address is split rather than
-    // written straight through to memory.
+
+    // A register window only decodes a word at a time, so a doubleword access to
+    // one is split.
     u64 read64(u32 address) {
         if (isMmio(address)) {
             return read32(address) | (static_cast<u64>(read32(address + 4)) << 32);
@@ -108,7 +120,8 @@ public:
 
 private:
     bool isMmio(u32 address) const {
-        return mMirror.apply(address) - kMmioBase < kMmioSize;
+        const u32 folded = mMirror.apply(address);
+        return folded - kMmioBase < kMmioSize || folded - kGsPrivBase < kGsPrivSize;
     }
 
     template <typename T>
@@ -142,8 +155,8 @@ private:
         return nullptr;
     }
 
-    u8* find(u32 address, u32 size) {
-        for (Region& region : mRegions) {
+    const u8* find(u32 address, u32 size) const {
+        for (const Region& region : mRegions) {
             if (address < region.base) {
                 continue;
             }
@@ -154,6 +167,10 @@ private:
             }
         }
         return nullptr;
+    }
+
+    u8* find(u32 address, u32 size) {
+        return const_cast<u8*>(std::as_const(*this).find(address, size));
     }
 
     std::vector<Region> mRegions;

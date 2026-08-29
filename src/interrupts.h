@@ -9,12 +9,14 @@
 
 namespace uee {
 
-constexpr u32 kIntcStat = 0x1000F000;
-constexpr u32 kIntcMask = 0x1000F010;
+constexpr u32 kIntcBase = 0x1000F000;
+constexpr u32 kIntcStat = kIntcBase + 0x00;
+constexpr u32 kIntcMask = kIntcBase + 0x10;
+
 constexpr u32 kDmacBase = 0x1000E000;
-constexpr u32 kDCtrl = 0x1000E000;
-constexpr u32 kDStat = 0x1000E010;
-constexpr u32 kDPcr = 0x1000E020;
+constexpr u32 kDCtrl = kDmacBase + 0x00;
+constexpr u32 kDStat = kDmacBase + 0x10;
+constexpr u32 kDPcr = kDmacBase + 0x20;
 
 constexpr usize kIntcCauses = 15;
 constexpr usize kDmacChannels = 16;

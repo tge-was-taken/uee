@@ -25,7 +25,6 @@ struct Export {
 struct IrxModule {
     Program program;
     u32 gp = 0;
-    std::vector<Import> imports;
     std::vector<Export> exports;
 };
 
@@ -37,9 +36,9 @@ constexpr u32 importIndex(u32 word) {
     return (word >> 6) & 0xFFFFFu;
 }
 
-// Imports resolve against `resident` first, as the IOP's own linker does.
+// Imports resolve against `resident` first, as the IOP's own linker does. The
+// rest are appended to `hostImports`, which modules loaded later share.
 IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base,
-                  const std::vector<IrxModule>& resident);
-IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base);
+                  const std::vector<IrxModule>& resident, std::vector<Import>& hostImports);
 
 }  // namespace uee

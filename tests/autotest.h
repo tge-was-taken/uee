@@ -1,5 +1,6 @@
 #pragma once
 
+#include "log.h"
 #include "elf.h"
 #include "interpreter.h"
 #include "kernel.h"
@@ -71,6 +72,7 @@ inline void reportDifferences(std::string_view name, std::string_view actual,
 }
 
 inline int run(int argc, char** argv, FunctionRunner translated) {
+    configureLogging();
     if (argc < 3) {
         spdlog::error("usage: {} <test.elf> <test.expected>", argv[0]);
         return 2;

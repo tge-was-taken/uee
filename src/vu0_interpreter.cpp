@@ -10,9 +10,16 @@ bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
 
     switch (op) {
     case Op::vmove: vmove(vu0, dest, insn.vt(), insn.vs()); break;
+    case Op::vmr32: vmr32(vu0, dest, insn.vt(), insn.vs()); break;
     case Op::vabs: vabs(vu0, dest, insn.vt(), insn.vs()); break;
-    case Op::vitof0: vitof0(vu0, dest, insn.vt(), insn.vs()); break;
-    case Op::vftoi0: vftoi0(vu0, dest, insn.vt(), insn.vs()); break;
+    case Op::vitof0: vitof(vu0, dest, insn.vt(), insn.vs(), 0); break;
+    case Op::vitof4: vitof(vu0, dest, insn.vt(), insn.vs(), 4); break;
+    case Op::vitof12: vitof(vu0, dest, insn.vt(), insn.vs(), 12); break;
+    case Op::vitof15: vitof(vu0, dest, insn.vt(), insn.vs(), 15); break;
+    case Op::vftoi0: vftoi(vu0, dest, insn.vt(), insn.vs(), 0); break;
+    case Op::vftoi4: vftoi(vu0, dest, insn.vt(), insn.vs(), 4); break;
+    case Op::vftoi12: vftoi(vu0, dest, insn.vt(), insn.vs(), 12); break;
+    case Op::vftoi15: vftoi(vu0, dest, insn.vt(), insn.vs(), 15); break;
 
     case Op::vnop:
     case Op::vwaitq:

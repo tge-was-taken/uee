@@ -5,12 +5,22 @@
 //   SYSMEM   md5 f313d3e9879b1d8886fb2353c816b9eb
 //   INTRMANI md5 2e57f684f325b787a93f9a5883930b3b
 //   THREADMAN md5 73902f937fcdc068825e9a6ac50a0355
+//   SIFCMD   md5 bcdaf8bead75a7362a82c95bbbf479c7
+//   SIFMAN   md5 35a6ac86ca2d7ee9c5a27de8328c3267
+//   VBLANK   md5 dab9bd13305ce1c41d3b58cee21553b7
+//   LIBSD    md5 4b3bb809ec3ff7c3801b5a60d7c4f744
+//   LOADCORE md5 fc39f1391282c682eb9a2f03548ddf23
+//   DMACMAN  md5 a204d6809d4133c688f0144d2d165d98
+//   SECRMAN  md5 b8bac9b7c04d9931ddc50860497f3153
 
+#include "log.h"
 #include "iop_kernel.h"
+
 
 #include <algorithm>
 #include <cstdio>
 #include <format>
+#include <numeric>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -18,9 +28,12 @@
 namespace uee {
 namespace {
 
+LoggerChannel log("iopkernel");
+
 constexpr u32 kFirstArgumentRegister = 4;
 constexpr u32 kResultRegister = 2;
 constexpr u32 kStackRegister = 29;
+constexpr u32 kGlobalRegister = 28;
 // o32 reserves stack slots for the register arguments as well.
 constexpr u32 kRegisterArguments = 4;
 
@@ -46,6 +59,16 @@ constexpr u32 kUnknownEventFlagId = static_cast<u32>(-409);
 constexpr u32 kEventFlagCondition = static_cast<u32>(-421);
 constexpr u32 kEventFlagPattern = static_cast<u32>(-423);
 
+// SIFCMD: sceSifRegisterRpc @ 0x1130 fills a SifRpcServerData_t.
+constexpr u32 kServerId = 0;
+constexpr u32 kServerFunc = 4;
+constexpr u32 kServerBuffer = 8;
+constexpr u32 kServerClientFunc = 16;
+constexpr u32 kServerClientBuffer = 20;
+
+// SIFCMD: sceSifSetRpcQueue @ 0x1088 fills a SifRpcDataQueue_t.
+constexpr u32 kQueueThreadId = 0;
+
 // THREADMAN: PollEventFlag @ 0x2db0
 constexpr u32 kEventFlagModeMask = 0xFFFFFFEEu;
 constexpr u32 kEventFlagClear = 0x10;
@@ -61,13 +84,18 @@ constexpr u32 kSmallestStack = 0x130;
 // THREADMAN: CreateSema @ 0x3060
 constexpr u32 kSemaAttrMask = 0xFFFFFEFEu;
 
-constexpr u64 kTicksPerMicrosecondNumerator = 36864;
-constexpr u64 kTicksPerMicrosecondDenominator = 1000;
+constexpr u64 kIopClockHz = 36'864'000;
+constexpr u64 kMicrosecondsPerSecond = 1'000'000;
+constexpr u64 kTickRatioGcd = std::gcd(kIopClockHz, kMicrosecondsPerSecond);
+constexpr u64 kTicksPerMicrosecondNumerator = kIopClockHz / kTickRatioGcd;
+constexpr u64 kTicksPerMicrosecondDenominator = kMicrosecondsPerSecond / kTickRatioGcd;
 
 constexpr u32 kThreadReturn = 0x0FFFFFE0u;
 
 // LOADCORE starts a module entry at this priority.
 constexpr s32 kModulePriority = 64;
+
+constexpr usize kHostThread = 0;
 
 constexpr usize kMaxThreads = 64;
 constexpr usize kMaxSemaphores = 64;
@@ -152,88 +180,115 @@ void appendFormatted(std::string& out, const std::string& spec, T value) {
 
 }  // namespace
 
-IopKernel::Service IopKernel::lookup(const Import& import) {
-    struct Entry {
-        std::string_view module;
-        u32 id;
-        Service run;
+const IopKernel::Service* IopKernel::lookup(const Import& import) {
+    static constexpr Service kServices[] = {
+        {"stdio", 4, "printf", &IopKernel::printf},
+        {"loadcore", 4, "FlushIcache", &IopKernel::flushCache, true},
+        {"loadcore", 5, "FlushDcache", &IopKernel::flushCache, true},
+        {"loadcore", 6, "RegisterLibraryEntries", &IopKernel::registerLibraryEntries, true},
+        {"dmacman", 33, "sceSetDMAPriority", &IopKernel::setDmaPriority, true},
+        {"dmacman", 28, "sceSetSliceDMA", &IopKernel::setSliceDma, true},
+        {"dmacman", 32, "sceStartDMA", &IopKernel::startDma, true},
+        {"dmacman", 34, "sceEnableDMAChannel", &IopKernel::enableDmaChannel, true},
+        {"loadcore", 27, "SetRebootTimeLibraryHandlingMode",
+         &IopKernel::setRebootTimeLibraryHandlingMode, true},
+        {"secrman", 5, "SecrSetMcDevIDHandler", &IopKernel::setMcDevIdHandler, true},
+        {"secrman", 4, "SecrSetMcCommandHandler", &IopKernel::setMcCommandHandler, true},
+        {"sysmem", 14, "Kprintf", &IopKernel::kprintf},
+        {"thbase", 4, "CreateThread", &IopKernel::createThread},
+        {"thbase", 5, "DeleteThread", &IopKernel::deleteThread},
+        {"thbase", 6, "StartThread", &IopKernel::startThread},
+        {"thbase", 8, "ExitThread", &IopKernel::exitThread},
+        {"thbase", 10, "TerminateThread", &IopKernel::terminateThread},
+        {"thbase", 14, "ChangeThreadPriority", &IopKernel::changeThreadPriority},
+        {"thbase", 20, "GetThreadId", &IopKernel::getThreadId},
+        {"thbase", 22, "ReferThreadStatus", &IopKernel::referThreadStatus},
+        {"thbase", 24, "SleepThread", &IopKernel::sleepThread},
+        {"thbase", 25, "WakeupThread", &IopKernel::wakeupThread},
+        {"thbase", 27, "CancelWakeupThread", &IopKernel::cancelWakeupThread},
+        {"thbase", 33, "DelayThread", &IopKernel::delayThread, true},
+        {"thbase", 34, "GetSystemTime", &IopKernel::getSystemTime},
+        {"thbase", 39, "USec2SysClock", &IopKernel::usecToSysClock},
+        {"thbase", 40, "SysClock2USec", &IopKernel::sysClockToUsec},
+        {"thsemap", 4, "CreateSema", &IopKernel::createSema},
+        {"thsemap", 5, "DeleteSema", &IopKernel::deleteSema},
+        {"thsemap", 6, "SignalSema", &IopKernel::signalSema},
+        {"thsemap", 7, "iSignalSema", &IopKernel::signalSema},
+        {"thsemap", 8, "WaitSema", &IopKernel::waitSema},
+        {"thsemap", 9, "PollSema", &IopKernel::pollSema},
+        {"thsemap", 11, "ReferSemaStatus", &IopKernel::referSemaStatus},
+        {"thevent", 4, "CreateEventFlag", &IopKernel::createEventFlag},
+        {"thevent", 5, "DeleteEventFlag", &IopKernel::deleteEventFlag},
+        {"thevent", 6, "SetEventFlag", &IopKernel::setEventFlag},
+        {"thevent", 8, "ClearEventFlag", &IopKernel::clearEventFlag},
+        {"thevent", 10, "WaitEventFlag", &IopKernel::waitEventFlag},
+        {"thevent", 11, "PollEventFlag", &IopKernel::pollEventFlag},
+        {"thevent", 13, "ReferEventFlagStatus", &IopKernel::referEventFlagStatus},
+        {"intrman", 4, "RegisterIntrHandler", &IopKernel::registerIntrHandler, true},
+        {"intrman", 5, "ReleaseIntrHandler", &IopKernel::releaseIntrHandler, true},
+        {"intrman", 6, "EnableIntr", &IopKernel::enableIntr, true},
+        {"intrman", 7, "DisableIntr", &IopKernel::disableIntr, true},
+        {"intrman", 8, "CpuDisableIntr", &IopKernel::cpuDisableIntr},
+        {"intrman", 9, "CpuEnableIntr", &IopKernel::cpuEnableIntr},
+        {"intrman", 17, "CpuSuspendIntr", &IopKernel::cpuSuspendIntr},
+        {"intrman", 18, "CpuResumeIntr", &IopKernel::cpuResumeIntr},
+        {"intrman", 23, "QueryIntrContext", &IopKernel::queryIntrContext},
+        {"sysmem", 4, "AllocSysMemory", &IopKernel::allocSysMemory},
+        {"sysmem", 5, "FreeSysMemory", &IopKernel::freeSysMemory},
+        {"sysmem", 6, "QueryMemSize", &IopKernel::queryMemSize},
+        {"sysmem", 7, "QueryMaxFreeMemSize", &IopKernel::queryMaxFreeMemSize},
+        {"sysmem", 8, "QueryTotalFreeMemSize", &IopKernel::queryTotalFreeMemSize},
+        {"sysmem", 9, "QueryBlockTopAddress", &IopKernel::queryBlockTopAddress},
+        {"sysmem", 10, "QueryBlockSize", &IopKernel::queryBlockSize},
+        {"sysclib", 8, "look_ctype_table", &IopKernel::lookCtypeTable},
+        {"sysclib", 11, "memcmp", &IopKernel::memcmp},
+        {"sysclib", 12, "memcpy", &IopKernel::memcpy},
+        {"sysclib", 14, "memset", &IopKernel::memset},
+        {"sysclib", 17, "bzero", &IopKernel::bzero},
+        {"sysclib", 19, "sprintf", &IopKernel::sprintf},
+        {"sysclib", 20, "strcat", &IopKernel::strcat},
+        {"sysclib", 23, "strcpy", &IopKernel::strcpy},
+        {"sysclib", 27, "strlen", &IopKernel::strlen},
+        {"sysclib", 29, "strncmp", &IopKernel::strncmp},
+        {"sysclib", 30, "strncpy", &IopKernel::strncpy},
+        {"sysclib", 36, "strtol", &IopKernel::strtol},
+        {"sifman", 5, "sceSifInit", &IopKernel::sifInit, true},
+        {"sifman", 7, "sceSifSetDma", &IopKernel::sifSetDma, true},
+        {"sifman", 29, "sceSifCheckInit", &IopKernel::sifCheckInit, true},
+        {"sifcmd", 14, "sceSifInitRpc", &IopKernel::sifInitRpc, true},
+        {"sifman", 8, "sceSifDmaStat", &IopKernel::sifDmaStat, true},
+        {"sifcmd", 15, "sceSifBindRpc", &IopKernel::sifBindRpc, true},
+        {"sifcmd", 16, "sceSifCallRpc", &IopKernel::sifCallRpc, true},
+        {"sifcmd", 17, "sceSifRegisterRpc", &IopKernel::sifRegisterRpc},
+        {"sifcmd", 19, "sceSifSetRpcQueue", &IopKernel::sifSetRpcQueue},
+        {"sifcmd", 22, "sceSifRpcLoop", &IopKernel::sifRpcLoop, true},
+        {"sifcmd", 24, "sceSifRemoveRpc", &IopKernel::sifRemoveRpc},
+        {"sifcmd", 25, "sceSifRemoveRpcQueue", &IopKernel::sifRemoveRpcQueue, true},
+        {"vblank", 5, "WaitVblankEnd", &IopKernel::waitVblankEnd, true},
+        {"vblank", 8, "RegisterVblankHandler", &IopKernel::registerVblankHandler, true},
+        {"vblank", 9, "ReleaseVblankHandler", &IopKernel::releaseVblankHandler, true},
+        {"libsd", 4, "sceSdInit", &IopKernel::sdInit, true},
+        {"libsd", 5, "sceSdSetParam", &IopKernel::sdSetParam, true},
+        {"libsd", 6, "sceSdGetParam", &IopKernel::sdGetParam, true},
+        {"libsd", 11, "sceSdSetCoreAttr", &IopKernel::sdSetCoreAttr, true},
+        {"libsd", 17, "sceSdVoiceTrans", &IopKernel::sdVoiceTrans, true},
+        {"libsd", 18, "sceSdBlockTrans", &IopKernel::sdBlockTrans, true},
+        {"libsd", 19, "sceSdVoiceTransStatus", &IopKernel::sdTransStatus, true},
+        {"libsd", 20, "sceSdBlockTransStatus", &IopKernel::sdTransStatus, true},
+        {"libsd", 26, "sceSdSetTransIntrHandler", &IopKernel::sdSetTransIntrHandler, true},
+        {"libsd", 28, "sceSdGetTransIntrHandlerArgument", &IopKernel::sdGetTransIntrHandlerArgument, true},
     };
-    static constexpr Entry kServices[] = {
-        {"stdio", 4, &IopKernel::printf},
-        {"loadcore", 5, &IopKernel::flushCache},
-        {"loadcore", 6, &IopKernel::flushCache},
-        {"thbase", 4, &IopKernel::createThread},
-        {"thbase", 5, &IopKernel::deleteThread},
-        {"thbase", 6, &IopKernel::startThread},
-        {"thbase", 8, &IopKernel::exitThread},
-        {"thbase", 10, &IopKernel::terminateThread},
-        {"thbase", 14, &IopKernel::changeThreadPriority},
-        {"thbase", 20, &IopKernel::getThreadId},
-        {"thbase", 22, &IopKernel::referThreadStatus},
-        {"thbase", 24, &IopKernel::sleepThread},
-        {"thbase", 25, &IopKernel::wakeupThread},
-        {"thbase", 27, &IopKernel::cancelWakeupThread},
-        {"thbase", 33, &IopKernel::delayThread},
-        {"thbase", 34, &IopKernel::getSystemTime},
-        {"thbase", 39, &IopKernel::usecToSysClock},
-        {"thbase", 40, &IopKernel::sysClockToUsec},
-        {"thsemap", 4, &IopKernel::createSema},
-        {"thsemap", 5, &IopKernel::deleteSema},
-        {"thsemap", 6, &IopKernel::signalSema},
-        {"thsemap", 7, &IopKernel::signalSema},
-        {"thsemap", 8, &IopKernel::waitSema},
-        {"thsemap", 9, &IopKernel::pollSema},
-        {"thsemap", 11, &IopKernel::referSemaStatus},
-        {"thevent", 4, &IopKernel::createEventFlag},
-        {"thevent", 5, &IopKernel::deleteEventFlag},
-        {"thevent", 6, &IopKernel::setEventFlag},
-        {"thevent", 8, &IopKernel::clearEventFlag},
-        {"thevent", 10, &IopKernel::waitEventFlag},
-        {"thevent", 11, &IopKernel::pollEventFlag},
-        {"thevent", 13, &IopKernel::referEventFlagStatus},
-        {"intrman", 4, &IopKernel::registerIntrHandler},
-        {"intrman", 5, &IopKernel::releaseIntrHandler},
-        {"intrman", 6, &IopKernel::enableIntr},
-        {"intrman", 7, &IopKernel::disableIntr},
-        {"intrman", 8, &IopKernel::cpuDisableIntr},
-        {"intrman", 9, &IopKernel::cpuEnableIntr},
-        {"intrman", 17, &IopKernel::cpuSuspendIntr},
-        {"intrman", 18, &IopKernel::cpuResumeIntr},
-        {"intrman", 23, &IopKernel::queryIntrContext},
-        {"sysmem", 4, &IopKernel::allocSysMemory},
-        {"sysmem", 5, &IopKernel::freeSysMemory},
-        {"sysmem", 6, &IopKernel::queryMemSize},
-        {"sysmem", 7, &IopKernel::queryMaxFreeMemSize},
-        {"sysmem", 8, &IopKernel::queryTotalFreeMemSize},
-        {"sysmem", 9, &IopKernel::queryBlockTopAddress},
-        {"sysmem", 10, &IopKernel::queryBlockSize},
-        {"sysclib", 8, &IopKernel::lookCtypeTable},
-        {"sysclib", 11, &IopKernel::memcmp},
-        {"sysclib", 12, &IopKernel::memcpy},
-        {"sysclib", 14, &IopKernel::memset},
-        {"sysclib", 17, &IopKernel::bzero},
-        {"sysclib", 19, &IopKernel::sprintf},
-        {"sysclib", 20, &IopKernel::strcat},
-        {"sysclib", 23, &IopKernel::strcpy},
-        {"sysclib", 27, &IopKernel::strlen},
-        {"sysclib", 29, &IopKernel::strncmp},
-        {"sysclib", 30, &IopKernel::strncpy},
-        {"sysclib", 36, &IopKernel::strtol},
-    };
-    for (const Entry& entry : kServices) {
-        if (entry.module == import.module && entry.id == import.id) {
-            return entry.run;
+    for (const Service& service : kServices) {
+        if (service.module == import.module && service.id == import.id) {
+            return &service;
         }
     }
     return nullptr;
 }
 
-IopKernel::IopKernel(IopContext& iop, Memory& memory, std::vector<Import> imports, HeapRange heap)
-    : mIop(iop), mMemory(memory), mImports(std::move(imports)) {
-    mServices.reserve(mImports.size());
-    for (const Import& import : mImports) {
-        mServices.push_back(lookup(import));
-    }
+IopKernel::IopKernel(IopContext& iop, Memory& memory, const std::vector<Import>& imports,
+                     HeapRange heap, std::string& console)
+    : mIop(iop), mMemory(memory), mImports(imports), mConsole(console) {
     mThreads.resize(kMaxThreads);
     mSemaphores.resize(kMaxSemaphores);
     mEventFlags.resize(kMaxEventFlags);
@@ -254,14 +309,31 @@ std::string IopKernel::nameOf(u32 index) const {
     if (index >= mImports.size()) {
         return std::format("import {}", index);
     }
-    return std::format("{}.{}", mImports[index].module, mImports[index].id);
+    const Service* service = index < mServices.size() ? mServices[index] : nullptr;
+    if (service == nullptr) {
+        return std::format("{}.{}", mImports[index].module, mImports[index].id);
+    }
+    return std::format("{}.{}", service->module, service->symbol);
 }
 
 bool IopKernel::call(u32 index) {
+    while (mServices.size() < mImports.size()) {
+        mServices.push_back(lookup(mImports[mServices.size()]));
+    }
     if (index >= mServices.size() || mServices[index] == nullptr) {
         return false;
     }
-    (this->*mServices[index])();
+    const Service& service = *mServices[index];
+    if (service.isStub) {
+        log.stub("{}.{}", service.module, service.symbol);
+    }
+    const std::string call =
+        log.tracing()
+            ? std::format("{}.{}({:08x}, {:08x}, {:08x}, {:08x})", service.module, service.symbol,
+                          argument(0), argument(1), argument(2), argument(3))
+            : std::string{};
+    (this->*service.run)();
+    log.trace("{} = {:08x}", call, mIop.cpu.gpr[kResultRegister]);
     return true;
 }
 
@@ -824,6 +896,35 @@ void IopKernel::reschedule() {
     }
 }
 
+bool IopKernel::isCurrent(usize thread) const {
+    return mCurrent == thread && mThreads[thread].status == iopstatus::kRun;
+}
+
+void IopKernel::enterHostThread() {
+    mThreads[kHostThread].status = iopstatus::kRun;
+    switchTo(kHostThread);
+}
+
+void IopKernel::dropThreadsAbove(u32 sequence) {
+    for (IopThread& thread : mThreads) {
+        if (thread.allocated && thread.sequence > sequence) {
+            thread = {};
+        }
+    }
+}
+
+void IopKernel::reportThreads(const Symbols& symbols) const {
+    for (usize i = 0; i < mThreads.size(); ++i) {
+        const IopThread& thread = mThreads[i];
+        if (thread.allocated && thread.status != iopstatus::kDormant) {
+            log.info("thread {} at {} status {} priority {} wait {} id {:08x}", i,
+                     symbols.describe(i == mCurrent ? mIop.cpu.pc : thread.saved.pc),
+                     thread.status, thread.currentPriority, static_cast<u32>(thread.wait),
+                     thread.waitId);
+        }
+    }
+}
+
 bool IopKernel::isIdle() const {
     for (const IopThread& thread : mThreads) {
         if (thread.allocated && (thread.status & (iopstatus::kReady | iopstatus::kRun)) != 0) {
@@ -840,6 +941,56 @@ void IopKernel::exitCurrentThread() {
 
 // Nothing here has a cache.
 void IopKernel::flushCache() {
+    returnValue(0);
+}
+
+// LOADCORE: RegisterLibraryEntries @ 0x898. A module's exports are read off
+// its image as it loads, so registering them again adds nothing.
+void IopKernel::registerLibraryEntries() {
+    returnValue(0);
+}
+
+// DMACMAN: sceSetDMAPriority. Nothing here arbitrates between channels.
+void IopKernel::setDmaPriority() {
+    returnValue(0);
+}
+
+// DMACMAN: sceEnableDMAChannel @ 0x114c
+void IopKernel::enableDmaChannel() {
+    returnValue(0);
+}
+
+// DMACMAN: sceSetSliceDMA @ 0xcc4. No channel moves anything here, so a
+// transfer is over before a caller can look.
+void IopKernel::setSliceDma() {
+    returnValue(0);
+}
+
+// DMACMAN: sceStartDMA @ 0xe84
+void IopKernel::startDma() {
+    returnValue(0);
+}
+
+// LOADCORE: SetRebootTimeLibraryHandlingMode @ 0xb94. Nothing here reboots, so
+// what a library asks to survive one does not matter.
+void IopKernel::setRebootTimeLibraryHandlingMode() {
+    returnValue(0);
+}
+
+// SECRMAN: SecrSetMcDevIDHandler @ 0x84
+void IopKernel::setMcDevIdHandler() {
+    returnValue(0);
+}
+
+// SECRMAN: SecrSetMcCommandHandler. No memory card answers, so the handler
+// would never run.
+void IopKernel::setMcCommandHandler() {
+    returnValue(0);
+}
+
+// SYSMEM: Kprintf @ 0xb90
+void IopKernel::kprintf() {
+    mConsole += format(argument(0), 1);
     returnValue(0);
 }
 
@@ -1059,13 +1210,13 @@ void IopKernel::cancelWakeupThread() {
     returnValue(static_cast<u32>(banked));
 }
 
-// THREADMAN: DelayThread @ 0x5738
+// THREADMAN: DelayThread @ 0x2444
 void IopKernel::delayThread() {
     mMicroseconds += argument(0);
     returnValue(0);
 }
 
-// THREADMAN: GetSystemTime @ 0x5764
+// THREADMAN: GetSystemTime @ 0x5738
 void IopKernel::getSystemTime() {
     const u64 ticks = mMicroseconds * kTicksPerMicrosecondNumerator /
                       kTicksPerMicrosecondDenominator;
@@ -1368,6 +1519,170 @@ void IopKernel::referEventFlagStatus() {
     mMemory.write32(info + 12, flag->bits);
     mMemory.write32(info + 16, waitingOn(IopWait::EventFlag, handle));
     returnValue(0);
+}
+
+// SIFMAN: sceSifInit @ 0x148
+void IopKernel::sifInit() {
+    returnValue(0);
+}
+
+// SIFMAN: sceSifSetDma @ 0x598. Nothing on this side owns a DMA channel, so a
+// transfer is answered rather than queued.
+void IopKernel::sifSetDma() {
+    returnValue(1);
+}
+
+// SIFMAN: sceSifCheckInit @ 0x2d8
+void IopKernel::sifCheckInit() {
+    returnValue(1);
+}
+
+// SIFCMD: sceSifInitRpc @ 0x6c0
+void IopKernel::sifInitRpc() {
+    returnValue(0);
+}
+
+// SIFMAN: sceSifDmaStat @ 0x740. A transfer is finished the moment it is asked
+// for, so nothing is ever still running.
+void IopKernel::sifDmaStat() {
+    returnValue(kFailed);
+}
+
+// SIFCMD: sceSifBindRpc @ 0xd08 waits out the EE's reply. Nothing carries a
+// request that way yet, so waiting beats retrying the bind forever.
+void IopKernel::sifBindRpc() {
+    returnValue(0);
+    blockCurrentThread(IopWait::RpcReply, argument(0));
+}
+
+// SIFCMD: sceSifCallRpc @ 0xed4. Nothing here answers a call the other way.
+void IopKernel::sifCallRpc() {
+    returnValue(kFailed);
+}
+
+// SIFCMD: sceSifSetRpcQueue @ 0x1088
+void IopKernel::sifSetRpcQueue() {
+    mMemory.write32(argument(0) + kQueueThreadId, argument(1));
+    returnValue(argument(0));
+}
+
+// SIFCMD: sceSifRegisterRpc @ 0x1130. The EE reaches the handler through
+// Sif rather than through a request packet, so only what a call needs is kept.
+void IopKernel::sifRegisterRpc() {
+    const u32 data = argument(0);
+    const u32 id = argument(1);
+    const u32 handler = argument(2);
+    const u32 buffer = argument(3);
+    mMemory.write32(data + kServerId, id);
+    mMemory.write32(data + kServerFunc, handler);
+    mMemory.write32(data + kServerBuffer, buffer);
+    mMemory.write32(data + kServerClientFunc, argument(4));
+    mMemory.write32(data + kServerClientBuffer, argument(5));
+    mRpcServers.push_back({id, data, handler, buffer, mIop.cpu.gpr[kGlobalRegister]});
+    returnValue(data);
+}
+
+// SIFCMD: sceSifRpcLoop @ 0x1520. Requests arrive as host calls instead, so the
+// thread that would serve them has nothing left to do.
+void IopKernel::sifRpcLoop() {
+    blockCurrentThread(IopWait::RpcQueue, argument(0));
+}
+
+// SIFCMD: sceSifRemoveRpc @ 0x1210
+void IopKernel::sifRemoveRpc() {
+    const u32 id = mMemory.read32(argument(0) + kServerId);
+    std::erase_if(mRpcServers, [id](const IopRpcServer& server) { return server.id == id; });
+    returnValue(0);
+}
+
+// SIFCMD: sceSifRemoveRpcQueue @ 0x12a8
+void IopKernel::sifRemoveRpcQueue() {
+    returnValue(argument(0));
+}
+
+// VBLANK: WaitVblankEnd @ 0x574
+void IopKernel::waitVblankEnd() {
+    returnValue(0);
+    blockCurrentThread(IopWait::Vblank, 0);
+}
+
+u32 IopKernel::allocateMemory(u32 size) {
+    return allocateBlock(kAllocFirst, size);
+}
+
+bool IopKernel::freeMemory(u32 address) {
+    return freeBlock(address);
+}
+
+// VBLANK: RegisterVblankHandler @ 0x164. Nothing here runs a handler outside a
+// thread, so the one a caller offers would never be reached.
+void IopKernel::registerVblankHandler() {
+    returnValue(0);
+}
+
+// VBLANK: ReleaseVblankHandler @ 0x2ac
+void IopKernel::releaseVblankHandler() {
+    returnValue(0);
+}
+
+void IopKernel::raiseVblank() {
+    for (usize i = 0; i < mThreads.size(); ++i) {
+        const IopThread& thread = mThreads[i];
+        if (thread.allocated && thread.status == iopstatus::kWait &&
+            thread.wait == IopWait::Vblank) {
+            readyThread(i);
+        }
+    }
+}
+
+// LIBSD: sceSdInit @ 0x1428. There is no SPU2, so the calls below take what a
+// caller writes and report that the hardware accepted it.
+void IopKernel::sdInit() {
+    returnValue(0);
+}
+
+// LIBSD: sceSdSetParam @ 0x3160
+void IopKernel::sdSetParam() {
+    returnValue(0);
+}
+
+// LIBSD: sceSdGetParam @ 0x31bc
+void IopKernel::sdGetParam() {
+    returnValue(0);
+}
+
+// LIBSD: sceSdSetCoreAttr @ 0x3768
+void IopKernel::sdSetCoreAttr() {
+    returnValue(argument(1));
+}
+
+// LIBSD: sceSdVoiceTrans @ 0x14f0
+void IopKernel::sdVoiceTrans() {
+    returnValue(argument(3));
+}
+
+// LIBSD: sceSdBlockTrans @ 0x1710
+void IopKernel::sdBlockTrans() {
+    returnValue(argument(3));
+}
+
+// LIBSD: sceSdVoiceTransStatus @ 0x1620 and sceSdBlockTransStatus @ 0x1890.
+// Zero means the transfer is still running, which nothing here would ever end.
+void IopKernel::sdTransStatus() {
+    returnValue(1);
+}
+
+// LIBSD: sceSdSetTransIntrHandler @ 0x38e8
+void IopKernel::sdSetTransIntrHandler() {
+    const u32 previous = mTransIntrHandler;
+    mTransIntrHandler = argument(1);
+    mTransIntrArgument = argument(2);
+    returnValue(previous);
+}
+
+// LIBSD: ordinal 28, which this build does not name.
+void IopKernel::sdGetTransIntrHandlerArgument() {
+    returnValue(mTransIntrArgument);
 }
 
 }  // namespace uee

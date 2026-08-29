@@ -4,6 +4,7 @@
 #include "iop_translate.h"
 #include "irx.h"
 #include "stop.h"
+#include "symbols.h"
 #include "types.h"
 
 namespace uee {
@@ -16,6 +17,6 @@ constexpr u32 kIopThreadReturn = 0x0FFFFFE0;
 
 void enterModule(IopContext& iop, const IrxModule& module);
 
-Stop run(IopMachine& machine, u64 instructionLimit);
+Stop run(IopMachine& machine, u64 instructionLimit, const Symbols& symbols);
 
 }  // namespace uee

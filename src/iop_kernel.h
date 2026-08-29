@@ -5,9 +5,11 @@
 #include "iop_thread.h"
 #include "irx.h"
 #include "memory.h"
+#include "symbols.h"
 #include "types.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace uee {
@@ -17,24 +19,65 @@ struct HeapRange {
     u32 end = 0;
 };
 
+// What sceSifRegisterRpc recorded. The handler runs with the gp its module was
+// linked at, which is why that is kept alongside it.
+struct IopRpcServer {
+    u32 id = 0;
+    u32 data = 0;
+    u32 handler = 0;
+    u32 buffer = 0;
+    u32 gp = 0;
+};
+
 class IopKernel {
 public:
-    IopKernel(IopContext& iop, Memory& memory, std::vector<Import> imports, HeapRange heap);
+    IopKernel(IopContext& iop, Memory& memory, const std::vector<Import>& imports,
+              HeapRange heap, std::string& console);
 
     // False stops the run: nothing here answers for that import.
     bool call(u32 index);
 
+
     usize currentThread() const { return mCurrent; }
+    bool isCurrent(usize thread) const;
     bool isIdle() const;
+    void reportThreads(const Symbols& symbols) const;
     void exitCurrentThread();
+
+    // Gives the processor to the thread the host runs its own calls on, which
+    // is also the one a module entry gets.
+    void enterHostThread();
+
+    // What the EE asks for through the FILEIO heap server, which is the same
+    // pool sysmem hands to the modules loaded here.
+    u32 allocateMemory(u32 size);
+    bool freeMemory(u32 address);
+
+    // Releases what WaitVblankEnd parked, which is the only clock the modules
+    // loaded here run on.
+    void raiseVblank();
+
+    u32 sequence() const { return mSequence; }
+    // Undoes a module that could not be run: the threads it started have no
+    // code left worth running.
+    void dropThreadsAbove(u32 sequence);
     std::string nameOf(u32 index) const;
 
-    const std::string& readOutput() const { return mConsole; }
+    const std::vector<IopRpcServer>& rpcServers() const { return mRpcServers; }
 
 private:
-    using Service = void (IopKernel::*)();
+    using Handler = void (IopKernel::*)();
 
-    static Service lookup(const Import& import);
+    struct Service {
+        std::string_view module;
+        u32 id;
+        std::string_view symbol;
+        Handler run;
+        // Answered without the subsystem behind it.
+        bool isStub = false;
+    };
+
+    static const Service* lookup(const Import& import);
 
     u32 argument(u32 index);
     void returnValue(u32 value);
@@ -94,6 +137,15 @@ private:
     void reschedule();
 
     void flushCache();
+    void registerLibraryEntries();
+    void setDmaPriority();
+    void enableDmaChannel();
+    void setSliceDma();
+    void startDma();
+    void setRebootTimeLibraryHandlingMode();
+    void setMcDevIdHandler();
+    void setMcCommandHandler();
+    void kprintf();
 
     void createThread();
     void deleteThread();
@@ -140,10 +192,37 @@ private:
     void strncpy();
     void strtol();
 
+    void sifInit();
+    void sifSetDma();
+    void sifCheckInit();
+    void sifInitRpc();
+    void sifBindRpc();
+    void sifCallRpc();
+    void sifDmaStat();
+    void sifRegisterRpc();
+    void sifSetRpcQueue();
+    void sifRpcLoop();
+    void sifRemoveRpc();
+    void sifRemoveRpcQueue();
+
+    void waitVblankEnd();
+    void registerVblankHandler();
+    void releaseVblankHandler();
+
+    void sdInit();
+    void sdSetParam();
+    void sdGetParam();
+    void sdSetCoreAttr();
+    void sdVoiceTrans();
+    void sdBlockTrans();
+    void sdTransStatus();
+    void sdSetTransIntrHandler();
+    void sdGetTransIntrHandlerArgument();
+
     IopContext& mIop;
     Memory& mMemory;
-    std::vector<Import> mImports;
-    std::vector<Service> mServices;
+    const std::vector<Import>& mImports;
+    std::vector<const Service*> mServices;
     std::vector<Block> mBlocks;
     std::vector<IopThread> mThreads;
     std::vector<IopSemaphore> mSemaphores;
@@ -153,7 +232,10 @@ private:
     u64 mMicroseconds = 0;
     Interrupt mInterrupts[64];
     bool mInterruptsEnabled = true;
-    std::string mConsole;
+    std::string& mConsole;
+    std::vector<IopRpcServer> mRpcServers;
+    u32 mTransIntrHandler = 0;
+    u32 mTransIntrArgument = 0;
 };
 
 }  // namespace uee

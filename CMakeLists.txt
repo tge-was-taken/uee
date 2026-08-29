@@ -47,7 +47,6 @@ add_library(uee
     src/mmio.cpp
     src/interrupts.cpp
     src/syscall_table.cpp
-    src/syscall_stubs.cpp
     src/sbus.cpp
     src/dmac.cpp
     src/sif.cpp
@@ -58,15 +57,22 @@ add_library(uee
     src/patches.cpp
     src/vif.cpp
     src/gif.cpp
+    src/gs.cpp
     src/vu_micro.cpp
     src/irx.cpp
+    src/iop.cpp
+    src/log.cpp
+    src/symbols.cpp
+    src/hooks.cpp
+    src/idle.cpp
+    src/iop_rpc.cpp
     src/iop_interpreter.cpp
     src/iop_kernel.cpp
     src/iop_translate.cpp
     src/iop_run.cpp
     src/run.cpp)
 target_include_directories(uee PUBLIC src)
-target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus)
+target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus spdlog::spdlog)
 
 enable_testing()
 
@@ -98,6 +104,34 @@ target_link_libraries(test_iop_autotest PRIVATE uee spdlog::spdlog)
 
 add_executable(translate_irx tests/translate_irx.cpp)
 target_link_libraries(translate_irx PRIVATE uee spdlog::spdlog)
+
+add_executable(test_boot tests/test_boot.cpp)
+target_link_libraries(test_boot PRIVATE uee spdlog::spdlog)
+
+# 3dpinball-ps2 md5 da8a5733aa90bd23d15ee3222d1548ca, built from
+# https://github.com/headshot2017/3dpinball-ps2. A whole game exercises paths no
+# autotest reaches, and pb::frame is the update loop, so entering it repeatedly
+# is the only sign the game is running rather than stuck in a splash screen.
+set(PINBALL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/homebrew/3dpinball-ps2)
+# The game reads its tables and sounds from what it thinks is a USB disc. That
+# data is not ours to ship, so the directory standing in for the disc is named
+# here rather than vendored.
+set(PINBALL_FILES ${CMAKE_CURRENT_SOURCE_DIR}/scratch/homebrew/3dpinball-ps2/data
+    CACHE PATH "Directory mapped as the pinball guest's file system")
+add_test(NAME homebrew.3dpinball
+         COMMAND test_boot ${PINBALL_DIR}/3dpinball-ps2.elf
+                 --files ${PINBALL_FILES} --enter _ZN2pb5frameEf 60)
+
+# https://github.com/glampert/ps2-homebrew, rebuilt from source because the
+# binaries it ships are stripped. The demos carry their assets in the executable
+# and share one framework, whose Renderer::beginFrame every one of them calls
+# once a frame.
+set(HOMEBREW_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/homebrew/ps2-homebrew)
+foreach(demo console_demo cubes_demo play_adpcm_demo dungeon_game)
+    add_test(NAME homebrew.${demo}
+             COMMAND test_boot ${HOMEBREW_DIR}/${demo}.elf
+                     --enter _ZN8Renderer10beginFrameEv 60)
+endforeach()
 
 set(AUTOTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps2autotests/tests)
 # Every vendored ELF that comes with recorded output, so a test category cannot
@@ -160,8 +194,12 @@ endforeach()
 # the same driver as the vendored IOP autotests. Their expected output is
 # derived from the resident IOP services recorded in the module IDBs.
 find_program(IOP_GCC mipsel-none-elf-gcc HINTS $ENV{PS2DEV}/iop/bin)
-if(IOP_GCC AND EXISTS "$ENV{PS2SDK}/iop/startup/linkfile")
-    set(PS2SDK $ENV{PS2SDK})
+# Cached on the configure that finds it, so a later one without PS2SDK in the
+# environment keeps the guest tests rather than quietly dropping them.
+if(NOT PS2SDK AND EXISTS "$ENV{PS2SDK}/iop/startup/linkfile")
+    set(PS2SDK "$ENV{PS2SDK}" CACHE PATH "ps2sdk the guest tests build against")
+endif()
+if(IOP_GCC AND EXISTS "${PS2SDK}/iop/startup/linkfile")
     set(IOP_GUEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/iop_guest)
     set(IOP_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/iop_guest)
     # -mno-explicit-relocs keeps each high half next to its own low half, which
@@ -188,7 +226,7 @@ if(IOP_GCC AND EXISTS "$ENV{PS2SDK}/iop/startup/linkfile")
                  COMMAND test_iop_autotest ${irx} ${IOP_GUEST_DIR}/${guest}.expected)
     endforeach()
 else()
-    message(STATUS "IOP toolchain not found; IOP guest tests are skipped")
+    message(STATUS "IOP guest tests skipped: IOP_GCC=${IOP_GCC} PS2SDK=${PS2SDK}")
 endif()
 
 # Guest tests are ps2sdk programs built with the PS2 toolchain and run through
@@ -196,8 +234,7 @@ endif()
 # from the kernel behaviour recorded in the IDBs, not captured from hardware.
 find_program(EE_GCC mips64r5900el-ps2-elf-gcc
              HINTS $ENV{PS2DEV}/ee/bin /usr/local/ps2dev/ee/bin)
-if(EE_GCC AND EXISTS "$ENV{PS2SDK}/ee/startup/linkfile")
-    set(PS2SDK $ENV{PS2SDK})
+if(EE_GCC AND EXISTS "${PS2SDK}/ee/startup/linkfile")
     foreach(guest alarm thread_sema coverage degrade
                   delay priority thread_state sema intc sif_regs syscall_hook machine)
         set(elf ${CMAKE_CURRENT_BINARY_DIR}/guest/${guest}.elf)
@@ -217,5 +254,5 @@ if(EE_GCC AND EXISTS "$ENV{PS2SDK}/ee/startup/linkfile")
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/${guest}.expected)
     endforeach()
 else()
-    message(STATUS "PS2 toolchain not found; guest tests are skipped")
+    message(STATUS "guest tests skipped: EE_GCC=${EE_GCC} PS2SDK=${PS2SDK}")
 endif()

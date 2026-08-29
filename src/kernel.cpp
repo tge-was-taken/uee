@@ -9,20 +9,23 @@
 // Neither image carries a version string; the closest internal marker is
 // "EE DECI2 Manager version 0.06" at 0x800164e0 in KERNEL.elf.
 
+#include "log.h"
 #include "kernel.h"
 
 #include "sif.h"
 #include "memory.h"
-#include "syscall_stubs.h"
 #include "syscall_table.h"
 
 #include <cstdio>
 #include <cstdlib>
+
 #include <format>
 #include <utility>
 
 namespace uee {
 namespace {
+
+LoggerChannel log("kernel");
 
 constexpr u32 kStackPointer = 29;
 constexpr u32 kGlobalPointer = 28;
@@ -38,7 +41,6 @@ constexpr u32 kStatusDmac = 1u << 13;
 constexpr u32 kStatusMasterEnable = 1u << 16;
 
 constexpr u32 kGsImrRegister = 0x12001010;
-constexpr u32 kGsCsrRegister = 0x12001000;
 constexpr s32 kDeci2Call = 124;
 // KERNEL: Deci2CallHandler @ 0x8000ecc8 sends this one to KttyCall.
 constexpr u32 kKernelTty = 0x10;
@@ -96,6 +98,11 @@ Kernel::Kernel(EeContext& ctx, Memory& memory) : mContext(ctx), mMemory(memory) 
     mContext.cpu.cop0[cop0::kStatus] =
         cop0::kInterruptEnable | kStatusIntc | kStatusDmac | kStatusMasterEnable;
 
+    // KERNEL: InitThreads @ 0x80004ec0 ends with CreateRomModuleThread("EENULL"),
+    // which takes the first control block. Ids a guest sees therefore start at 1,
+    // and pthreads-embedded reads a zero thread id as no thread at all.
+    mThreads.at(static_cast<usize>(mThreads.allocate())).status = status::kDormant;
+
     const s32 main = mThreads.allocate();
     mThreads.at(static_cast<usize>(main)).currentPriority = 0;
     mThreads.at(static_cast<usize>(main)).initialPriority = 0;
@@ -138,23 +145,19 @@ SyscallResult Kernel::handleSyscall() {
         return SyscallResult::Handled;
     }
 
-    if (std::getenv("UEE_TRACE") != nullptr) {
-        std::fprintf(stderr, "sys %3d a0=%08x a1=%08x cur=%zu st=%d wt=%d wc=%d\n", number,
-                     readArgument(0), readArgument(1), mThreads.current(),
-                     mThreads.at(mThreads.current()).status,
-                     mThreads.at(mThreads.current()).waitType,
-                     mThreads.at(mThreads.current()).wakeupCount);
-    }
+    log.trace("syscall {} a0={:08x} a1={:08x} thread {} status {} wait {} wakeups {} ra={:08x}",
+              number, readArgument(0), readArgument(1), mThreads.current(),
+              mThreads.at(mThreads.current()).status, mThreads.at(mThreads.current()).waitType,
+              mThreads.at(mThreads.current()).wakeupCount,
+              static_cast<u32>(mContext.cpu.gpr[kReturnAddress].lo));
 
     const u32 handler = readSyscallHandler(mMemory, number);
     if (!isKernelHandler(handler)) {
         if (handler == 0) {
             return SyscallResult::Unknown;
         }
-        // A handler the guest installed with SetSyscall. The real dispatcher
-        // reaches it with jalr and it returns with jr $ra, so call it rather
-        // than entering it as an exception, and spill the caller's $ra the way
-        // SyscallHandler does.
+        // A SetSyscall handler returns with jr $ra, so call it rather than
+        // entering it as an exception, spilling $ra the way SyscallHandler does.
         mSyscallReturn = SyscallReturn{static_cast<u32>(mContext.cpu.gpr[kReturnAddress].lo),
                                        mContext.cpu.pc};
         mContext.cpu.write64(kReturnAddress, kSyscallHandlerReturn);
@@ -555,22 +558,20 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
         // The CRT mode is remembered so a later read is consistent, but nothing
         // programs a display.
         case Syscall::SetGsCrt:
-            reportStub("SetGsCrt");
+            log.stub("SetGsCrt");
             mGsCrtMode = arg(0);
             mGsCrtInterlace = arg(1);
             mGsCrtField = arg(2);
             returnValue(0);
             return SyscallResult::Handled;
 
-        // Loading a program needs a filesystem. Reporting failure lets a guest
-        // take its error path instead of the run ending here.
         case Syscall::LoadExecPS2:
-            reportStub("LoadExecPS2");
+            log.stub("LoadExecPS2");
             returnValue(0xFFFFFFFFu);
             return SyscallResult::Handled;
 
         case Syscall::ExecOSD:
-            reportStub("ExecOSD");
+            log.stub("ExecOSD");
             returnValue(0xFFFFFFFFu);
             return SyscallResult::Handled;
 
@@ -1238,7 +1239,10 @@ s32 Kernel::enableDmac(u32 channel, bool enable) {
 }
 
 // KERNEL: DispatchIntcHandlers @ 0x80001630
+// KERNEL: InterruptHandler @ 0x80000554 clears the flag before it runs the
+// chain, so only what the chain itself raises reaches the check on the way out.
 void Kernel::queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32 cause) {
+    mThreads.clearReschedule();
     for (const IntrHandler* handler : chain) {
         if (handler->state == handler_state::kUser && handler->func != 0) {
             mPendingCalls.push_back(GuestCall{handler->func, cause, handler->argument, 0, true});
@@ -1289,13 +1293,14 @@ s32 Kernel::releaseAlarm(s32 id) {
     return mAlarms.release(id, mMmio.timers().hsyncCount());
 }
 
-void Kernel::advanceClock(u64 retiredInstructions) {
-    if (!mMmio.timers().advanceTo(retiredInstructions)) {
+void Kernel::advanceClock(u64 executed) {
+    if (!mMmio.timers().advanceTo(executed)) {
         return;
     }
     // A reply lands on a later tick, so a guest that starts a transfer and then
     // waits on its semaphore blocks first, as it would against real hardware.
-    if (mSif.advance(mMmio.timers().hsyncCount())) {
+    mMmio.gs().advanceScanline();
+    if (mSif.advance()) {
         mMmio.interrupts().raiseDmac(dmac::kSif0);
     }
     publishTimers();
@@ -1326,7 +1331,13 @@ void Kernel::raiseFieldInterrupts() {
         return;
     }
     mInVblank = blanking;
+    if (blanking) {
+        mMmio.gs().startVblank();
+    }
     mMmio.interrupts().raiseIntc(blanking ? intc::kVblankStart : intc::kVblankEnd);
+    if (!blanking) {
+        mIop.tickVblank();
+    }
 
     // DispatchIntcHandlers satisfies a pending SetVSyncFlag at the start of the
     // blank, before it runs any handler, and clears both addresses.
@@ -1334,7 +1345,7 @@ void Kernel::raiseFieldInterrupts() {
         mMemory.write32(mVSyncFlagAddress, 1);
         mVSyncFlagAddress = 0;
         if (mVSyncTickAddress != 0) {
-            mMemory.write64(mVSyncTickAddress, mMemory.read64(kGsCsrRegister));
+            mMemory.write64(mVSyncTickAddress, mMmio.gs().csr());
             mVSyncTickAddress = 0;
         }
     }
@@ -1370,20 +1381,20 @@ void Kernel::blockCurrentAndDispatch(WaitType type) {
     dispatchNext();
 }
 
-// KERNEL: the k_RescheduleFlag check the interrupt return path makes. An i
-// variant called from a handler readies a thread without rescheduling, so an
-// idle processor has to look again once the handler has returned.
-// KERNEL: the kprintf in DispatchNextThread @ 0x80003940, reached when nothing
-// is runnable. The ROM says it once and exits; this runtime says it when it
-// stops waiting for an interrupt that would have made something runnable.
+// KERNEL: the kprintf in DispatchNextThread @ 0x80003940. The ROM says it once
+// and exits; this runtime says it when it gives up waiting for an interrupt.
 void Kernel::reportNoActiveThreads() {
     mOutput += "# <Thread> No active threads\n";
 }
 
+// KERNEL: InterruptHandler @ 0x800005a0 dispatches whenever the chain it ran
+// raised the flag, so a woken sharper thread preempts rather than waiting.
 void Kernel::dispatchAfterInterrupt() {
     if (mIdle) {
         dispatchNext();
+        return;
     }
+    rescheduleIfWanted(false);
 }
 
 // KERNEL: DispatchNextThread @ 0x80003940
@@ -1406,12 +1417,12 @@ SyscallResult Kernel::rescheduleIfWanted(bool interruptContext) {
     if (!mThreads.rescheduleWanted()) {
         return SyscallResult::Handled;
     }
-    mThreads.clearReschedule();
-    // An interrupt-context call has no saved context to switch away from, and
-    // dispatch may be held off entirely.
+    // KERNEL: the i variants at iTerminateThread @ 0x80003e5c and
+    // iChangeThreadPriority @ 0x80004338 only raise the flag.
     if (interruptContext || mThreads.dispatchDisabled()) {
         return SyscallResult::Handled;
     }
+    mThreads.clearReschedule();
     ThreadControlBlock& self = mThreads.at(mThreads.current());
     if (self.status == status::kRun) {
         self.status = status::kReady;
@@ -1483,7 +1494,7 @@ std::optional<GuestCall> Kernel::takePendingCall() {
 // rest of the manager talks to a host debugger over a link that is not here.
 s32 Kernel::deci2Call(u32 function, u32 arguments) {
     if (function != kKernelTty) {
-        reportStub(std::format("Deci2Call {}", function));
+        log.stub("Deci2Call {}", function);
         return -1;
     }
     const u32 text = mMemory.read32(arguments);
@@ -1539,8 +1550,23 @@ u32 Kernel::writeSifRegister(u32 id, u32 value) {
 
 // KERNEL: SifSetDma @ 0x80006798
 u32 Kernel::sendSifDma(u32 transfers, u32 count) {
-    mSif.receive(transfers, count, mMmio.timers().hsyncCount());
+    mSif.receive(transfers, count);
     return ++mDmaTransferId;
+}
+
+void Kernel::reportThreads() const {
+    for (usize i = 0; i < kThreadCount; ++i) {
+        const ThreadControlBlock& thread = mThreads.at(i);
+        if (thread.status == 0 || thread.status == status::kDormant) {
+            continue;
+        }
+        log.info("thread {} status {} priority {} wait {} id {} pc {} ra {} entry {}", i,
+                 thread.status, thread.currentPriority, thread.waitType, thread.waitId,
+                 mSymbols.describe(i == mThreads.current() ? mContext.cpu.pc : thread.resumePc),
+                 mSymbols.describe(static_cast<u32>(mThreads.at(i).saved.gpr[kReturnAddress].lo)),
+                 mSymbols.describe(thread.entry));
+    }
+    mIop.reportThreads();
 }
 
 }  // namespace uee

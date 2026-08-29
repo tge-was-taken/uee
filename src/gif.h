@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gs.h"
 #include "types.h"
 
 #include <optional>
@@ -10,7 +11,10 @@ class Memory;
 
 class Gif {
 public:
-    void attach(Memory& memory) { mMemory = &memory; }
+    void attach(Memory& memory, Gs& gs) {
+        mMemory = &memory;
+        mGs = &gs;
+    }
 
     void writeQuadword(u64 low, u64 high);
 
@@ -25,6 +29,7 @@ private:
     void writeRegister(u32 address, u64 value);
 
     Memory* mMemory = nullptr;
+    Gs* mGs = nullptr;
     u32 mControl = 0;
     u32 mMode = 0;
     u32 mStatus = 0;
@@ -32,7 +37,7 @@ private:
     u32 mDescriptors = 0;
     u64 mRegisters = 0;
     u32 mSlot = 0;
-    bool mPacked = false;
+    u32 mFormat = 0;
 };
 
 }  // namespace uee

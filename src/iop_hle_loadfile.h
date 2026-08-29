@@ -1,14 +1,19 @@
 #pragma once
 
-#include "iop_hle_server.h"
+#include "iop.h"
 #include "memory.h"
+#include "sif_server.h"
 #include "types.h"
 
 namespace uee {
 
-class IopHleLoadfile final : public IopHleServer {
+class Disc;
+
+class IopHleLoadfile final : public SifServer {
 public:
-    explicit IopHleLoadfile(Memory& memory);
+    IopHleLoadfile(Memory& memory, Iop& iop);
+
+    void attachDisc(Disc& disc) { mDisc = &disc; }
 
     std::string_view name() const override { return "LOADFILE"; }
     std::span<const u32> serverIds() const override;
@@ -16,8 +21,12 @@ public:
 
 private:
     s32 loadModule(const RpcCall& call);
+    s32 loadModuleBuffer(const RpcCall& call);
+    std::string readPath(u32 address);
 
     Memory& mMemory;
+    Iop& mIop;
+    Disc* mDisc = nullptr;
     u32 mModules = 0;
 };
 
