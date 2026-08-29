@@ -88,7 +88,8 @@ constexpr u32 kSoftwareRegisters = 0x20;
 
 }  // namespace
 
-Kernel::Kernel(EeContext& ctx, Memory& memory) : mContext(ctx), mMemory(memory) {
+Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config)
+    : mContext(ctx), mMemory(memory), mIop(mOutput, {}, config.hostModules) {
     mMemory.attach(&mMmio);
     mMmio.attach(mMemory, mContext.cpu);
     installSyscallTable(mMemory);
@@ -1293,8 +1294,8 @@ s32 Kernel::releaseAlarm(s32 id) {
     return mAlarms.release(id, mMmio.timers().hsyncCount());
 }
 
-void Kernel::advanceClock(u64 executed) {
-    if (!mMmio.timers().advanceTo(executed)) {
+void Kernel::advanceClock() {
+    if (!mMmio.timers().advanceTo(mExecuted)) {
         return;
     }
     // A reply lands on a later tick, so a guest that starts a transfer and then
@@ -1387,8 +1388,9 @@ void Kernel::reportNoActiveThreads() {
     mOutput += "# <Thread> No active threads\n";
 }
 
-// KERNEL: InterruptHandler @ 0x800005a0 dispatches whenever the chain it ran
-// raised the flag, so a woken sharper thread preempts rather than waiting.
+// KERNEL: InterruptHandler @ 0x800005a0 dispatches on the way out whenever the
+// chain it ran raised the flag, so a handler that readies a thread sharper than
+// the running one preempts it rather than waiting for a syscall.
 void Kernel::dispatchAfterInterrupt() {
     if (mIdle) {
         dispatchNext();
@@ -1418,7 +1420,8 @@ SyscallResult Kernel::rescheduleIfWanted(bool interruptContext) {
         return SyscallResult::Handled;
     }
     // KERNEL: the i variants at iTerminateThread @ 0x80003e5c and
-    // iChangeThreadPriority @ 0x80004338 only raise the flag.
+    // iChangeThreadPriority @ 0x80004338 only raise the flag. Clearing it here
+    // would take the dispatch away from whoever does look at it.
     if (interruptContext || mThreads.dispatchDisabled()) {
         return SyscallResult::Handled;
     }

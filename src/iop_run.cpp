@@ -80,14 +80,15 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLim
     R3000A& cpu = machine.iop().cpu;
 
     while (executed < instructionLimit) {
-        if (cpu.pc == haltPc) {
+        // A nested run halts on its own address; this one is not code either.
+        if (cpu.pc == haltPc || cpu.pc == kIopModuleReturn) {
             return Stop{StopReason::Returned, cpu.pc, {}};
         }
         if (cpu.pc == kIopThreadReturn) {
             machine.kernel.exitCurrentThread();
         }
 
-        if (machine.functions != nullptr && machine.functions(machine, cpu.pc)) {
+        if (runTranslated(machine, cpu.pc)) {
             if (auto address = machine.memory.fault()) {
                 return Stop{StopReason::UnmappedAccess, cpu.pc,
                             std::format("touched {:08x}", *address)};
@@ -100,16 +101,11 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLim
         if (idle != nullptr && (executed & kIdleInterval) == 0) {
             idle->sample(cpu.pc);
         }
-        const usize self = machine.kernel.currentThread();
         const Step step = stepOnce(machine, pc);
         if (step.stop) {
             return *step.stop;
         }
         ++executed;
-        // The call gave the processor away; wait until it comes back.
-        while (!machine.kernel.isCurrent(self)) {
-            mco_yield(mco_running());
-        }
 
         if (step.hasDelaySlot) {
             const Step delayed = runDelaySlot(machine, pc + 4);
@@ -195,20 +191,26 @@ void enterModule(IopContext& iop, const IrxModule& module) {
     iop.cpu.gpr[reg::gp] = module.gp;
     iop.cpu.gpr[reg::sp] = kIopStackTop;
     iop.cpu.gpr[reg::ra] = kIopModuleReturn;
-    // A negative argc unloads rather than starts: CRI_ADXI.IRX md5
-    // df850012de771767b5cd88b6263a25c1 branches on it in module_start @ 0x57c.
+    // A module entry takes (argc, argv), and a negative argc unloads rather than
+    // starts it: CRI_ADXI.IRX md5 df850012de771767b5cd88b6263a25c1 branches on
+    // exactly that in module_start @ 0x57c.
     iop.cpu.gpr[reg::a0] = 0;
     iop.cpu.gpr[reg::a1] = 0;
 }
 
 // The caller commits the load delay, so $ra is still the value from before a
-// load in the call's own delay slot.
+// load in the call's own delay slot. Every thread operation reaches here, and
+// emitted code calls it without passing through the run loop.
 bool hostCall(IopMachine& machine, u32 index, u32 pc) {
     R3000A& cpu = machine.iop().cpu;
+    const usize self = machine.kernel.currentThread();
     cpu.pc = cpu.gpr[reg::ra];
     if (!machine.kernel.call(index)) {
         cpu.pc = pc;
         return false;
+    }
+    while (!machine.kernel.isCurrent(self)) {
+        mco_yield(mco_running());
     }
     return true;
 }
@@ -217,20 +219,30 @@ void stepDelaySlot(IopMachine& machine, u32 pc) {
     runDelaySlot(machine, pc);
 }
 
+// One span each, so the module is found before it searches.
+bool runTranslated(IopMachine& machine, u32 pc) {
+    for (const TranslatedIrx* module : machine.modules) {
+        if (pc - module->base < module->end - module->base) {
+            return module->run(machine, pc);
+        }
+    }
+    return false;
+}
+
 void step(IopMachine& machine, u32 pc) {
     machine.iop().cpu.pc = pc;
     // Dispatching here would run a whole call tree where one instruction was asked for.
-    IopMachine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
+    IopMachine interpretOnly{machine.interpreter, machine.memory, machine.kernel, {}};
     u64 executed = 0;
     runUntil(interpretOnly, pc + 4, executed, kCallLimit);
 }
 
 bool call(IopMachine& machine, u32 target, u32 returnTo) {
     machine.iop().cpu.pc = target;
-    if (machine.functions == nullptr || !machine.functions(machine, target)) {
+    if (!runTranslated(machine, target)) {
         // Dispatching inside the subtree would put host frames at a depth the
         // guest stack does not have.
-        IopMachine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
+        IopMachine interpretOnly{machine.interpreter, machine.memory, machine.kernel, {}};
         u64 executed = 0;
         runUntil(interpretOnly, returnTo, executed, kCallLimit);
     }

@@ -4,6 +4,7 @@
 
 #include "instruction.h"
 #include "timers.h"
+#include "handlers.h"
 #include "translate.h"
 #include "idle.h"
 
@@ -89,9 +90,11 @@ enum class Idling { Allowed, Blocked };
 // Only the outermost run watches: a callback is bounded by returning.
 constexpr u64 kIdleInterval = 0xFFFF;
 
-Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit, Idling idling,
+// The deadline is an executed-instruction count, not a budget: a nested run
+// shares the one counter the clock reads, so it cannot have one of its own.
+Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling,
               Idle* idle = nullptr);
-std::optional<Stop> runIdle(Machine& machine, u64& executed, u64 instructionLimit);
+std::optional<Stop> runIdle(Machine& machine, u64 deadline);
 
 // A thread that gives up the processor part way through a call tree has to
 // resume there, which needs its host stack kept intact.
@@ -110,7 +113,7 @@ public:
 
     Stop run() {
         for (;;) {
-            if (mExecuted >= mInstructionLimit) {
+            if (mMachine.kernel.executed() >= mInstructionLimit) {
                 return Stop{StopReason::ReachedLimit, mMachine.ee().cpu.pc, {}};
             }
             mco_coro* coroutine = coroutineFor(mMachine.kernel.currentThread());
@@ -132,8 +135,7 @@ private:
     }
 
     void runThread() {
-        mStop = runUntil(mMachine, kNoHalt, mExecuted, mInstructionLimit, Idling::Allowed,
-                         &mIdle);
+        mStop = runUntil(mMachine, kNoHalt, mInstructionLimit, Idling::Allowed, &mIdle);
         mStopped = true;
     }
 
@@ -153,7 +155,6 @@ private:
     u64 mInstructionLimit;
     Idle mIdle{"ee", mMachine.kernel.symbols()};
     std::vector<mco_coro*> mCoroutines;
-    u64 mExecuted = 0;
     Stop mStop;
     bool mStopped = false;
 };
@@ -179,14 +180,13 @@ Step runDelaySlot(Machine& machine, u32 pc) {
     }
 }
 
-Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit, Idling idling,
-              Idle* idle) {
+Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* idle) {
     Interpreter& interpreter = machine.interpreter;
     Memory& memory = machine.memory;
     Kernel& kernel = machine.kernel;
     R5900& cpu = interpreter.ee.cpu;
 
-    while (executed < instructionLimit) {
+    while (kernel.executed() < deadline) {
         if (cpu.pc == kSyscallHandlerReturn && kernel.resumeFromSyscallHandler()) {
             continue;
         }
@@ -200,18 +200,19 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
                 return Stop{StopReason::UnmappedAccess, cpu.pc,
                             std::format("touched {:08x}", *address)};
             }
-            ++executed;
             continue;
         }
 
-        kernel.advanceClock(executed);
+        if (kernel.countExecuted(1)) {
+            kernel.advanceClock();
+        }
         kernel.deliverInterrupts();
-        if (idle != nullptr && (executed & kIdleInterval) == 0) {
+        if (idle != nullptr && (kernel.executed() & kIdleInterval) == 0) {
             idle->sample(cpu.pc);
         }
 
         if (kernel.isIdle() && idling == Idling::Allowed) {
-            if (const std::optional<Stop> stop = runIdle(machine, executed, instructionLimit)) {
+            if (const std::optional<Stop> stop = runIdle(machine, deadline)) {
                 return *stop;
             }
             continue;
@@ -228,7 +229,6 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
         if (step.stop) {
             return *step.stop;
         }
-        ++executed;
         while (kernel.currentThread() != self) {
             mco_yield(mco_running());
         }
@@ -238,38 +238,35 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
             if (delayed.stop) {
                 return *delayed.stop;
             }
-            ++executed;
+            kernel.countExecuted(1);
         }
 
         // A nested run must not start a queued call of its own: chaining them
         // that way would finish a handler chain in the reverse of its order.
-        if (idling == Idling::Allowed) {
-            if (auto call = kernel.takePendingCall()) {
-                log.trace("callback {:08x}", call->function);
-                const EeContext caller = interpreter.ee;
-                cpu.pc = call->function;
-                cpu.write64(kArgumentRegister, call->argument);
-                cpu.write64(kArgumentRegister + 1, call->secondArgument);
-                cpu.write64(kArgumentRegister + 2, call->thirdArgument);
-                cpu.write64(kReturnAddressRegister, kCallbackReturn);
+        if (idling == Idling::Allowed) if (auto call = kernel.takePendingCall()) {
+            log.trace("callback {:08x}", call->function);
+            const EeContext caller = interpreter.ee;
+            cpu.pc = call->function;
+            cpu.write64(kArgumentRegister, call->argument);
+            cpu.write64(kArgumentRegister + 1, call->secondArgument);
+            cpu.write64(kArgumentRegister + 2, call->thirdArgument);
+            cpu.write64(kReturnAddressRegister, kCallbackReturn);
 
-                const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit,
-                                        Idling::Blocked);
-                kernel.completePendingCall(static_cast<u32>(cpu.gpr[kResultRegister].lo));
-                if (stop.reason != StopReason::Returned) {
-                    return stop;
-                }
-                interpreter.ee = caller;
-
-                // The handler can have readied the thread that gave up the
-                // processor to run it, and nothing else will pick that thread up.
-                kernel.dispatchAfterInterrupt();
-
-                // ..and that can hand the processor to a thread with a host stack of its
-                // own, and this one must not carry on running instructions for it.
-                while (kernel.currentThread() != self) {
-                    mco_yield(mco_running());
-                }
+            kernel.enterHandler();
+            const Stop stop = runUntil(machine, kCallbackReturn, deadline, Idling::Blocked);
+            kernel.leaveHandler();
+            kernel.completePendingCall(static_cast<u32>(cpu.gpr[kResultRegister].lo));
+            if (stop.reason != StopReason::Returned) {
+                return stop;
+            }
+            interpreter.ee = caller;
+            // The handler can have readied the thread that gave up the
+            // processor to run it, and nothing else will pick that thread up.
+            kernel.dispatchAfterInterrupt();
+            // That can hand the processor to a thread with a host stack of its
+            // own, and this one must not carry on running instructions for it.
+            while (kernel.currentThread() != self) {
+                mco_yield(mco_running());
             }
         }
     }
@@ -279,13 +276,13 @@ Stop runUntil(Machine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
 
 // A stop here is the callback's own, not a deadlock; returning nothing means
 // the processor has work again.
-std::optional<Stop> runIdle(Machine& machine, u64& executed, u64 instructionLimit) {
+std::optional<Stop> runIdle(Machine& machine, u64 deadline) {
     Kernel& kernel = machine.kernel;
     R5900& cpu = machine.ee().cpu;
 
-    while (kernel.isIdle() && executed < instructionLimit) {
-        executed += kIdleStep;
-        kernel.advanceClock(executed);
+    while (kernel.isIdle() && kernel.executed() < deadline) {
+        kernel.countExecuted(kIdleStep);
+        kernel.advanceClock();
         kernel.deliverInterrupts();
 
         if (const std::optional<GuestCall> call = kernel.takePendingCall()) {
@@ -295,8 +292,9 @@ std::optional<Stop> runIdle(Machine& machine, u64& executed, u64 instructionLimi
             cpu.write64(kArgumentRegister + 1, call->secondArgument);
             cpu.write64(kArgumentRegister + 2, call->thirdArgument);
             cpu.write64(kReturnAddressRegister, kCallbackReturn);
-            const Stop stop = runUntil(machine, kCallbackReturn, executed, instructionLimit,
-                                       Idling::Blocked);
+            kernel.enterHandler();
+            const Stop stop = runUntil(machine, kCallbackReturn, deadline, Idling::Blocked);
+            kernel.leaveHandler();
             kernel.completePendingCall(static_cast<u32>(cpu.gpr[kResultRegister].lo));
             machine.ee() = caller;
             if (stop.reason != StopReason::Returned) {
@@ -336,8 +334,51 @@ std::string describe(const Stop& stop) {
     return std::format("{} at {:08x}: {}", nameOf(stop.reason), stop.pc, stop.detail);
 }
 
-// False leaves the pc on the syscall, so the driver re-runs it and reports the
-// stop rather than emitted code running past an exit.
+// Emitted code holds the host thread, so the clock only moves from in here.
+void countExecuted(Machine& machine, u32 instructions) {
+    Kernel& kernel = machine.kernel;
+    countPerformanceEvents(machine.ee().cpu, instructions);
+    if (!kernel.countExecuted(instructions) || kernel.inHandler()) {
+        return;
+    }
+
+    const usize self = kernel.currentThread();
+    kernel.advanceClock();
+    kernel.deliverInterrupts();
+
+    while (const std::optional<GuestCall> call = kernel.takePendingCall()) {
+        const EeContext caller = machine.ee();
+        R5900& cpu = machine.ee().cpu;
+        cpu.pc = call->function;
+        cpu.write64(kArgumentRegister, call->argument);
+        cpu.write64(kArgumentRegister + 1, call->secondArgument);
+        cpu.write64(kArgumentRegister + 2, call->thirdArgument);
+        cpu.write64(kReturnAddressRegister, kCallbackReturn);
+
+        log.trace("callback {:08x}", call->function);
+        kernel.enterHandler();
+        const Stop stop = runUntil(machine, kCallbackReturn,
+                                   kernel.executed() + kCallLimit, Idling::Blocked);
+        kernel.leaveHandler();
+
+        kernel.completePendingCall(static_cast<u32>(cpu.gpr[kResultRegister].lo));
+        if (stop.reason != StopReason::Returned) {
+            break;
+        }
+        machine.ee() = caller;
+        kernel.dispatchAfterInterrupt();
+    }
+
+    // A handler can have readied a thread with a host stack of its own, and this
+    // one must not carry on running instructions for it.
+    while (kernel.currentThread() != self) {
+        mco_yield(mco_running());
+    }
+}
+
+// False once the guest is not to carry on: the pc is left on the syscall so the
+// driver re-runs it and reports the stop, rather than emitted code running past
+// an exit into whatever follows it.
 bool syscall(Machine& machine, s32 number, u32 resumePc) {
     Kernel& kernel = machine.kernel;
     const usize self = kernel.currentThread();
@@ -348,9 +389,13 @@ bool syscall(Machine& machine, s32 number, u32 resumePc) {
         return false;
     }
 
-    u64 executed = 0;
-    while (kernel.isIdle()) {
-        if (runIdle(machine, executed, kCallLimit)) {
+    // A handler runs on the context of the thread it interrupted, so every
+    // thread looks blocked for as long as it is on the stack. Idling there would
+    // report a processor with nothing to run and unwind the handler.
+    const Idling idling = kernel.inHandler() ? Idling::Blocked : Idling::Allowed;
+    const u64 deadline = kernel.executed() + kCallLimit;
+    while (kernel.isIdle() && idling == Idling::Allowed) {
+        if (runIdle(machine, deadline)) {
             return false;
         }
     }
@@ -358,7 +403,7 @@ bool syscall(Machine& machine, s32 number, u32 resumePc) {
         mco_yield(mco_running());
     }
     if (machine.ee().cpu.pc != resumePc) {
-        runUntil(machine, resumePc, executed, kCallLimit, Idling::Allowed);
+        runUntil(machine, resumePc, deadline, idling);
     }
     return true;
 }
@@ -372,10 +417,8 @@ void step(Machine& machine, u32 pc) {
     // Without this the pc could land on a function entry and re-enter translated
     // code, running a whole call tree, while only one instruction was asked for.
     Machine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
-    u64 executed = 0;
-    // A syscall can queue a guest callback that has to run before the caller
-    // carries on, and that callback needs a budget of its own.
-    runUntil(interpretOnly, pc + 4, executed, kCallLimit, Idling::Allowed);
+    runUntil(interpretOnly, pc + 4, machine.kernel.executed() + kCallLimit,
+             machine.kernel.inHandler() ? Idling::Blocked : Idling::Allowed);
 }
 
 bool call(Machine& machine, u32 target, u32 returnTo) {
@@ -384,8 +427,8 @@ bool call(Machine& machine, u32 target, u32 returnTo) {
         // Dispatching inside the subtree would put host frames at a depth
         // the guest stack does not have.
         Machine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
-        u64 executed = 0;
-        runUntil(interpretOnly, returnTo, executed, kCallLimit, Idling::Allowed);
+        runUntil(interpretOnly, returnTo, machine.kernel.executed() + kCallLimit,
+                 machine.kernel.inHandler() ? Idling::Blocked : Idling::Allowed);
     }
     return machine.ee().cpu.pc == returnTo;
 }

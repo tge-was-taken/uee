@@ -5,6 +5,7 @@
 #include "sif.h"
 #include "memory.h"
 #include "hooks.h"
+#include "patches.h"
 #include "semaphores.h"
 #include "symbols.h"
 #include "thread.h"
@@ -42,13 +43,18 @@ struct GuestCall {
 
 class Kernel {
 public:
-    Kernel(EeContext& ctx, Memory& memory);
+    Kernel(EeContext& ctx, Memory& memory, const GameConfig& config = {});
 
     SyscallResult handleSyscall();
 
     // Runs one syscall by number, without the guest having executed a syscall
     // instruction. Emitted code uses this when the number is known statically.
     SyscallResult callSyscall(s32 number);
+
+    // A chain finishes in order, so a nested run must not start another.
+    bool inHandler() const { return mHandlerDepth != 0; }
+    void enterHandler() { ++mHandlerDepth; }
+    void leaveHandler() { --mHandlerDepth; }
 
     // The guest callback an RPC reply or an expired alarm owes its caller, which
     // the run loop has to execute before the guest resumes.
@@ -67,7 +73,19 @@ public:
     void attachFiles(std::filesystem::path root) { mSif.attachFiles(std::move(root)); }
 
     // Advances the timers and queues any alarm that has expired.
-    void advanceClock(u64 executed);
+    void advanceClock();
+
+    // True when the clock is worth advancing. Emitted code reports its own.
+    bool countExecuted(u64 instructions) {
+        mExecuted += instructions;
+        if (mExecuted < mNextService) {
+            return false;
+        }
+        mNextService = mExecuted + kServiceInterval;
+        return true;
+    }
+
+    u64 executed() const { return mExecuted; }
 
     // Restores the register the guest handler was called through and resumes
     // the instruction after the syscall.
@@ -77,6 +95,8 @@ public:
     Symbols& symbols() { return mSymbols; }
     Hooks& hooks() { return mHooks; }
     Symbols& iopSymbols() { return mIop.symbols(); }
+    // The port preloads the modules it knows the game replaces.
+    Iop& iop() { return mIop; }
 
     // Everything a stop that was not clean needs explaining.
     void reportThreads() const;
@@ -160,7 +180,7 @@ private:
     std::string mOutput;
     Symbols mSymbols;
     Hooks mHooks;
-    Iop mIop{mOutput};
+    Iop mIop;
     Sif mSif{mMemory, mMmio.sbus(), mOutput, mIop};
 
     u32 mHandlerCount = 0;
@@ -187,6 +207,12 @@ private:
     };
     std::array<TlbEntry, 48> mTlb;
     bool mInVblank = false;
+    // Short enough that a guest polling a timer sees it move.
+    static constexpr u64 kServiceInterval = 1024;
+
+    u32 mHandlerDepth = 0;
+    u64 mExecuted = 0;
+    u64 mNextService = kServiceInterval;
     bool mIdle = false;
 
     struct SyscallReturn {
