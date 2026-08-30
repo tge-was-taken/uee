@@ -44,16 +44,17 @@ void IopMmio::attach(Memory& memory, IopKernel& kernel) {
     memory.attach(this);
 }
 
-IopMmio::SpuChannel* IopMmio::channelFor(u32 address) {
-    for (SpuChannel& channel : mChannels) {
-        if (address - channel.base < kChannelSpan) {
-            return &channel;
+IopMmio::DmaChannel* IopMmio::channelFor(u32 address) {
+    for (DmaChannel* channel :
+         {&mSpuChannels[0], &mSpuChannels[1], &mSio2Write, &mSio2Read}) {
+        if (address - channel->base < kChannelSpan) {
+            return channel;
         }
     }
     return nullptr;
 }
 
-const IopMmio::SpuChannel* IopMmio::channelFor(u32 address) const {
+const IopMmio::DmaChannel* IopMmio::channelFor(u32 address) const {
     return const_cast<IopMmio*>(this)->channelFor(address);
 }
 
@@ -62,7 +63,7 @@ std::optional<u16> IopMmio::readHalf(u32 address) const {
     if (address == kCore0Statx || address == kCore1Statx) {
         return kTransferReady;
     }
-    const SpuChannel* channel = channelFor(address);
+    const DmaChannel* channel = channelFor(address);
     if (channel == nullptr) {
         return std::nullopt;
     }
@@ -73,10 +74,28 @@ std::optional<u16> IopMmio::readHalf(u32 address) const {
     return static_cast<u16>((address & 2) != 0 ? *word >> 16 : *word);
 }
 
+// SIO2MAN moves the FIFOs a byte at a time: Sio2TransferSubmit @ 0x1c4 stores
+// each command byte with sb, and Sio2TransferCollectResults @ 0x310 reads the
+// answer back with lbu.
+std::optional<u8> IopMmio::readByte(u32 address) const {
+    if (address - kSio2Base >= kSio2Size) {
+        return std::nullopt;
+    }
+    const std::optional<u32> value = const_cast<Sio2&>(mSio2).read(address - kSio2Base);
+    return value ? std::optional<u8>{static_cast<u8>(*value)} : std::nullopt;
+}
+
+bool IopMmio::writeByte(u32 address, u8 value) {
+    if (address - kSio2Base >= kSio2Size) {
+        return false;
+    }
+    return mSio2.write(address - kSio2Base, value);
+}
+
 // LIBSD programs the channel a halfword at a time, so the word the start bit
 // arrives in has to be rebuilt from the half already there.
 bool IopMmio::writeHalf(u32 address, u16 value) {
-    SpuChannel* channel = channelFor(address);
+    DmaChannel* channel = channelFor(address);
     if (channel == nullptr) {
         return false;
     }
@@ -94,7 +113,7 @@ std::optional<u32> IopMmio::readWord(u32 address) const {
     if (address - kSio2Base < kSio2Size) {
         return const_cast<Sio2&>(mSio2).read(address - kSio2Base);
     }
-    const SpuChannel* channel = channelFor(address);
+    const DmaChannel* channel = channelFor(address);
     if (channel == nullptr) {
         return std::nullopt;
     }
@@ -106,7 +125,7 @@ std::optional<u32> IopMmio::readWord(u32 address) const {
     }
 }
 
-void IopMmio::sendToAudio(const SpuChannel& channel, u32 words) {
+void IopMmio::sendToAudio(const DmaChannel& channel, u32 words) {
     if (mAudio == nullptr || words == 0) {
         return;
     }
@@ -119,11 +138,54 @@ void IopMmio::sendToAudio(const SpuChannel& channel, u32 words) {
     mAudio->write(samples);
 }
 
+// The device answers the queue as the start bit is written, so the channel that
+// reads it back is the one write that has to look at the device afterwards.
+void IopMmio::readFromSio2() {
+    const u32 bytes = (mSio2Read.bcr & 0xFFFF) * (mSio2Read.bcr >> 16) * 4;
+    if ((mSio2Read.chcr & kStart) == 0 || mSio2.pendingOut() < bytes) {
+        return;
+    }
+    std::vector<u8> answer(bytes);
+    mSio2.readFifoOut(answer);
+    for (usize i = 0; i < answer.size(); ++i) {
+        mMemory->write8(mSio2Read.madr + static_cast<u32>(i), answer[i]);
+    }
+    mSio2Read.chcr &= ~kStart;
+}
+
+void IopMmio::writeToSio2(const DmaChannel& channel, u32 bytes) {
+    std::vector<u8> command(bytes);
+    for (usize i = 0; i < command.size(); ++i) {
+        command[i] = mMemory->read8(channel.madr + static_cast<u32>(i));
+    }
+    mSio2.writeFifoIn(command);
+}
+
+// The transfer to sound RAM is not modelled: the samples go to the host and
+// LIBSD waits on the interrupt, not on the data.
+void IopMmio::startTransfer(DmaChannel& channel) {
+    const u32 words = (channel.bcr & 0xFFFF) * (channel.bcr >> 16);
+    if (channel.base == mSio2Write.base) {
+        writeToSio2(channel, words * 4);
+        channel.chcr &= ~kStart;
+        return;
+    }
+    if (channel.base == mSio2Read.base) {
+        return;
+    }
+    log.trace("spu dma from {:08x}, {} words, line {}", channel.madr, words, channel.line);
+    sendToAudio(channel, words);
+    channel.chcr &= ~kStart;
+    mKernel->raiseInterruptAfter(channel.line, kIopCyclesPerSample * samplesIn(words));
+}
+
 bool IopMmio::writeWord(u32 address, u32 value) {
     if (address - kSio2Base < kSio2Size) {
-        return mSio2.write(address - kSio2Base, value);
+        const bool handled = mSio2.write(address - kSio2Base, value);
+        readFromSio2();
+        return handled;
     }
-    SpuChannel* channel = channelFor(address);
+    DmaChannel* channel = channelFor(address);
     if (channel == nullptr) {
         return false;
     }
@@ -134,14 +196,9 @@ bool IopMmio::writeWord(u32 address, u32 value) {
         default: return false;
     }
 
-    // Normally this would start transfer to sound RAM, we just signal for completion. 
-    // LIBSD waits on the interrupt, not on the data.
-    channel->chcr = value & ~kStart;
+    channel->chcr = value;
     if ((value & kStart) != 0) {
-        const u32 words = (channel->bcr & 0xFFFF) * (channel->bcr >> 16);
-        log.trace("spu dma from {:08x}, {} words, line {}", channel->madr, words, channel->line);
-        sendToAudio(*channel, words);
-        mKernel->raiseInterruptAfter(channel->line, kIopCyclesPerSample * samplesIn(words));
+        startTransfer(*channel);
     }
     return true;
 }

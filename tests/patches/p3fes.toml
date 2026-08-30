@@ -1,7 +1,7 @@
 [iop]
 preload = []
 host = [
-    "cdvdman", "sio2man", "sio2d", "padman", "mc2_s1", "dbcman",
+    "cdvdman", "mc2_s1", "dbcman",
     "sysclib", "stdio", "sysmem", "threadman", "sifcmd", "sifman", "loadcore",
     "fileio", "ioman", "romdrv", "cdvdfsv", "loadfile",
 ]

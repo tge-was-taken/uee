@@ -3,6 +3,8 @@
 #include "r3000a.h"
 #include "types.h"
 
+#include <string_view>
+
 namespace uee {
 
 namespace iopstatus {
@@ -23,6 +25,20 @@ enum class IopWait : u32 {
     RpcReply = 6,
     Delay = 7,
 };
+
+constexpr std::string_view getWaitName(IopWait wait) {
+    switch (wait) {
+        case IopWait::None: return "none";
+        case IopWait::Sleep: return "sleep";
+        case IopWait::Semaphore: return "sema";
+        case IopWait::EventFlag: return "event";
+        case IopWait::RpcQueue: return "rpcqueue";
+        case IopWait::Vblank: return "vblank";
+        case IopWait::RpcReply: return "rpcreply";
+        case IopWait::Delay: return "delay";
+    }
+    return "?";
+}
 
 struct IopThread {
     bool allocated = false;

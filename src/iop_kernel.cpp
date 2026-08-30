@@ -12,6 +12,9 @@
 //   LOADCORE md5 fc39f1391282c682eb9a2f03548ddf23
 //   DMACMAN  md5 a204d6809d4133c688f0144d2d165d98
 //   SECRMAN  md5 b8bac9b7c04d9931ddc50860497f3153
+// A tag reading `<MODULE> (310)` names the build in IOPRP310.IMG instead, which
+// is what a game that reboots the IOP with it links against:
+//   SIFMAN   md5 4ba22fd5071ea28bcbe20f5d6dddfee7
 
 #include "log.h"
 #include "iop_kernel.h"
@@ -106,6 +109,23 @@ constexpr usize kMaxThreads = 64;
 constexpr usize kInterruptThread = kMaxThreads - 1;
 constexpr usize kMaxSemaphores = 64;
 constexpr usize kMaxEventFlags = 64;
+// DMACMAN: the channel register table at 0x1b68 runs 0x1F801080 for the first
+// seven channels and 0x1F801500 for the rest, sixteen bytes apart.
+constexpr u32 kDmaChannels = 13;
+constexpr u32 kUnusableDmaChannel = 6;
+constexpr u32 kDmaMadr = 0x0;
+constexpr u32 kDmaBcr = 0x4;
+constexpr u32 kDmaChcr = 0x8;
+constexpr u32 kDmaSlice = 0x200;
+constexpr u32 kDmaToMemory = 1u << 30;
+constexpr u32 kDmaStart = 0x01000000;
+
+constexpr u32 getDmaChannelBase(u32 channel) {
+    return channel < 7 ? 0x1F801080 + channel * 0x10 : 0x1F801500 + (channel - 7) * 0x10;
+}
+
+constexpr u32 kSifTransferSize = 16;
+
 constexpr u32 kIllegalIntrCode = static_cast<u32>(-101);
 constexpr u32 kCpuDisabled = static_cast<u32>(-102);
 constexpr u32 kFoundHandler = static_cast<u32>(-104);
@@ -198,8 +218,8 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"loadcore", 5, "FlushDcache", &IopKernel::flushCache, true},
         {"loadcore", 6, "RegisterLibraryEntries", &IopKernel::registerLibraryEntries, true},
         {"dmacman", 33, "sceSetDMAPriority", &IopKernel::setDmaPriority, true},
-        {"dmacman", 28, "sceSetSliceDMA", &IopKernel::setSliceDma, true},
-        {"dmacman", 32, "sceStartDMA", &IopKernel::startDma, true},
+        {"dmacman", 28, "dmacRequest", &IopKernel::requestDma},
+        {"dmacman", 32, "dmacStartTransfer", &IopKernel::startDma},
         {"dmacman", 34, "sceEnableDMAChannel", &IopKernel::enableDmaChannel, true},
         {"loadcore", 27, "SetRebootTimeLibraryHandlingMode",
          &IopKernel::setRebootTimeLibraryHandlingMode, true},
@@ -270,7 +290,7 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"sysclib", 30, "strncpy", &IopKernel::strncpy},
         {"sysclib", 36, "strtol", &IopKernel::strtol},
         {"sifman", 5, "sceSifInit", &IopKernel::sifInit, true},
-        {"sifman", 7, "sceSifSetDma", &IopKernel::sifSetDma, true},
+        {"sifman", 7, "sceSifSetDma", &IopKernel::sifSetDma},
         {"sifman", 29, "sceSifCheckInit", &IopKernel::sifCheckInit, true},
         {"sifcmd", 14, "sceSifInitRpc", &IopKernel::sifInitRpc, true},
         {"sifman", 8, "sceSifDmaStat", &IopKernel::sifDmaStat, true},
@@ -327,9 +347,10 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
     return nullptr;
 }
 
-IopKernel::IopKernel(IopContext& iop, Memory& memory, const std::vector<Import>& imports,
-                     HeapRange heap, std::string& console)
-    : mIop(iop), mMemory(memory), mImports(imports), mConsole(console) {
+IopKernel::IopKernel(IopContext& iop, Memory& memory, Memory& mainMemory,
+                     const std::vector<Import>& imports, HeapRange heap, std::string& console)
+    : mIop(iop), mMemory(memory), mMainMemory(mainMemory), mImports(imports),
+      mConsole(console) {
     mThreads.resize(kMaxThreads);
     mSemaphores.resize(kMaxSemaphores);
     mEventFlags.resize(kMaxEventFlags);
@@ -956,11 +977,14 @@ usize IopKernel::enterInterruptThread() {
     return interrupted;
 }
 
+// The handler ran on its own registers, so the thread it interrupted gets its
+// own back before anything the handler readied is allowed to take over.
 void IopKernel::leaveInterruptThread(usize interrupted) {
     mThreads[kInterruptThread].status = iopstatus::kDormant;
     mCurrent = interrupted;
-    if (mThreads[interrupted].status == iopstatus::kRun) {
-        return;
+    mIop.cpu = mThreads[interrupted].saved;
+    if (mThreads[interrupted].status == iopstatus::kReady) {
+        mThreads[interrupted].status = iopstatus::kRun;
     }
     reschedule();
 }
@@ -977,10 +1001,11 @@ void IopKernel::reportThreads(const Symbols& symbols) const {
     for (usize i = 0; i < mThreads.size(); ++i) {
         const IopThread& thread = mThreads[i];
         if (thread.allocated && thread.status != iopstatus::kDormant) {
-            log.info("thread {} at {} status {} priority {} wait {} id {:08x}", i,
+            log.info("thread {} id {:08x} {} at {} status {} priority {} waiting on {} {:08x} bits {:08x}",
+                     i, makeHandle(i, thread.sequence), symbols.describe(thread.entry),
                      symbols.describe(i == mCurrent ? mIop.cpu.pc : thread.saved.pc),
-                     thread.status, thread.currentPriority, static_cast<u32>(thread.wait),
-                     thread.waitId);
+                     thread.status, thread.currentPriority, getWaitName(thread.wait),
+                     thread.waitId, thread.waitPattern);
         }
     }
 }
@@ -997,6 +1022,13 @@ bool IopKernel::isIdle() const {
 void IopKernel::exitCurrentThread() {
     mThreads[mCurrent].status = iopstatus::kDormant;
     reschedule();
+}
+
+void IopKernel::exitHostThread() {
+    mThreads[kHostThread].status = iopstatus::kDormant;
+    if (mCurrent == kHostThread) {
+        reschedule();
+    }
 }
 
 // Nothing here has a cache.
@@ -1020,15 +1052,33 @@ void IopKernel::enableDmaChannel() {
     returnValue(0);
 }
 
-// DMACMAN: sceSetSliceDMA @ 0xcc4. No channel moves anything here, so a
-// transfer is over before a caller can look.
-void IopKernel::setSliceDma() {
-    returnValue(0);
+// DMACMAN: dmacRequest @ 0xcc4 writes the channel's own registers, so a device
+// sees the same transfer whether a module programs it or asks dmacman to.
+void IopKernel::requestDma() {
+    const u32 channel = argument(0);
+    if (channel >= kDmaChannels || channel == kUnusableDmaChannel) {
+        returnValue(0);
+        return;
+    }
+    const u32 direction = argument(4);
+    const u32 base = getDmaChannelBase(channel);
+    mMemory.write32(base + kDmaMadr, argument(1) & 0xFFFFFF);
+    mMemory.write32(base + kDmaBcr, (argument(2) & 0xFFFF) | (argument(3) << 16));
+    mMemory.write32(base + kDmaChcr,
+                    (direction & 1) | kDmaSlice | (direction == 0 ? kDmaToMemory : 0));
+    returnValue(1);
 }
 
-// DMACMAN: sceStartDMA @ 0xe84
+// DMACMAN: dmacStartTransfer @ 0xe84
 void IopKernel::startDma() {
-    returnValue(0);
+    const u32 channel = argument(0);
+    if (channel >= kDmaChannels) {
+        returnValue(0);
+        return;
+    }
+    const u32 chcr = getDmaChannelBase(channel) + kDmaChcr;
+    mMemory.write32(chcr, mMemory.read32(chcr) | kDmaStart);
+    returnValue(1);
 }
 
 // LOADCORE: SetRebootTimeLibraryHandlingMode @ 0xb94. Nothing here reboots, so
@@ -1587,10 +1637,24 @@ void IopKernel::sifInit() {
     returnValue(0);
 }
 
-// SIFMAN: sceSifSetDma @ 0x598. Nothing on this side owns a DMA channel, so a
-// transfer is answered rather than queued.
+// SIFMAN (310): sifman_SifSetDma @ 0x95c takes an array of {source,
+// destination, size, attribute} and moves each one to main memory. PADMAN md5
+// 0fa9dbfe8794e172733189ed945aff45 sends the pad state to the EE this way in
+// PadSifDmaSend @ 0x360, so the game reads nothing without it.
 void IopKernel::sifSetDma() {
-    returnValue(1);
+    const u32 transfers = argument(0);
+    const u32 count = argument(1);
+    for (u32 i = 0; i < count; ++i) {
+        const u32 entry = transfers + i * kSifTransferSize;
+        const u32 source = mMemory.read32(entry);
+        const u32 destination = mMemory.read32(entry + 4);
+        const u32 size = mMemory.read32(entry + 8);
+        for (u32 offset = 0; offset < size; ++offset) {
+            mMainMemory.write8(destination + offset, mMemory.read8(source + offset));
+        }
+        log.trace("sif dma {:08x} to {:08x}, {} bytes", source, destination, size);
+    }
+    returnValue(count);
 }
 
 // SIFMAN: sceSifCheckInit @ 0x2d8
@@ -1675,15 +1739,42 @@ bool IopKernel::freeMemory(u32 address) {
     return freeBlock(address);
 }
 
-// VBLANK: RegisterVblankHandler @ 0x164. Nothing here runs a handler outside a
-// thread, so the one a caller offers would never be reached.
+std::vector<IopKernel::VblankHandler>& IopKernel::vblankHandlersFor(bool atEnd) {
+    return atEnd ? mVblankEndHandlers : mVblankStartHandlers;
+}
+
+// VBLANK: RegisterVblankHandler @ 0x164 takes the edge first and runs a lower
+// priority earlier, and
+// VblankStartIntrHandler @ 0x374 calls each handler with the argument it was
+// registered with.
 void IopKernel::registerVblankHandler() {
+    const bool atEnd = argument(0) != 0;
+    const s32 priority = static_cast<s32>(argument(1));
+    const u32 handler = argument(2);
+    std::vector<VblankHandler>& handlers = vblankHandlersFor(atEnd);
+    for (const VblankHandler& registered : handlers) {
+        if (registered.handler == handler) {
+            returnValue(kFoundHandler);
+            return;
+        }
+    }
+    const auto after = std::find_if(handlers.begin(), handlers.end(),
+                                    [priority](const VblankHandler& other) {
+                                        return priority < other.priority;
+                                    });
+    handlers.insert(after, {handler, argument(3), mIop.cpu.gpr[reg::gp], priority});
+    log.trace("vblank {} handler {:08x} priority {}", atEnd ? "end" : "start", handler, priority);
     returnValue(0);
 }
 
 // VBLANK: ReleaseVblankHandler @ 0x2ac
 void IopKernel::releaseVblankHandler() {
-    returnValue(0);
+    const u32 handler = argument(1);
+    std::vector<VblankHandler>& handlers = vblankHandlersFor(argument(0) != 0);
+    const usize removed = std::erase_if(handlers, [handler](const VblankHandler& registered) {
+        return registered.handler == handler;
+    });
+    returnValue(removed != 0 ? 0 : kNotFoundHandler);
 }
 
 // What the clock alone will release: a thread whose delay expires, or a device
@@ -1739,7 +1830,18 @@ void IopKernel::advanceTime(u64 instructions) {
     }
 }
 
-void IopKernel::raiseVblank() {
+void IopKernel::queueHandlers(const std::vector<VblankHandler>& handlers) {
+    for (const VblankHandler& registered : handlers) {
+        mPendingHandlers.push_back({registered.handler, registered.argument, registered.gp});
+    }
+}
+
+void IopKernel::raiseVblankStart() {
+    queueHandlers(mVblankStartHandlers);
+}
+
+void IopKernel::raiseVblankEnd() {
+    queueHandlers(mVblankEndHandlers);
     for (usize i = 0; i < mThreads.size(); ++i) {
         const IopThread& thread = mThreads[i];
         if (thread.allocated && thread.status == iopstatus::kWait &&

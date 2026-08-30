@@ -26,7 +26,8 @@ enum class ModuleSource { Host, Guest };
 class Iop {
 public:
     // Translated modules keep their bases; everything else loads above.
-    Iop(std::string& console, std::span<TranslatedIrx* const> translated = {},
+    Iop(Memory& mainMemory, std::string& console,
+        std::span<TranslatedIrx* const> translated = {},
         std::span<const std::string> hostModules = {});
 
     bool loadModule(const std::string& name, std::span<const u8> image);
@@ -38,7 +39,8 @@ public:
     bool freeMemory(u32 address) { return mKernel.freeMemory(address); }
     void attachAudio(AudioSink* audio) { mMmio.attachAudio(audio); }
     void attachPad(PadSource* pad) { mMmio.attachPad(pad); }
-    void tickVblank();
+    void startVblank();
+    void endVblank();
     void advance(u64 instructions);
     void reportThreads() const { mKernel.reportThreads(mSymbols); }
 

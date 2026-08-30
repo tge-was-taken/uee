@@ -82,7 +82,15 @@ public:
         return p == nullptr ? std::nullopt : std::optional<u8>{*p};
     }
 
-    u8 read8(u32 address) { return load<u8>(resolve(address, 1)); }
+    u8 read8(u32 address) {
+        const u32 folded = mMirror.apply(address);
+        if (mMmio != nullptr && isRegister(folded)) {
+            if (const std::optional<u8> value = mMmio->readByte(folded)) {
+                return *value;
+            }
+        }
+        return load<u8>(resolve(address, 1));
+    }
     u16 read16(u32 address) {
         const u32 folded = mMirror.apply(address);
         if (mMmio != nullptr && isRegister(folded)) {
@@ -112,7 +120,13 @@ public:
         return load<u32>(resolve(address, 4));
     }
 
-    void write8(u32 address, u8 value) { store(resolve(address, 1), value); }
+    void write8(u32 address, u8 value) {
+        const u32 folded = mMirror.apply(address);
+        if (mMmio != nullptr && isRegister(folded) && mMmio->writeByte(folded, value)) {
+            return;
+        }
+        store(resolve(address, 1), value);
+    }
     void write16(u32 address, u16 value) {
         const u32 folded = mMirror.apply(address);
         if (mMmio != nullptr && isRegister(folded) && mMmio->writeHalf(folded, value)) {

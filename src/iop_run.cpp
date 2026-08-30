@@ -3,6 +3,7 @@
 #include "idle.h"
 
 #include "instruction.h"
+#include "log.h"
 
 #include <minicoro.h>
 
@@ -12,6 +13,8 @@
 
 namespace uee {
 namespace {
+
+LoggerChannel log("ioprun");
 
 constexpr u64 kCallLimit = 1'000'000'000;
 
@@ -85,6 +88,7 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instruc
             return Stop{StopReason::Returned, cpu.pc, {}};
         }
         if (cpu.pc == kIopThreadReturn) {
+            log.trace("thread {} returned from its entry", machine.kernel.currentThread());
             machine.kernel.exitCurrentThread();
         }
 

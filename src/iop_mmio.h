@@ -29,11 +29,11 @@ public:
     bool writeWord(u32 address, u32 value) override;
     std::optional<u16> readHalf(u32 address) const override;
     bool writeHalf(u32 address, u16 value) override;
+    std::optional<u8> readByte(u32 address) const override;
+    bool writeByte(u32 address, u8 value) override;
 
 private:
-    // LIBSD md5 7e79d40b99f8d87a5084188956550cd5 drives one channel per SPU2
-    // core, and registers a handler on each channel's interrupt line.
-    struct SpuChannel {
+    struct DmaChannel {
         u32 base = 0;
         u32 line = 0;
         u32 madr = 0;
@@ -41,17 +41,28 @@ private:
         u32 chcr = 0;
     };
 
-    void sendToAudio(const SpuChannel& channel, u32 words);
+    void startTransfer(DmaChannel& channel);
+    void sendToAudio(const DmaChannel& channel, u32 words);
+    void writeToSio2(const DmaChannel& channel, u32 bytes);
+    void readFromSio2();
 
-    SpuChannel* channelFor(u32 address);
-    const SpuChannel* channelFor(u32 address) const;
+    DmaChannel* channelFor(u32 address);
+    const DmaChannel* channelFor(u32 address) const;
 
     Sio2 mSio2;
     AudioSink* mAudio = nullptr;
     AdpcmState mAdpcm;
     Memory* mMemory = nullptr;
     IopKernel* mKernel = nullptr;
-    SpuChannel mChannels[2] = {{0x1F8010C0, 36, 0, 0, 0}, {0x1F801500, 40, 0, 0, 0}};
+
+    // LIBSD md5 7e79d40b99f8d87a5084188956550cd5 drives one channel per SPU2
+    // core and waits on that channel's interrupt line.
+    DmaChannel mSpuChannels[2] = {{0x1F8010C0, 36}, {0x1F801500, 40}};
+
+    // SIO2MAN md5 ea22447abe3a4b56a26f3149316370a3 moves its FIFOs with these
+    // two and waits on the SIO2 interrupt, so neither carries a line of its own.
+    DmaChannel mSio2Write{0x1F801540};
+    DmaChannel mSio2Read{0x1F801550};
 };
 
 }  // namespace uee

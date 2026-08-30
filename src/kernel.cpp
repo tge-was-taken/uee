@@ -94,7 +94,7 @@ constexpr u32 kSoftwareRegisters = 0x20;
 }  // namespace
 
 Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config)
-    : mContext(ctx), mMemory(memory), mIop(mOutput, {}, config.hostModules) {
+    : mContext(ctx), mMemory(memory), mIop(memory, mOutput, {}, config.hostModules) {
     mMemory.attach(&mMmio);
     mMmio.attach(mMemory, mContext.cpu);
     installSyscallTable(mMemory);
@@ -1377,8 +1377,10 @@ void Kernel::raiseFieldInterrupts() {
     }
     log.trace("{} at scanline {}", blanking ? "vblank start" : "vblank end", line);
     mMmio.interrupts().raiseIntc(blanking ? intc::kVblankStart : intc::kVblankEnd);
-    if (!blanking) {
-        mIop.tickVblank();
+    if (blanking) {
+        mIop.startVblank();
+    } else {
+        mIop.endVblank();
     }
 
     // DispatchIntcHandlers satisfies a pending SetVSyncFlag at the start of the

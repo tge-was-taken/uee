@@ -35,11 +35,13 @@ struct IopRpcServer {
 
 class IopKernel {
 public:
-    IopKernel(IopContext& iop, Memory& memory, const std::vector<Import>& imports,
-              HeapRange heap, std::string& console);
+    // The main memory is where sceSifSetDma moves what a module hands the EE.
+    IopKernel(IopContext& iop, Memory& memory, Memory& mainMemory,
+              const std::vector<Import>& imports, HeapRange heap, std::string& console);
 
     // False stops the run: nothing here answers for that import.
     bool call(u32 index);
+
 
 
     usize currentThread() const { return mCurrent; }
@@ -47,6 +49,10 @@ public:
     bool isIdle() const;
     void reportThreads(const Symbols& symbols) const;
     void exitCurrentThread();
+
+    // The EE's way in stops being runnable; whatever guest thread was running
+    // keeps its place.
+    void exitHostThread();
 
     // Gives the processor to the thread the host runs its own calls on, which
     // is also the one a module entry gets.
@@ -59,7 +65,8 @@ public:
 
     // Releases what WaitVblankEnd parked, which is the only clock the modules
     // loaded here run on.
-    void raiseVblank();
+    void raiseVblankStart();
+    void raiseVblankEnd();
     void advanceTime(u64 instructions);
     void advanceTimeTo(u64 cycles);
     std::optional<u64> nextDelay() const;
@@ -115,6 +122,16 @@ private:
         u32 gp = 0;
     };
 
+    struct VblankHandler {
+        u32 handler = 0;
+        u32 argument = 0;
+        u32 gp = 0;
+        s32 priority = 0;
+    };
+
+    std::vector<VblankHandler>& vblankHandlersFor(bool atEnd);
+    void queueHandlers(const std::vector<VblankHandler>& handlers);
+
     void cpuSuspendIntr();
     void cpuResumeIntr();
     void cpuEnableIntr();
@@ -153,7 +170,7 @@ private:
     void registerLibraryEntries();
     void setDmaPriority();
     void enableDmaChannel();
-    void setSliceDma();
+    void requestDma();
     void startDma();
     void setRebootTimeLibraryHandlingMode();
     void setMcDevIdHandler();
@@ -255,6 +272,7 @@ private:
 
     IopContext& mIop;
     Memory& mMemory;
+    Memory& mMainMemory;
     const std::vector<Import>& mImports;
     std::vector<const Service*> mServices;
     std::vector<Block> mBlocks;
@@ -281,6 +299,8 @@ private:
 
     IopHardTimer mHardTimers[kHardTimers];
     
+    std::vector<VblankHandler> mVblankStartHandlers;
+    std::vector<VblankHandler> mVblankEndHandlers;
     std::vector<IopHandlerCall> mPendingHandlers;
     std::vector<std::pair<u64, u32>> mDeferredInterrupts;
 };

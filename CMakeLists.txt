@@ -68,6 +68,7 @@ add_library(uee
     src/iop_rpc.cpp
     src/adpcm.cpp
     src/iop_mmio.cpp
+    src/pad.cpp
     src/sio2.cpp
     src/iop_interpreter.cpp
     src/iop_kernel.cpp

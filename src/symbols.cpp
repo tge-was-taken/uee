@@ -60,11 +60,6 @@ void Symbols::load(const std::string& module, u32 base, u32 size) {
             break;
         }
     }
-    if (entries.empty()) {
-        log.trace("no map for {}", module);
-        return;
-    }
-
     Module loaded{module, base, size, {}};
     loaded.entries.reserve(entries.size());
     for (auto& [address, name] : entries) {
@@ -72,7 +67,8 @@ void Symbols::load(const std::string& module, u32 base, u32 size) {
     }
     std::sort(loaded.entries.begin(), loaded.entries.end(),
               [](const Entry& left, const Entry& right) { return left.offset < right.offset; });
-    log.info("{} names for {} at {:08x}", loaded.entries.size(), module, base);
+    log.info("{} names for {} at {:08x}..{:08x}", loaded.entries.size(), module, base,
+             base + size);
     mModules.push_back(std::move(loaded));
 }
 
@@ -86,7 +82,7 @@ std::string Symbols::describe(u32 address) const {
             std::upper_bound(module.entries.begin(), module.entries.end(), offset,
                              [](u32 value, const Entry& entry) { return value < entry.offset; });
         if (after == module.entries.begin()) {
-            continue;
+            return std::format("{}+0x{:x} ({:08x})", module.name, offset, address);
         }
         const Entry& entry = *std::prev(after);
         const u32 into = offset - entry.offset;

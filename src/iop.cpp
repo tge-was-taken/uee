@@ -22,9 +22,9 @@ constexpr u32 kResultRegister = 2;
 
 }  // namespace
 
-Iop::Iop(std::string& console, std::span<TranslatedIrx* const> translated,
+Iop::Iop(Memory& mainMemory, std::string& console, std::span<TranslatedIrx* const> translated,
          std::span<const std::string> hostModules)
-    : mKernel(mInterpreter.iop, mMemory, mImports,
+    : mKernel(mInterpreter.iop, mMemory, mainMemory, mImports,
               {kIopHeapBase, kIopStackTop - kIopStackSize}, console),
       mTranslated(translated), mHostModules(hostModules.begin(), hostModules.end()) {
     mMmio.attach(mMemory, mKernel);
@@ -61,7 +61,7 @@ TranslatedIrx* Iop::translationOf(const std::string& name) const {
 // so every entry into the IOP is followed by letting the rest of them reach
 // their first blocking point.
 bool Iop::settle(IopScheduler::Skipping skipping) {
-    mKernel.exitCurrentThread();
+    mKernel.exitHostThread();
     const Stop stop = mScheduler.run(kInstructionLimit, skipping);
     if (stop.reason == StopReason::Deadlocked) {
         return true;
@@ -79,6 +79,7 @@ bool Iop::dispatchPendingHandlers() {
 }
 
 void Iop::runHandler(const IopHandlerCall& call) {
+    log.trace("handler {:08x}({:08x})", call.handler, call.argument);
     const usize interrupted = mKernel.enterInterruptThread();
     ++mHandlersRun;
     R3000A& cpu = mInterpreter.iop.cpu;
@@ -157,8 +158,12 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
     return true;
 }
 
-void Iop::tickVblank() {
-    mKernel.raiseVblank();
+void Iop::startVblank() {
+    mKernel.raiseVblankStart();
+}
+
+void Iop::endVblank() {
+    mKernel.raiseVblankEnd();
 }
 
 // The EE reaches here from the run loop it also calls into the IOP from, so a
@@ -172,7 +177,7 @@ void Iop::advance(u64 instructions) {
     mKernel.advanceTime(instructions);
     // The host thread is only the EE's way in. Leaving it runnable would hand
     // every slice straight back, since it sits on the address a call returns to.
-    mKernel.exitCurrentThread();
+    mKernel.exitHostThread();
     dispatchPendingHandlers();
     const Stop stop = mScheduler.run(instructions, IopScheduler::Skipping::Blocked);
     mAdvancing = false;

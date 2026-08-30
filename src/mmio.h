@@ -28,10 +28,10 @@ public:
 
     virtual std::optional<u32> readWord(u32 address) const = 0;
     virtual bool writeWord(u32 address, u32 value) = 0;
-
-    // SPU2 decodes a halfword at a time.
     virtual std::optional<u16> readHalf(u32) const { return std::nullopt; }
     virtual bool writeHalf(u32, u16) { return false; }
+    virtual std::optional<u8> readByte(u32) const { return std::nullopt; }
+    virtual bool writeByte(u32, u8) { return false; }
 };
 
 }  // namespace uee

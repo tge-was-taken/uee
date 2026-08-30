@@ -31,6 +31,7 @@ inline int runIop(int argc, char** argv, TranslatedIrx* translated) {
     const std::string name = irxPath.filename().string();
 
     Memory memory = makeIopMemory();
+    Memory mainMemory = makeMainMemory();
     IopInterpreter interpreter(memory);
     std::vector<Import> imports;
     const u32 base = translated != nullptr ? translated->base : kIopModuleBase;
@@ -42,7 +43,7 @@ inline int runIop(int argc, char** argv, TranslatedIrx* translated) {
         }
     }
     std::string console;
-    IopKernel kernel(interpreter.iop, memory, imports,
+    IopKernel kernel(interpreter.iop, memory, mainMemory, imports,
                      {module.program.imageEnd, kIopStackTop - kIopStackSize}, console);
     enterModule(interpreter.iop, module);
 
