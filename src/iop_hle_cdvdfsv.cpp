@@ -140,7 +140,8 @@ s32 IopHleCdvdfsv::read(u32 argument) {
     const u32 sector = mMemory.read32(argument + kReadSector * 4);
     const u32 count = mMemory.read32(argument + kReadCount * 4);
     const u32 buffer = mMemory.read32(argument + kReadBuffer * 4);
-    log.trace("CdvdNCmd01_Read(sector={}, count={}, buffer={:08x})", sector, count, buffer);
+    log.trace("CdvdNCmd01_Read(sector={}, count={}, buffer={:08x}, position={:08x})", sector,
+              count, buffer, mMemory.read32(argument + kReadPosition * 4));
 
     std::vector<u8> data;
     if (!mDisc->read(sector, count, data)) {

@@ -1,4 +1,4 @@
-#include "mmio.h"
+#include "ee_mmio.h"
 
 #include "memory.h"
 
@@ -44,7 +44,7 @@ constexpr Block blockOf(u32 address) {
 
 }  // namespace
 
-std::optional<u32> Mmio::read(u32 address) const {
+std::optional<u32> EeMmio::read(u32 address) const {
     switch (blockOf(address)) {
         case Block::Timers: return mTimers.read(address);
         case Block::Dmac: return mDmac.read(address);
@@ -59,7 +59,7 @@ std::optional<u32> Mmio::read(u32 address) const {
     return std::nullopt;
 }
 
-bool Mmio::write(u32 address, u32 value) {
+bool EeMmio::write(u32 address, u32 value) {
     const bool handled = [&] {
         switch (blockOf(address)) {
             case Block::Timers: return mTimers.write(address, value);

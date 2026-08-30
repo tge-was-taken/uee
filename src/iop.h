@@ -2,6 +2,7 @@
 
 #include "iop_interpreter.h"
 #include "iop_kernel.h"
+#include "iop_mmio.h"
 #include "iop_run.h"
 #include "irx.h"
 #include "memory.h"
@@ -35,7 +36,10 @@ public:
 
     u32 allocateMemory(u32 size) { return mKernel.allocateMemory(size); }
     bool freeMemory(u32 address) { return mKernel.freeMemory(address); }
+    void attachAudio(AudioSink* audio) { mMmio.attachAudio(audio); }
+    void attachPad(PadSource* pad) { mMmio.attachPad(pad); }
     void tickVblank();
+    void advance(u64 instructions);
     void reportThreads() const { mKernel.reportThreads(mSymbols); }
 
     Symbols& symbols() { return mSymbols; }
@@ -43,13 +47,16 @@ public:
     Memory& memory() { return mMemory; }
 
 private:
-    Stop enter();
-    bool settle();
+    Stop enter(IopScheduler::Skipping skipping = IopScheduler::Skipping::Allowed);
+    bool settle(IopScheduler::Skipping skipping = IopScheduler::Skipping::Allowed);
+    bool dispatchPendingHandlers();
+    void runHandler(const IopHandlerCall& call);
 
     TranslatedIrx* translationOf(const std::string& name) const;
     ModuleSource sourceOf(const std::string& name) const;
 
     Memory mMemory = makeIopMemory();
+    IopMmio mMmio;
     IopInterpreter mInterpreter{mMemory};
     std::vector<Import> mImports;
     IopKernel mKernel;
@@ -60,6 +67,10 @@ private:
     // Loaded, so dispatch may run them.
     std::vector<TranslatedIrx*> mActive;
     u32 mNextBase = kIopModuleBase;
+    IopMachine mMachine{mInterpreter, mMemory, mKernel, mActive};
+    IopScheduler mScheduler{mMachine, mSymbols};
+    bool mAdvancing = false;
+    u64 mHandlersRun = 0;
 };
 
 }  // namespace uee

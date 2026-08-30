@@ -16,7 +16,7 @@ namespace {
 constexpr u64 kCallLimit = 1'000'000'000;
 
 // A guest call becomes a host call, so every thread needs its own host stack.
-constexpr usize kThreadStackSize = 8 * 1024 * 1024;
+constexpr usize kThreadStackSize = 1024 * 1024;
 
 struct Step {
     std::optional<Stop> stop;
@@ -75,7 +75,7 @@ Step runDelaySlot(IopMachine& machine, u32 pc) {
 
 constexpr u64 kIdleInterval = 0xFFFF;
 
-Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLimit,
+Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instructionLimit,
               Idle* idle = nullptr) {
     R3000A& cpu = machine.iop().cpu;
 
@@ -119,72 +119,72 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, u64 instructionLim
     return Stop{StopReason::ReachedLimit, cpu.pc, {}};
 }
 
-// One coroutine per guest thread, so a thread parked in a call tree resumes
-// where it left off.
-class Scheduler {
-public:
-    Scheduler(IopMachine& machine, u64 instructionLimit, const Symbols& symbols)
-        : mMachine(machine), mInstructionLimit(instructionLimit), mIdle("iop", symbols) {}
+}  // namespace
 
-    ~Scheduler() {
-        for (mco_coro* coroutine : mCoroutines) {
-            if (coroutine != nullptr) {
-                mco_destroy(coroutine);
-            }
+IopScheduler::IopScheduler(IopMachine& machine, const Symbols& symbols)
+    : mMachine(machine), mIdle("iop", symbols) {}
+
+IopScheduler::~IopScheduler() {
+    for (mco_coro* coroutine : mCoroutines) {
+        if (coroutine != nullptr) {
+            mco_destroy(coroutine);
         }
     }
+}
 
-    Stop run() {
-        for (;;) {
-            if (mMachine.kernel.isIdle()) {
+Stop IopScheduler::run(u64 budget, Skipping skipping) {
+    mDeadline = mExecuted + budget;
+    mStopped = false;
+    for (;;) {
+        if (mMachine.kernel.isIdle()) {
+            // Nothing else wakes a delayed thread, so the clock moves to the
+            // first deadline rather than the run ending on it.
+            const std::optional<u64> wake = mMachine.kernel.nextDelay();
+            if (!wake || skipping == Skipping::Blocked) {
                 return Stop{StopReason::Deadlocked, mMachine.iop().cpu.pc, {}};
             }
-            mco_coro* coroutine = coroutineFor(mMachine.kernel.currentThread());
-            if (mco_status(coroutine) == MCO_DEAD) {
-                return mStop;
-            }
-            if (mco_resume(coroutine) != MCO_SUCCESS) {
-                return Stop{StopReason::Deadlocked, mMachine.iop().cpu.pc, "coroutine failed"};
-            }
-            if (mStopped) {
-                return mStop;
-            }
+            mMachine.kernel.advanceTimeTo(*wake);
+            continue;
+        }
+        if (mExecuted >= mDeadline) {
+            return Stop{StopReason::ReachedLimit, mMachine.iop().cpu.pc, {}};
+        }
+        mco_coro* coroutine = coroutineFor(mMachine.kernel.currentThread());
+        if (mco_resume(coroutine) != MCO_SUCCESS) {
+            return Stop{StopReason::Deadlocked, mMachine.iop().cpu.pc, "coroutine failed"};
+        }
+        if (mStopped) {
+            return mStop;
         }
     }
+}
 
-private:
-    static void enter(mco_coro* coroutine) {
-        static_cast<Scheduler*>(mco_get_user_data(coroutine))->runThread();
+void IopScheduler::enter(mco_coro* coroutine) {
+    static_cast<IopScheduler*>(mco_get_user_data(coroutine))->runThread();
+}
+
+void IopScheduler::runThread() {
+    mStop = runUntil(mMachine, kIopModuleReturn, mExecuted, mDeadline, &mIdle);
+    mStopped = true;
+}
+
+mco_coro* IopScheduler::coroutineFor(usize thread) {
+    if (thread >= mCoroutines.size()) {
+        mCoroutines.resize(thread + 1, nullptr);
     }
-
-    void runThread() {
-        mStop = runUntil(mMachine, kIopModuleReturn, mExecuted, mInstructionLimit,
-                         &mIdle);
-        mStopped = true;
+    // Only a thread parked part way through a call keeps its stack. One that
+    // ran to the end starts the next run from a fresh one.
+    if (mCoroutines[thread] != nullptr && mco_status(mCoroutines[thread]) == MCO_DEAD) {
+        mco_destroy(mCoroutines[thread]);
+        mCoroutines[thread] = nullptr;
     }
-
-    mco_coro* coroutineFor(usize thread) {
-        if (thread >= mCoroutines.size()) {
-            mCoroutines.resize(thread + 1, nullptr);
-        }
-        if (mCoroutines[thread] == nullptr) {
-            mco_desc description = mco_desc_init(enter, kThreadStackSize);
-            description.user_data = this;
-            mco_create(&mCoroutines[thread], &description);
-        }
-        return mCoroutines[thread];
+    if (mCoroutines[thread] == nullptr) {
+        mco_desc description = mco_desc_init(enter, kThreadStackSize);
+        description.user_data = this;
+        mco_create(&mCoroutines[thread], &description);
     }
-
-    IopMachine& mMachine;
-    u64 mInstructionLimit;
-    Idle mIdle;
-    std::vector<mco_coro*> mCoroutines;
-    u64 mExecuted = 0;
-    Stop mStop;
-    bool mStopped = false;
-};
-
-}  // namespace
+    return mCoroutines[thread];
+}
 
 void enterModule(IopContext& iop, const IrxModule& module) {
     iop.cpu.pc = module.program.entry;
@@ -247,14 +247,6 @@ bool call(IopMachine& machine, u32 target, u32 returnTo) {
         runUntil(interpretOnly, returnTo, executed, kCallLimit);
     }
     return machine.iop().cpu.pc == returnTo;
-}
-
-Stop run(IopMachine& machine, u64 instructionLimit, const Symbols& symbols) {
-    Stop stop = Scheduler(machine, instructionLimit, symbols).run();
-    if (stop.reason == StopReason::Returned) {
-        stop.reason = StopReason::Exited;
-    }
-    return stop;
 }
 
 }  // namespace uee

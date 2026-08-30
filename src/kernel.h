@@ -1,7 +1,7 @@
 #pragma once
 
 #include "alarm.h"
-#include "mmio.h"
+#include "ee_mmio.h"
 #include "sif.h"
 #include "memory.h"
 #include "hooks.h"
@@ -46,9 +46,6 @@ public:
     Kernel(EeContext& ctx, Memory& memory, const GameConfig& config = {});
 
     SyscallResult handleSyscall();
-
-    // Runs one syscall by number, without the guest having executed a syscall
-    // instruction. Emitted code uses this when the number is known statically.
     SyscallResult callSyscall(s32 number);
 
     // A chain finishes in order, so a nested run must not start another.
@@ -71,6 +68,8 @@ public:
     void reportNoActiveThreads();
     void attachDisc(Disc& disc) { mSif.attachDisc(disc); }
     void attachFiles(std::filesystem::path root) { mSif.attachFiles(std::move(root)); }
+    void attachAudio(AudioSink* audio) { mIop.attachAudio(audio); }
+    void attachPad(PadSource* pad) { mIop.attachPad(pad); }
 
     // Advances the timers and queues any alarm that has expired.
     void advanceClock();
@@ -103,7 +102,7 @@ public:
     const std::string& readOutput() const { return mOutput; }
 
 
-    Mmio& mmio() { return mMmio; }
+    EeMmio& mmio() { return mMmio; }
 
 private:
     u32 readArgument(u32 index) const;
@@ -176,7 +175,7 @@ private:
     ThreadTable mThreads;
     SemaphoreTable mSemaphores;
     AlarmTable mAlarms;
-    Mmio mMmio;
+    EeMmio mMmio;
     std::string mOutput;
     Symbols mSymbols;
     Hooks mHooks;
@@ -226,6 +225,7 @@ private:
     std::array<u32, 0x20> mSifRegisters = {};
     u32 mDmaTransferId = 0;
     std::vector<GuestCall> mPendingCalls;
+    u32 mCallsHeld = 0;
 
 };
 

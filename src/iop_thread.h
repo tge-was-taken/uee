@@ -21,6 +21,7 @@ enum class IopWait : u32 {
     RpcQueue = 4,
     Vblank = 5,
     RpcReply = 6,
+    Delay = 7,
 };
 
 struct IopThread {
@@ -40,8 +41,30 @@ struct IopThread {
     u32 waitPattern = 0;
     u32 waitMode = 0;
     u32 resultAddress = 0;
+    u64 waitDeadline = 0;
 
     R3000A saved;
+};
+
+// TIMEMANI: AllocHardTimer @ 0x90 hands out six, and GetHardTimerIntrCode @ 0x370
+// reads the index back out of the top nibble as (timid >> 28) - 1.
+constexpr u32 kHardTimers = 6;
+
+struct IopHardTimer {
+    bool allocated = false;
+    bool running = false;
+    u32 handler = 0;
+    u32 argument = 0;
+    u32 gp = 0;
+    u32 compare = 0;
+    u64 nextFire = 0;
+};
+
+// A timer or hardware handler runs outside any thread, as an interrupt does.
+struct IopHandlerCall {
+    u32 handler = 0;
+    u32 argument = 0;
+    u32 gp = 0;
 };
 
 struct IopSemaphore {

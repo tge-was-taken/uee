@@ -1,11 +1,16 @@
 #pragma once
 #include "memory.h"
 #include "types.h"
+
+#include <string_view>
+
 namespace uee {
+
 constexpr u32 kSyscallTableBase = 0x80014f40;
 constexpr s32 kSyscallSlots = 131;
 constexpr u32 kKernelTextBase = 0x80000000;
 constexpr u32 kKernelTextEnd = 0x80016e28;
+
 // Every slot of the retail EE kernel's table, by the address the ROM holds
 // there. Dispatch matches on the address, so a guest that saves a slot and
 // restores it later gets the built-in implementation back.
@@ -123,4 +128,7 @@ constexpr bool isKernelHandler(u32 handler) {
     return (handler >= kKernelTextBase && handler < kKernelTextEnd) ||
            (handler >= 0xa0000000 && handler < 0xa0016e28);
 }
+std::string_view nameOfSyscall(s32 number);
+bool isInterruptSyscall(s32 number);
+
 }  // namespace uee

@@ -13,6 +13,7 @@ constexpr usize kTimerCount = 4;
 
 constexpr u64 kCoreClockHz = 294'912'000;
 constexpr u64 kBusClockHz = 147'456'000;
+constexpr u64 kIopClockHz = 36'864'000;
 constexpr double kFieldsPerSecond = 59.94;
 constexpr double kLinesPerField = 262.5;
 
@@ -20,6 +21,8 @@ constexpr u64 kInstructionsPerSecond = kCoreClockHz;
 constexpr u64 kInstructionsPerBusCycle = kInstructionsPerSecond / kBusClockHz;
 constexpr u64 kInstructionsPerHsync =
     static_cast<u64>(kInstructionsPerSecond / (kFieldsPerSecond * kLinesPerField));
+
+constexpr u64 kIopInstructionsPerHsync = kInstructionsPerHsync * kIopClockHz / kCoreClockHz;
 
 constexpr u32 kHsyncPerField = 263;
 constexpr u32 kVisibleLines = 240;

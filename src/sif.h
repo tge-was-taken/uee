@@ -42,6 +42,7 @@ public:
     Sif(Memory& memory, Sbus& sbus, std::string& console, Iop& iop);
 
     void attachDisc(Disc& disc) {
+        mDisc = &disc;
         mCdvd.attachDisc(disc);
         mLoadFile.attachDisc(disc);
     }
@@ -51,6 +52,9 @@ public:
     // A later registration takes the service ids off the one that held them,
     // which is what a game shipping its own build of a module does.
     void registerServer(SifServer& server);
+
+    // What the reply queue looks like, for when the EE stops making progress.
+    void report() const;
 
     void receive(u32 transfers, u32 count);
 
@@ -67,7 +71,8 @@ private:
 
     Transfer readTransfer(u32 address) const;
     void handleCommand(const Transfer& command, const std::optional<Transfer>& payload);
-    void reset();
+    void reset(u32 packet);
+    void loadRebootImage(const std::string& argument);
     void initialiseCommand(u32 packet);
     void bindServer(u32 packet);
     void callServer(u32 packet, const std::optional<Transfer>& payload);
@@ -89,9 +94,11 @@ private:
     IopHleCdvdfsv mCdvd;
     IopRpc mIopRpc;
     std::map<u32, SifServer*> mRegistered;
+    u32 mUndelivered = 0;
 
     u32 mEeCommandBuffer = 0;
     bool mRebooting = false;
+    Disc* mDisc = nullptr;
     std::map<u32, u32> mBound;
     std::set<std::pair<u32, u32>> mReported;
     std::deque<std::vector<u32>> mPending;

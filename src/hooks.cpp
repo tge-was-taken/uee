@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <format>
 #include <optional>
+#include <stdexcept>
 
 namespace uee {
 namespace {
@@ -12,8 +13,6 @@ namespace {
 constexpr u32 kTextLimit = 32;
 constexpr usize kTextShortest = 2;
 
-// An argument that reads as terminated printable text is worth showing; one
-// that is not a pointer reads as unmapped, and one that is reads as bytes.
 std::optional<std::string> textAt(const Memory& memory, u32 address) {
     std::string text;
     for (u32 i = 0; i < kTextLimit; ++i) {
@@ -32,6 +31,18 @@ std::optional<std::string> textAt(const Memory& memory, u32 address) {
     return std::nullopt;
 }
 
+std::optional<u32> wordAt(const Memory& memory, u32 address) {
+    u32 word = 0;
+    for (u32 i = 0; i < 4; ++i) {
+        const std::optional<u8> byte = memory.peek8(address + i);
+        if (!byte) {
+            return std::nullopt;
+        }
+        word |= static_cast<u32>(*byte) << (8 * i);
+    }
+    return word;
+}
+
 }  // namespace
 
 void Hooks::watch(const Symbols& symbols, std::string_view names) {
@@ -42,7 +53,8 @@ void Hooks::watch(const Symbols& symbols, std::string_view names) {
             mEntries.push_back({*address, std::string(name)});
             mLog.info("watching {} at {:08x}", name, *address);
         } else {
-            mLog.warn("no symbol named {}", name);
+            throw std::runtime_error(
+                std::format("no symbol named {}, so nothing would be watched", name));
         }
         if (end == std::string_view::npos) {
             break;
@@ -69,6 +81,8 @@ void Hooks::enter(const Memory& memory, u32 pc, u32 a0, u32 a1, u32 a2, u32 a3) 
         shown += std::format("{:08x}", argument);
         if (const std::optional<std::string> text = textAt(memory, argument)) {
             shown += std::format(" \"{}\"", *text);
+        } else if (const std::optional<u32> word = wordAt(memory, argument)) {
+            shown += std::format(" [{:08x}]", *word);
         }
     }
     mLog.info("{}({})", found->name, shown);

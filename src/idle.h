@@ -14,7 +14,8 @@ class Idle {
 public:
     Idle(std::string processor, const Symbols& symbols);
 
-    void sample(u32 pc);
+    // True on the sample that counts as idle busy loop
+    bool sample(u32 pc);
 
 private:
     // A poll loop calls out to read what it waits on, so it visits a few

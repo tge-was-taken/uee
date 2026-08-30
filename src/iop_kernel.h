@@ -8,8 +8,12 @@
 #include "symbols.h"
 #include "types.h"
 
+#include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace uee {
@@ -56,6 +60,14 @@ public:
     // Releases what WaitVblankEnd parked, which is the only clock the modules
     // loaded here run on.
     void raiseVblank();
+    void advanceTime(u64 instructions);
+    void advanceTimeTo(u64 cycles);
+    std::optional<u64> nextDelay() const;
+    std::vector<IopHandlerCall> takePendingHandlers();
+    void raiseInterrupt(u32 line);
+    void raiseInterruptAfter(u32 line, u64 cycles);
+    usize enterInterruptThread();
+    void leaveInterruptThread(usize interrupted);
 
     u32 sequence() const { return mSequence; }
     // Undoes a module that could not be run: the threads it started have no
@@ -100,6 +112,7 @@ private:
     struct Interrupt {
         u32 handler = 0;
         u32 argument = 0;
+        u32 gp = 0;
     };
 
     void cpuSuspendIntr();
@@ -212,12 +225,33 @@ private:
     void sdInit();
     void sdSetParam();
     void sdGetParam();
+    void sdSetSwitch();
+    void sdGetSwitch();
+    void sdSetAddr();
+    void sdGetAddr();
     void sdSetCoreAttr();
+    void sdGetCoreAttr();
+    void sdConvertPitch();
+    void sdProcBatch();
     void sdVoiceTrans();
     void sdBlockTrans();
     void sdTransStatus();
+    void sdSetEffectAttr();
+    void sdGetEffectAttr();
+    void sdClearEffectWorkArea();
     void sdSetTransIntrHandler();
+    void sdSetSpu2IntrHandler();
     void sdGetTransIntrHandlerArgument();
+    void sdAccepted();
+
+    void allocHardTimer();
+    void freeHardTimer();
+    void setTimerHandler();
+    void setupHardTimer();
+    void startHardTimer();
+    void stopHardTimer();
+
+    IopHardTimer* hardTimerFor(u32 timid);
 
     IopContext& mIop;
     Memory& mMemory;
@@ -229,13 +263,26 @@ private:
     std::vector<IopEventFlag> mEventFlags;
     usize mCurrent = 0;
     u32 mSequence = 0;
-    u64 mMicroseconds = 0;
+    u64 mCycles = 0;
+    std::set<const Service*> mStubReported;
     Interrupt mInterrupts[64];
     bool mInterruptsEnabled = true;
     std::string& mConsole;
     std::vector<IopRpcServer> mRpcServers;
     u32 mTransIntrHandler = 0;
     u32 mTransIntrArgument = 0;
+    u32 mSpu2IntrHandler = 0;
+    u32 mSpu2IntrArgument = 0;
+
+    std::map<u32, u32> mSdParams;
+    std::map<u32, u32> mSdSwitches;
+    std::map<u32, u32> mSdAddresses;
+    std::map<u32, u32> mSdCoreAttrs;
+
+    IopHardTimer mHardTimers[kHardTimers];
+    
+    std::vector<IopHandlerCall> mPendingHandlers;
+    std::vector<std::pair<u64, u32>> mDeferredInterrupts;
 };
 
 }  // namespace uee

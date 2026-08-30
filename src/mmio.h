@@ -1,62 +1,37 @@
 #pragma once
 
-#include "dmac.h"
-#include "gif.h"
-#include "gs.h"
-#include "interrupts.h"
-#include "r5900.h"
-#include "sbus.h"
-#include "timers.h"
-#include "vif.h"
 #include "types.h"
 
 #include <optional>
+#include <span>
 
 namespace uee {
 
-// The registers in the 0x10000000 window that this runtime models. Everything
-// else in the window stays plain memory.
+constexpr u32 kMmioBase = 0x10000000;
+constexpr u32 kMmioSize = 0x00010000;
+constexpr u32 kGsPrivBase = 0x12000000;
+constexpr u32 kGsPrivSize = 0x00002000;
+
+struct MmioSegment {
+    u32 base = 0;
+    u32 size = 0;
+};
+
+// Shared by EE and IOP
 class Mmio {
 public:
-    void attach(Memory& memory, R5900& cpu) {
-        mCpu = &cpu;
-        mGif.attach(memory, mGs);
-        mVif[0].attach(memory, mGif, 0);
-        mVif[1].attach(memory, mGif, 1);
-        mDmac.attach(memory, mInterrupts, mGif, mVif[0], mVif[1]);
-        refreshCondition();
-    }
+    virtual ~Mmio() = default;
 
-    // CPCOND0 is an output of the DMAC that the CPU branches on. It is restated
-    // wherever a register that feeds it, or the register file that holds it,
-    // can have moved.
-    void refreshCondition() {
-        if (mCpu != nullptr) {
-            mCpu->cop0condition = mInterrupts.conditionZero();
-        }
-    }
+    // Read once when the device is attached, so an ordinary access only pays
+    // for the range test and never for the call.
+    virtual std::span<const MmioSegment> segments() const = 0;
 
-    std::optional<u32> read(u32 address) const;
-    bool write(u32 address, u32 value);
+    virtual std::optional<u32> readWord(u32 address) const = 0;
+    virtual bool writeWord(u32 address, u32 value) = 0;
 
-    Timers& timers() { return mTimers; }
-    Interrupts& interrupts() { return mInterrupts; }
-    Sbus& sbus() { return mSbus; }
-    Dmac& dmac() { return mDmac; }
-    Gif& gif() { return mGif; }
-    Gs& gs() { return mGs; }
-    Vif& vif(u32 unit) { return mVif[unit]; }
-    const Sbus& sbus() const { return mSbus; }
-
-private:
-    Timers mTimers;
-    Interrupts mInterrupts;
-    Sbus mSbus;
-    Gif mGif;
-    Gs mGs;
-    Vif mVif[2];
-    Dmac mDmac;
-    R5900* mCpu = nullptr;
+    // SPU2 decodes a halfword at a time.
+    virtual std::optional<u16> readHalf(u32) const { return std::nullopt; }
+    virtual bool writeHalf(u32, u16) { return false; }
 };
 
 }  // namespace uee

@@ -1,7 +1,143 @@
 #include "syscall_table.h"
 
+#include <string_view>
+
 namespace uee {
 namespace {
+
+constexpr std::string_view kNames[kSyscallSlots] = {
+    "UndefinedSyscall",  // 0
+    "ResetEE",  // 1
+    "SetGsCrt",  // 2
+    "UndefinedSyscall",  // 3
+    "KExit",  // 4
+    "ResumeIntrDispatch",  // 5
+    "_LoadExecPS2",  // 6
+    "_ExecPS2",  // 7
+    "UndefinedSyscall",  // 8
+    "RFU009",  // 9
+    "AddSbusIntcHandler",  // 10
+    "RemoveSbusIntcHandler",  // 11
+    "Interrupt2Iop",  // 12
+    "SetVTLBRefillHandler",  // 13
+    "SetVCommonHandler",  // 14
+    "SetVInterruptHandler",  // 15
+    "AddIntcHandler",  // 16
+    "RemoveIntcHandler",  // 17
+    "AddDmacHandler",  // 18
+    "RemoveDmacHandler",  // 19
+    "_EnableIntc",  // 20
+    "_DisableIntc",  // 21
+    "_EnableDmac",  // 22
+    "_DisableDmac",  // 23
+    "_SetAlarm",  // 24
+    "_ReleaseAlarm",  // 25
+    "_EnableIntc",  // 26
+    "_DisableIntc",  // 27
+    "_EnableDmac",  // 28
+    "_DisableDmac",  // 29
+    "_SetAlarm",  // 30
+    "_ReleaseAlarm",  // 31
+    "CreateThread",  // 32
+    "DeleteThread",  // 33
+    "StartThread",  // 34
+    "ExitThread",  // 35
+    "ExitDeleteThread",  // 36
+    "TerminateThread",  // 37
+    "iTerminateThread",  // 38
+    "DisableDispatchThread",  // 39
+    "EnableDispatchThread",  // 40
+    "ChangeThreadPriority",  // 41
+    "iChangeThreadPriority",  // 42
+    "RotateThreadReadyQueue",  // 43
+    "iRotateThreadReadyQueue",  // 44
+    "ReleaseWaitThread",  // 45
+    "iReleaseWaitThread",  // 46
+    "GetThreadId",  // 47
+    "ReferThreadStatus",  // 48
+    "ReferThreadStatus",  // 49
+    "SleepThread",  // 50
+    "WakeupThread",  // 51
+    "iWakeupThread",  // 52
+    "CancelWakeupThread",  // 53
+    "CancelWakeupThread",  // 54
+    "SuspendThread",  // 55
+    "SuspendThread",  // 56
+    "ResumeThread",  // 57
+    "iResumeThread",  // 58
+    "RFU059",  // 59
+    "SetupThread",  // 60
+    "SetupHeap",  // 61
+    "EndOfHeap",  // 62
+    "UndefinedSyscall",  // 63
+    "CreateSema",  // 64
+    "DeleteSema",  // 65
+    "SignalSema",  // 66
+    "iSignalSema",  // 67
+    "WaitSema",  // 68
+    "PollSema",  // 69
+    "PollSema",  // 70
+    "ReferSemaStatus",  // 71
+    "ReferSemaStatus",  // 72
+    "iDeleteSema",  // 73
+    "SetOsdConfigParam",  // 74
+    "GetOsdConfigParam",  // 75
+    "GetGsHParam",  // 76
+    "GetGsVParam",  // 77
+    "SetGsHParam",  // 78
+    "SetGsVParam",  // 79
+    "GetThreadCount",  // 80
+    "GetSemaCount",  // 81
+    "GetAlarmCount",  // 82
+    "GetIntrHandlerCount",  // 83
+    "UndefinedSyscall",  // 84
+    "UndefinedSyscall",  // 85
+    "UndefinedSyscall",  // 86
+    "UndefinedSyscall",  // 87
+    "UndefinedSyscall",  // 88
+    "UndefinedSyscall",  // 89
+    "UndefinedSyscall",  // 90
+    "UndefinedSyscall",  // 91
+    "EnableIntcHandler",  // 92
+    "DisableIntcHandler",  // 93
+    "EnableDmacHandler",  // 94
+    "DisableDmacHandler",  // 95
+    "sub_A0002C00",  // 96
+    "sub_A00028C0",  // 97
+    "sub_A0002980",  // 98
+    "GetCop0",  // 99
+    "FlushCache",  // 100
+    "RFU105",  // 101
+    "CpuConfig",  // 102
+    "GetCop0",  // 103
+    "FlushCache",  // 104
+    "RFU105",  // 105
+    "CpuConfig",  // 106
+    "SifStopDma",  // 107
+    "SetCPUTimerHandler",  // 108
+    "SetCPUTimer",  // 109
+    "SetOsdConfigParam2",  // 110
+    "GetOsdConfigParam2",  // 111
+    "GsGetIMR",  // 112
+    "GsPutIMR",  // 113
+    "SetPgifHandler",  // 114
+    "SetVSyncFlag",  // 115
+    "SetSyscall",  // 116
+    "_print",  // 117
+    "SifDmaStat",  // 118
+    "SifSetDma",  // 119
+    "SifSetDChain",  // 120
+    "SifSetReg",  // 121
+    "SifGetReg",  // 122
+    "_ExecOSD",  // 123
+    "UndefinedSyscall",  // 124
+    "PSMode",  // 125
+    "MachineType",  // 126
+    "GetMemorySize",  // 127
+    "GetGsDxDyOffset",  // 128
+    "<null>",  // 129
+    "InitTLB",  // 130
+};
 
 constexpr u32 kRomTable[kSyscallSlots] = {
     0x80001564,  //   0 UndefinedSyscall
@@ -153,6 +289,20 @@ u32 readSyscallHandler(Memory& memory, s32 number) {
 // KERNEL: SetSyscall @ 0x800006c0
 void writeSyscallHandler(Memory& memory, s32 number, u32 handler) {
     memory.write32(kSyscallTableBase + static_cast<u32>(number) * 4, handler);
+}
+
+// THREADMAN names the interrupt-safe entries with an i prefix. They run inside
+// a handler, where there is no saved context to switch away from, so they must
+// leave the dispatch to the return from the interrupt.
+std::string_view nameOfSyscall(s32 number) {
+    const s32 slot = number < 0 ? -number : number;
+    return slot < kSyscallSlots ? kNames[slot] : std::string_view{};
+}
+
+bool isInterruptSyscall(s32 number) {
+    const std::string_view name = nameOfSyscall(number);
+    // TODO: use a lookup table instead
+    return name.size() > 1 && name[0] == 'i' && name[1] >= 'A' && name[1] <= 'Z';
 }
 
 }  // namespace uee

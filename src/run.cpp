@@ -10,6 +10,7 @@
 
 #include <minicoro.h>
 
+#include <chrono>
 #include <format>
 #include <optional>
 #include <vector>
@@ -90,10 +91,39 @@ enum class Idling { Allowed, Blocked };
 // Only the outermost run watches: a callback is bounded by returning.
 constexpr u64 kIdleInterval = 0xFFFF;
 
+// A resume that runs nothing means the thread the kernel points at cannot make
+// progress on the stack it is parked on.
+constexpr u64 kIdleResumesReported = 100000;
+
 // The deadline is an executed-instruction count, not a budget: a nested run
 // shares the one counter the clock reads, so it cannot have one of its own.
-Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling,
-              Idle* idle = nullptr);
+// How fast the guest is actually running. A run that slows to a crawl reads as a
+// hang without this, since everything downstream simply stops happening.
+class Progress {
+public:
+    void sample(u64 executed) {
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        const std::chrono::duration<double> elapsed = now - mReported;
+        if (elapsed < kReportInterval) {
+            return;
+        }
+        log.info("{} million instructions, {:.1f} million a second", executed / 1'000'000,
+                 static_cast<double>(executed - mExecuted) / elapsed.count() / 1'000'000);
+        mReported = now;
+        mExecuted = executed;
+    }
+
+private:
+    static constexpr std::chrono::seconds kReportInterval{2};
+
+    std::chrono::steady_clock::time_point mReported = std::chrono::steady_clock::now();
+    u64 mExecuted = 0;
+};
+
+constexpr usize kRunningThread = static_cast<usize>(-1);
+
+Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* idle = nullptr,
+              Progress* progress = nullptr, usize owner = kRunningThread);
 std::optional<Stop> runIdle(Machine& machine, u64 deadline);
 
 // A thread that gives up the processor part way through a call tree has to
@@ -116,12 +146,20 @@ public:
             if (mMachine.kernel.executed() >= mInstructionLimit) {
                 return Stop{StopReason::ReachedLimit, mMachine.ee().cpu.pc, {}};
             }
-            mco_coro* coroutine = coroutineFor(mMachine.kernel.currentThread());
+            mResuming = mMachine.kernel.currentThread();
+            mco_coro* coroutine = coroutineFor(mResuming);
             if (mco_status(coroutine) == MCO_DEAD) {
                 return mStop;
             }
+            const u64 before = mMachine.kernel.executed();
             if (mco_resume(coroutine) != MCO_SUCCESS) {
                 return Stop{StopReason::Deadlocked, mMachine.ee().cpu.pc, "coroutine failed"};
+            }
+            if (mMachine.kernel.executed() != before) {
+                mIdleResumes = 0;
+            } else if (++mIdleResumes == kIdleResumesReported) {
+                log.warn("thread {} was resumed {} times without running an instruction",
+                         mMachine.kernel.currentThread(), mIdleResumes);
             }
             if (mStopped) {
                 return mStop;
@@ -135,7 +173,8 @@ private:
     }
 
     void runThread() {
-        mStop = runUntil(mMachine, kNoHalt, mInstructionLimit, Idling::Allowed, &mIdle);
+        mStop = runUntil(mMachine, kNoHalt, mInstructionLimit, Idling::Allowed, &mIdle, &mProgress,
+                         mResuming);
         mStopped = true;
     }
 
@@ -154,9 +193,12 @@ private:
     Machine& mMachine;
     u64 mInstructionLimit;
     Idle mIdle{"ee", mMachine.kernel.symbols()};
+    Progress mProgress;
     std::vector<mco_coro*> mCoroutines;
     Stop mStop;
     bool mStopped = false;
+    u64 mIdleResumes = 0;
+    usize mResuming = 0;
 };
 
 // A slot that transfers control replaces the pending transfer: the R5900 lets
@@ -180,7 +222,8 @@ Step runDelaySlot(Machine& machine, u32 pc) {
     }
 }
 
-Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* idle) {
+Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* idle,
+              Progress* progress, usize owner) {
     Interpreter& interpreter = machine.interpreter;
     Memory& memory = machine.memory;
     Kernel& kernel = machine.kernel;
@@ -209,7 +252,10 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
         kernel.advanceClock();
         kernel.deliverInterrupts();
         if (idle != nullptr && (kernel.executed() & kIdleInterval) == 0) {
-            idle->sample(cpu.pc);
+            progress->sample(kernel.executed());
+            if (idle->sample(cpu.pc)) {
+                kernel.reportThreads();
+            }
         }
 
         if (kernel.isIdle() && idling == Idling::Allowed) {
@@ -225,11 +271,12 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
                                  static_cast<u32>(cpu.gpr[5].lo), static_cast<u32>(cpu.gpr[6].lo),
                                  static_cast<u32>(cpu.gpr[7].lo));
         }
-        const usize self = kernel.currentThread();
+        const usize self = owner == kRunningThread ? kernel.currentThread() : owner;
         const Step step = stepOnce(interpreter, memory, kernel, pc);
         if (step.stop) {
             return *step.stop;
         }
+
         while (kernel.currentThread() != self) {
             mco_yield(mco_running());
         }

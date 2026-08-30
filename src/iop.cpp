@@ -27,6 +27,7 @@ Iop::Iop(std::string& console, std::span<TranslatedIrx* const> translated,
     : mKernel(mInterpreter.iop, mMemory, mImports,
               {kIopHeapBase, kIopStackTop - kIopStackSize}, console),
       mTranslated(translated), mHostModules(hostModules.begin(), hostModules.end()) {
+    mMmio.attach(mMemory, mKernel);
     for (const TranslatedIrx* module : mTranslated) {
         mNextBase = std::max(mNextBase, (module->end + 0xFu) & ~0xFu);
     }
@@ -59,10 +60,9 @@ TranslatedIrx* Iop::translationOf(const std::string& name) const {
 // A started thread only runs once the entry that started it is out of the way,
 // so every entry into the IOP is followed by letting the rest of them reach
 // their first blocking point.
-bool Iop::settle() {
+bool Iop::settle(IopScheduler::Skipping skipping) {
     mKernel.exitCurrentThread();
-    IopMachine machine{mInterpreter, mMemory, mKernel, mActive};
-    const Stop stop = run(machine, kInstructionLimit, mSymbols);
+    const Stop stop = mScheduler.run(kInstructionLimit, skipping);
     if (stop.reason == StopReason::Deadlocked) {
         return true;
     }
@@ -70,9 +70,41 @@ bool Iop::settle() {
     return false;
 }
 
-Stop Iop::enter() {
-    IopMachine machine{mInterpreter, mMemory, mKernel, mActive};
-    return run(machine, kInstructionLimit, mSymbols);
+bool Iop::dispatchPendingHandlers() {
+    const std::vector<IopHandlerCall> pending = mKernel.takePendingHandlers();
+    for (const IopHandlerCall& call : pending) {
+        runHandler(call);
+    }
+    return !pending.empty();
+}
+
+void Iop::runHandler(const IopHandlerCall& call) {
+    const usize interrupted = mKernel.enterInterruptThread();
+    ++mHandlersRun;
+    R3000A& cpu = mInterpreter.iop.cpu;
+    cpu.pc = call.handler;
+    cpu.gpr[reg::gp] = call.gp;
+    cpu.gpr[reg::sp] = kIopStackTop - kIopStackSize / 2;
+    cpu.gpr[reg::ra] = kIopModuleReturn;
+    cpu.gpr[kFirstArgumentRegister] = call.argument;
+    const Stop stop = mScheduler.run(kInstructionLimit);
+    if (stop.reason == StopReason::ReachedLimit) {
+        log.stub("interrupt handler {:08x} did not return", call.handler);
+    }
+    mKernel.leaveInterruptThread(interrupted);
+}
+
+Stop Iop::enter(IopScheduler::Skipping skipping) {
+    for (;;) {
+        Stop stop = mScheduler.run(kInstructionLimit, skipping);
+        if (stop.reason == StopReason::Deadlocked && dispatchPendingHandlers()) {
+            continue;
+        }
+        if (stop.reason == StopReason::Returned) {
+            stop.reason = StopReason::Exited;
+        }
+        return stop;
+    }
 }
 
 bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
@@ -106,6 +138,7 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
             mImports.push_back(Import{std::string(import.module), import.id});
         }
         mActive.push_back(translated);
+        mMachine.modules = mActive;
     }
 
     const u32 sequence = mKernel.sequence();
@@ -117,17 +150,37 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
         mKernel.dropThreadsAbove(sequence);
         if (translated != nullptr) {
             mActive.pop_back();
+            mMachine.modules = mActive;
         }
         return false;
     }
     return true;
 }
 
-// The modules loaded here run on the field the EE is already counting, which is
-// the only clock reaching them. What it releases runs on the next entry rather
-// than here, because a field is not a point the EE is waiting on an answer.
 void Iop::tickVblank() {
     mKernel.raiseVblank();
+}
+
+// The EE reaches here from the run loop it also calls into the IOP from, so a
+// tick can land while a call is still parked on a coroutine. Resuming that
+// coroutine again would run one thread twice; the IOP is running anyway.
+void Iop::advance(u64 instructions) {
+    if (mAdvancing) {
+        return;
+    }
+    mAdvancing = true;
+    mKernel.advanceTime(instructions);
+    // The host thread is only the EE's way in. Leaving it runnable would hand
+    // every slice straight back, since it sits on the address a call returns to.
+    mKernel.exitCurrentThread();
+    dispatchPendingHandlers();
+    const Stop stop = mScheduler.run(instructions, IopScheduler::Skipping::Blocked);
+    mAdvancing = false;
+    if (stop.reason == StopReason::Unimplemented || stop.reason == StopReason::Undecodable ||
+        stop.reason == StopReason::UnknownSyscall ||
+        stop.reason == StopReason::UnmappedAccess) {
+        log.stub("iop advance: {}", describe(stop));
+    }
 }
 
 u32 Iop::callFunction(u32 address, u32 gp, std::span<const u32> arguments) {
@@ -141,13 +194,17 @@ u32 Iop::callFunction(u32 address, u32 gp, std::span<const u32> arguments) {
         cpu.gpr[kFirstArgumentRegister + i] = arguments[i];
     }
 
-    const Stop stop = enter();
+    // A call is part of the running machine, so the devices around it keep their
+    // own pace rather than being jumped forward to whatever would unblock this.
+    const Stop stop = enter(IopScheduler::Skipping::Blocked);
     if (stop.reason != StopReason::Exited) {
-        log.stub("iop call {:08x}: {}", address, describe(stop));
+        log.stub("iop call {:08x}({:08x}, {:08x}, {:08x}): {}", address,
+                 arguments.size() > 0 ? arguments[0] : 0, arguments.size() > 1 ? arguments[1] : 0,
+                 arguments.size() > 2 ? arguments[2] : 0, describe(stop));
         return 0;
     }
     const u32 result = cpu.gpr[kResultRegister];
-    settle();
+    settle(IopScheduler::Skipping::Blocked);
     return result;
 }
 

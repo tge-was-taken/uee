@@ -19,16 +19,12 @@ constexpr u32 kSpu2Base = 0x1F900000;
 constexpr u32 kSpu2Size = 0x00001000;
 constexpr u32 kScratchpadBase = 0x70000000;
 constexpr u32 kScratchpadSize = 16 * 1024;
-constexpr u32 kMmioBase = 0x10000000;
-constexpr u32 kMmioSize = 0x00010000;
 constexpr u32 kVu0MicroBase = 0x11000000;
 constexpr u32 kVu0DataBase = 0x11004000;
 constexpr u32 kVu0MemorySize = 4 * 1024;
 constexpr u32 kVu1MicroBase = 0x11008000;
 constexpr u32 kVu1DataBase = 0x1100C000;
 constexpr u32 kVu1MemorySize = 16 * 1024;
-constexpr u32 kGsPrivBase = 0x12000000;
-constexpr u32 kGsPrivSize = 0x00002000;
 constexpr u32 kUncachedBase = 0x20000000;
 constexpr u32 kKernelBase = 0x80000000;
 constexpr u32 kUnmappedBase = 0xC0000000;
@@ -67,7 +63,14 @@ class Memory {
 public:
     Memory(std::vector<Region> regions, SegmentMirror mirror);
 
-    void attach(Mmio* mmio) { mMmio = mmio; }
+    void attach(Mmio* mmio) {
+        mMmio = mmio;
+        mSegments.clear();
+        if (mmio != nullptr) {
+            const std::span<const MmioSegment> segments = mmio->segments();
+            mSegments.assign(segments.begin(), segments.end());
+        }
+    }
 
     std::optional<u32> fault() const { return mFault; }
 
@@ -80,7 +83,15 @@ public:
     }
 
     u8 read8(u32 address) { return load<u8>(resolve(address, 1)); }
-    u16 read16(u32 address) { return load<u16>(resolve(address, 2)); }
+    u16 read16(u32 address) {
+        const u32 folded = mMirror.apply(address);
+        if (mMmio != nullptr && isRegister(folded)) {
+            if (const std::optional<u16> value = mMmio->readHalf(folded)) {
+                return *value;
+            }
+        }
+        return load<u16>(resolve(address, 2));
+    }
 
     // A register window only decodes a word at a time, so a doubleword access to
     // one is split.
@@ -94,7 +105,7 @@ public:
     u32 read32(u32 address) {
         const u32 folded = mMirror.apply(address);
         if (mMmio != nullptr && isRegister(folded)) {
-            if (const std::optional<u32> value = mMmio->read(folded)) {
+            if (const std::optional<u32> value = mMmio->readWord(folded)) {
                 return *value;
             }
         }
@@ -102,7 +113,13 @@ public:
     }
 
     void write8(u32 address, u8 value) { store(resolve(address, 1), value); }
-    void write16(u32 address, u16 value) { store(resolve(address, 2), value); }
+    void write16(u32 address, u16 value) {
+        const u32 folded = mMirror.apply(address);
+        if (mMmio != nullptr && isRegister(folded) && mMmio->writeHalf(folded, value)) {
+            return;
+        }
+        store(resolve(address, 2), value);
+    }
     void write64(u32 address, u64 value) {
         if (isMmio(address)) {
             write32(address, static_cast<u32>(value));
@@ -114,7 +131,8 @@ public:
 
     void write32(u32 address, u32 value) {
         const u32 folded = mMirror.apply(address);
-        if (mMmio != nullptr && isRegister(folded) && mMmio->write(folded, value)) {
+        if (mMmio != nullptr && isRegister(folded) &&
+            mMmio->writeWord(folded, value)) {
             return;
         }
         store(resolve(address, 4), value);
@@ -130,8 +148,13 @@ private:
 
 private:
     // Asking the register file costs a call that cannot inline.
-    static constexpr bool isRegister(u32 folded) {
-        return folded - kMmioBase < kMmioSize || folded - kGsPrivBase < kGsPrivSize;
+    bool isRegister(u32 folded) const {
+        for (const MmioSegment& segment : mSegments) {
+            if (folded - segment.base < segment.size) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool isMmio(u32 address) const { return isRegister(mMirror.apply(address)); }
@@ -192,6 +215,7 @@ private:
     std::vector<Region> mRegions;
     SegmentMirror mMirror;
     Mmio* mMmio = nullptr;
+    std::vector<MmioSegment> mSegments;
     std::optional<u32> mFault;
 };
 

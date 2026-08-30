@@ -15,9 +15,11 @@
 
 #include "log.h"
 #include "iop_kernel.h"
+#include "timers.h"
 
 
 #include <algorithm>
+#include <iterator>
 #include <cstdio>
 #include <format>
 #include <numeric>
@@ -84,7 +86,6 @@ constexpr u32 kSmallestStack = 0x130;
 // THREADMAN: CreateSema @ 0x3060
 constexpr u32 kSemaAttrMask = 0xFFFFFEFEu;
 
-constexpr u64 kIopClockHz = 36'864'000;
 constexpr u64 kMicrosecondsPerSecond = 1'000'000;
 constexpr u64 kTickRatioGcd = std::gcd(kIopClockHz, kMicrosecondsPerSecond);
 constexpr u64 kTicksPerMicrosecondNumerator = kIopClockHz / kTickRatioGcd;
@@ -98,6 +99,11 @@ constexpr s32 kModulePriority = 64;
 constexpr usize kHostThread = 0;
 
 constexpr usize kMaxThreads = 64;
+// An interrupt runs on a context of its own: the thread it interrupts is
+// usually parked in a call, and its stack has to survive the handler. It takes
+// the top slot so the ids a guest sees are the ones it would see on hardware.
+// TODO: verify with BIOS behavior
+constexpr usize kInterruptThread = kMaxThreads - 1;
 constexpr usize kMaxSemaphores = 64;
 constexpr usize kMaxEventFlags = 64;
 constexpr u32 kIllegalIntrCode = static_cast<u32>(-101);
@@ -108,6 +114,11 @@ constexpr u32 kNotFoundHandler = static_cast<u32>(-105);
 // INTRMANI: RegisterIntrHandler @ 0x148
 constexpr bool isInterruptLine(s32 line) {
     return (line >= 0 && line < 46) || line == 62 || line == 63;
+}
+
+u32 readRegister(const std::map<u32, u32>& bank, u32 entry) {
+    const auto found = bank.find(entry);
+    return found == bank.end() ? 0 : found->second;
 }
 
 constexpr std::string_view kSpecFlags = "-+ #0";
@@ -205,7 +216,9 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"thbase", 22, "ReferThreadStatus", &IopKernel::referThreadStatus},
         {"thbase", 24, "SleepThread", &IopKernel::sleepThread},
         {"thbase", 25, "WakeupThread", &IopKernel::wakeupThread},
+        {"thbase", 26, "iWakeupThread", &IopKernel::wakeupThread},
         {"thbase", 27, "CancelWakeupThread", &IopKernel::cancelWakeupThread},
+        {"thbase", 28, "iCancelWakeupThread", &IopKernel::cancelWakeupThread},
         {"thbase", 33, "DelayThread", &IopKernel::delayThread, true},
         {"thbase", 34, "GetSystemTime", &IopKernel::getSystemTime},
         {"thbase", 39, "USec2SysClock", &IopKernel::usecToSysClock},
@@ -220,10 +233,14 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"thevent", 4, "CreateEventFlag", &IopKernel::createEventFlag},
         {"thevent", 5, "DeleteEventFlag", &IopKernel::deleteEventFlag},
         {"thevent", 6, "SetEventFlag", &IopKernel::setEventFlag},
+        {"thevent", 7, "iSetEventFlag", &IopKernel::setEventFlag},
         {"thevent", 8, "ClearEventFlag", &IopKernel::clearEventFlag},
+        {"thevent", 9, "iClearEventFlag", &IopKernel::clearEventFlag},
         {"thevent", 10, "WaitEventFlag", &IopKernel::waitEventFlag},
         {"thevent", 11, "PollEventFlag", &IopKernel::pollEventFlag},
+        {"thevent", 12, "iPollEventFlag", &IopKernel::pollEventFlag},
         {"thevent", 13, "ReferEventFlagStatus", &IopKernel::referEventFlagStatus},
+        {"thevent", 14, "iReferEventFlagStatus", &IopKernel::referEventFlagStatus},
         {"intrman", 4, "RegisterIntrHandler", &IopKernel::registerIntrHandler, true},
         {"intrman", 5, "ReleaseIntrHandler", &IopKernel::releaseIntrHandler, true},
         {"intrman", 6, "EnableIntr", &IopKernel::enableIntr, true},
@@ -267,10 +284,34 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"vblank", 5, "WaitVblankEnd", &IopKernel::waitVblankEnd, true},
         {"vblank", 8, "RegisterVblankHandler", &IopKernel::registerVblankHandler, true},
         {"vblank", 9, "ReleaseVblankHandler", &IopKernel::releaseVblankHandler, true},
+        // IOPRP310 TIMEMANI md5 9b39d117edce1d23f9383cf8a7c5d11d
+        {"timrman", 4, "AllocHardTimer", &IopKernel::allocHardTimer},
+        {"timrman", 6, "FreeHardTimer", &IopKernel::freeHardTimer},
+        {"timrman", 20, "SetTimerHandler", &IopKernel::setTimerHandler},
+        {"timrman", 22, "SetupHardTimer", &IopKernel::setupHardTimer},
+        {"timrman", 23, "StartHardTimer", &IopKernel::startHardTimer, true},
+        {"timrman", 24, "StopHardTimer", &IopKernel::stopHardTimer},
         {"libsd", 4, "sceSdInit", &IopKernel::sdInit, true},
-        {"libsd", 5, "sceSdSetParam", &IopKernel::sdSetParam, true},
-        {"libsd", 6, "sceSdGetParam", &IopKernel::sdGetParam, true},
-        {"libsd", 11, "sceSdSetCoreAttr", &IopKernel::sdSetCoreAttr, true},
+        {"libsd", 5, "sceSdSetParam", &IopKernel::sdSetParam},
+        {"libsd", 6, "sceSdGetParam", &IopKernel::sdGetParam},
+        {"libsd", 7, "sceSdSetSwitch", &IopKernel::sdSetSwitch},
+        {"libsd", 8, "sceSdGetSwitch", &IopKernel::sdGetSwitch},
+        {"libsd", 9, "sceSdSetAddr", &IopKernel::sdSetAddr},
+        {"libsd", 10, "sceSdGetAddr", &IopKernel::sdGetAddr},
+        {"libsd", 11, "sceSdSetCoreAttr", &IopKernel::sdSetCoreAttr},
+        {"libsd", 12, "sceSdGetCoreAttr", &IopKernel::sdGetCoreAttr},
+        {"libsd", 13, "sceSdNote2Pitch", &IopKernel::sdConvertPitch, true},
+        {"libsd", 14, "sceSdPitch2Note", &IopKernel::sdConvertPitch, true},
+        {"libsd", 15, "sceSdProcBatch", &IopKernel::sdProcBatch, true},
+        {"libsd", 16, "sceSdProcBatchEx", &IopKernel::sdProcBatch, true},
+        {"libsd", 23, "sceSdSetEffectAttr", &IopKernel::sdSetEffectAttr, true},
+        {"libsd", 24, "sceSdGetEffectAttr", &IopKernel::sdGetEffectAttr, true},
+        {"libsd", 25, "sceSdClearEffectWorkArea", &IopKernel::sdClearEffectWorkArea, true},
+        {"libsd", 27, "sceSdSetSpu2IntrHandler", &IopKernel::sdSetSpu2IntrHandler},
+        {"libsd", 30, "sceSdVoiceTransWrite", &IopKernel::sdAccepted, true},
+        {"libsd", 31, "sceSdBlockTransWrite", &IopKernel::sdAccepted, true},
+        {"libsd", 32, "sceSdEffectAttrApply", &IopKernel::sdAccepted, true},
+        {"libsd", 33, "sceSdEffectAttrRead", &IopKernel::sdAccepted, true},
         {"libsd", 17, "sceSdVoiceTrans", &IopKernel::sdVoiceTrans, true},
         {"libsd", 18, "sceSdBlockTrans", &IopKernel::sdBlockTrans, true},
         {"libsd", 19, "sceSdVoiceTransStatus", &IopKernel::sdTransStatus, true},
@@ -292,11 +333,13 @@ IopKernel::IopKernel(IopContext& iop, Memory& memory, const std::vector<Import>&
     mThreads.resize(kMaxThreads);
     mSemaphores.resize(kMaxSemaphores);
     mEventFlags.resize(kMaxEventFlags);
-    mThreads[0].allocated = true;
-    mThreads[0].sequence = ++mSequence;
-    mThreads[0].status = iopstatus::kRun;
-    mThreads[0].initialPriority = kModulePriority;
-    mThreads[0].currentPriority = kModulePriority;
+    mThreads[kHostThread].allocated = true;
+    mThreads[kHostThread].sequence = ++mSequence;
+    mThreads[kHostThread].status = iopstatus::kRun;
+    mThreads[kHostThread].initialPriority = kModulePriority;
+    mThreads[kHostThread].currentPriority = kModulePriority;
+    mThreads[kInterruptThread].allocated = true;
+    mThreads[kInterruptThread].status = iopstatus::kDormant;
 
     const u32 start = (heap.start + kBlockAlignment - 1) & ~(kBlockAlignment - 1);
     const u32 end = heap.end & ~(kBlockAlignment - 1);
@@ -324,7 +367,7 @@ bool IopKernel::call(u32 index) {
         return false;
     }
     const Service& service = *mServices[index];
-    if (service.isStub) {
+    if (service.isStub && mStubReported.insert(&service).second) {
         log.stub("{}.{}", service.module, service.symbol);
     }
     const std::string call =
@@ -775,7 +818,7 @@ void IopKernel::registerIntrHandler() {
         returnValue(kFoundHandler);
         return;
     }
-    mInterrupts[line] = {handler, argument(3)};
+    mInterrupts[line] = {handler, argument(3), mIop.cpu.gpr[reg::gp]};
     returnValue(0);
 }
 
@@ -843,6 +886,7 @@ IopEventFlag* IopKernel::eventFlagFor(u32 handle) {
 
 void IopKernel::switchTo(usize thread) {
     if (thread == mCurrent) {
+        mThreads[thread].status = iopstatus::kRun;
         return;
     }
     IopThread& outgoing = mThreads[mCurrent];
@@ -903,6 +947,22 @@ bool IopKernel::isCurrent(usize thread) const {
 void IopKernel::enterHostThread() {
     mThreads[kHostThread].status = iopstatus::kRun;
     switchTo(kHostThread);
+}
+
+usize IopKernel::enterInterruptThread() {
+    const usize interrupted = mCurrent;
+    mThreads[kInterruptThread].status = iopstatus::kRun;
+    switchTo(kInterruptThread);
+    return interrupted;
+}
+
+void IopKernel::leaveInterruptThread(usize interrupted) {
+    mThreads[kInterruptThread].status = iopstatus::kDormant;
+    mCurrent = interrupted;
+    if (mThreads[interrupted].status == iopstatus::kRun) {
+        return;
+    }
+    reschedule();
 }
 
 void IopKernel::dropThreadsAbove(u32 sequence) {
@@ -1212,16 +1272,17 @@ void IopKernel::cancelWakeupThread() {
 
 // THREADMAN: DelayThread @ 0x2444
 void IopKernel::delayThread() {
-    mMicroseconds += argument(0);
+    const u64 cycles = static_cast<u64>(argument(0)) * kTicksPerMicrosecondNumerator /
+                       kTicksPerMicrosecondDenominator;
+    mThreads[mCurrent].waitDeadline = mCycles + cycles;
+    blockCurrentThread(IopWait::Delay, 0);
     returnValue(0);
 }
 
 // THREADMAN: GetSystemTime @ 0x5738
 void IopKernel::getSystemTime() {
-    const u64 ticks = mMicroseconds * kTicksPerMicrosecondNumerator /
-                      kTicksPerMicrosecondDenominator;
-    mMemory.write32(argument(0), static_cast<u32>(ticks));
-    mMemory.write32(argument(0) + 4, static_cast<u32>(ticks >> 32));
+    mMemory.write32(argument(0), static_cast<u32>(mCycles));
+    mMemory.write32(argument(0) + 4, static_cast<u32>(mCycles >> 32));
     returnValue(0);
 }
 
@@ -1625,6 +1686,59 @@ void IopKernel::releaseVblankHandler() {
     returnValue(0);
 }
 
+// What the clock alone will release: a thread whose delay expires, or a device
+// whose transfer finishes. A run with neither has nothing left to wake it.
+std::optional<u64> IopKernel::nextDelay() const {
+    std::optional<u64> earliest;
+    for (const IopThread& thread : mThreads) {
+        if (thread.allocated && thread.status == iopstatus::kWait &&
+            thread.wait == IopWait::Delay) {
+            earliest = std::min(earliest.value_or(thread.waitDeadline), thread.waitDeadline);
+        }
+    }
+    for (const auto& [deadline, line] : mDeferredInterrupts) {
+        earliest = std::min(earliest.value_or(deadline), deadline);
+    }
+    return earliest;
+}
+
+void IopKernel::advanceTimeTo(u64 cycles) {
+    advanceTime(cycles > mCycles ? cycles - mCycles : 0);
+}
+
+void IopKernel::advanceTime(u64 instructions) {
+    mCycles += instructions;
+    for (usize i = mDeferredInterrupts.size(); i > 0; --i) {
+        const auto& [deadline, line] = mDeferredInterrupts[i - 1];
+        if (mCycles >= deadline) {
+            raiseInterrupt(line);
+            mDeferredInterrupts.erase(mDeferredInterrupts.begin() + static_cast<isize>(i) - 1);
+        }
+    }
+    for (IopHardTimer& timer : mHardTimers) {
+        if (!timer.running || timer.handler == 0 || timer.compare == 0 ||
+            mCycles < timer.nextFire) {
+            continue;
+        }
+        timer.nextFire += timer.compare;
+        mPendingHandlers.push_back({timer.handler, timer.argument, timer.gp});
+    }
+
+    bool woke = false;
+    for (usize i = 0; i < mThreads.size(); ++i) {
+        const IopThread& thread = mThreads[i];
+        if (thread.allocated && thread.status == iopstatus::kWait &&
+            thread.wait == IopWait::Delay && mCycles >= thread.waitDeadline) {
+            readyThread(i);
+            woke = true;
+        }
+    }
+    // Every thread was blocked, so there is no current one to hand back to.
+    if (woke) {
+        reschedule();
+    }
+}
+
 void IopKernel::raiseVblank() {
     for (usize i = 0; i < mThreads.size(); ++i) {
         const IopThread& thread = mThreads[i];
@@ -1635,25 +1749,179 @@ void IopKernel::raiseVblank() {
     }
 }
 
+// TIMEMANI: AllocHardTimer @ 0x90
+void IopKernel::allocHardTimer() {
+    for (u32 i = 0; i < kHardTimers; ++i) {
+        if (!mHardTimers[i].allocated) {
+            mHardTimers[i] = {};
+            mHardTimers[i].allocated = true;
+            returnValue((i + 1) << 28);
+            return;
+        }
+    }
+    returnValue(0);
+}
+
+IopHardTimer* IopKernel::hardTimerFor(u32 timid) {
+    const u32 index = (timid >> 28) - 1;
+    if (index >= kHardTimers || !mHardTimers[index].allocated) {
+        return nullptr;
+    }
+    return &mHardTimers[index];
+}
+
+// TIMEMANI: FreeHardTimer @ 0x3b0
+void IopKernel::freeHardTimer() {
+    IopHardTimer* timer = hardTimerFor(argument(0));
+    if (timer != nullptr) {
+        *timer = {};
+    }
+    returnValue(0);
+}
+
+// TIMEMANI: SetTimerHandler @ 0x6f0. The handler is a function in the module
+// that registers it, so it needs that module's gp to reach its own data.
+void IopKernel::setTimerHandler() {
+    IopHardTimer* timer = hardTimerFor(argument(0));
+    if (timer == nullptr) {
+        returnValue(kIllegalIntrCode);
+        return;
+    }
+    timer->compare = argument(1);
+    timer->handler = argument(2);
+    timer->argument = argument(3);
+    timer->gp = mIop.cpu.gpr[reg::gp];
+    returnValue(0);
+}
+
+void IopKernel::setupHardTimer() {
+    returnValue(hardTimerFor(argument(0)) == nullptr ? kIllegalIntrCode : 0);
+}
+
+void IopKernel::startHardTimer() {
+    IopHardTimer* timer = hardTimerFor(argument(0));
+    if (timer != nullptr) {
+        timer->running = true;
+        timer->nextFire = mCycles + timer->compare;
+    }
+    returnValue(0);
+}
+
+// INTRMANI: IntrDispatch @ 0xe08 runs the handler a line was registered with.
+// A line nothing claimed is not an error; the hardware raises it regardless.
+void IopKernel::raiseInterrupt(u32 line) {
+    if (line >= std::size(mInterrupts) || mInterrupts[line].handler == 0) {
+        return;
+    }
+    const Interrupt& claimed = mInterrupts[line];
+    mPendingHandlers.push_back({claimed.handler, claimed.argument, claimed.gp});
+}
+
+// Hardware finishes a transfer when the data has moved, not when the register
+// is written, and a driver that refills on the interrupt runs at that pace.
+void IopKernel::raiseInterruptAfter(u32 line, u64 cycles) {
+    mDeferredInterrupts.emplace_back(mCycles + cycles, line);
+}
+
+std::vector<IopHandlerCall> IopKernel::takePendingHandlers() {
+    return std::exchange(mPendingHandlers, {});
+}
+
+void IopKernel::stopHardTimer() {
+    IopHardTimer* timer = hardTimerFor(argument(0));
+    if (timer != nullptr) {
+        timer->running = false;
+    }
+    returnValue(0);
+}
+
 // LIBSD: sceSdInit @ 0x1428. There is no SPU2, so the calls below take what a
 // caller writes and report that the hardware accepted it.
 void IopKernel::sdInit() {
     returnValue(0);
 }
 
+void IopKernel::sdAccepted() {
+    returnValue(0);
+}
+
 // LIBSD: sceSdSetParam @ 0x3160
 void IopKernel::sdSetParam() {
+    mSdParams[argument(0)] = argument(1);
     returnValue(0);
 }
 
 // LIBSD: sceSdGetParam @ 0x31bc
 void IopKernel::sdGetParam() {
+    returnValue(readRegister(mSdParams, argument(0)));
+}
+
+// LIBSD: sceSdSetSwitch @ 0x3a5c
+void IopKernel::sdSetSwitch() {
+    mSdSwitches[argument(0)] = argument(1);
     returnValue(0);
 }
 
-// LIBSD: sceSdSetCoreAttr @ 0x3768
+// LIBSD: sceSdGetSwitch @ 0x3a94
+void IopKernel::sdGetSwitch() {
+    returnValue(readRegister(mSdSwitches, argument(0)));
+}
+
+// LIBSD: sceSdSetAddr @ 0x3acc
+void IopKernel::sdSetAddr() {
+    mSdAddresses[argument(0)] = argument(1);
+    returnValue(0);
+}
+
+// LIBSD: sceSdGetAddr @ 0x3b30
+void IopKernel::sdGetAddr() {
+    returnValue(readRegister(mSdAddresses, argument(0)));
+}
+
+// LIBSD: sceSdSetCoreAttr @ 0x3fec
 void IopKernel::sdSetCoreAttr() {
+    mSdCoreAttrs[argument(0)] = argument(1);
     returnValue(argument(1));
+}
+
+// LIBSD: sceSdGetCoreAttr @ 0x40a0
+void IopKernel::sdGetCoreAttr() {
+    returnValue(readRegister(mSdCoreAttrs, argument(0)));
+}
+
+// LIBSD: sceSdNote2Pitch @ 0x3bd0 and sceSdPitch2Note @ 0x3ce4. Nothing here
+// plays a note, and no caller branches on the answer.
+void IopKernel::sdConvertPitch() {
+    returnValue(0);
+}
+
+// LIBSD: sceSdProcBatch @ 0x33fc and sceSdProcBatchEx @ 0x35e8, which report
+// how many of the batch they applied.
+void IopKernel::sdProcBatch() {
+    returnValue(argument(1));
+}
+
+// LIBSD: sceSdSetEffectAttr @ 0xc2c
+void IopKernel::sdSetEffectAttr() {
+    returnValue(0);
+}
+
+// LIBSD: sceSdGetEffectAttr @ 0xbbc
+void IopKernel::sdGetEffectAttr() {
+    returnValue(0);
+}
+
+// LIBSD: sceSdClearEffectWorkArea @ 0x660
+void IopKernel::sdClearEffectWorkArea() {
+    returnValue(0);
+}
+
+// LIBSD: sceSdSetSpu2IntrHandler @ 0x41e0
+void IopKernel::sdSetSpu2IntrHandler() {
+    const u32 previous = mSpu2IntrHandler;
+    mSpu2IntrHandler = argument(0);
+    mSpu2IntrArgument = argument(1);
+    returnValue(previous);
 }
 
 // LIBSD: sceSdVoiceTrans @ 0x14f0

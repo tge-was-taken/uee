@@ -43,6 +43,8 @@ constexpr u32 kMachinePsMode = 0x8000;
 // KERNEL: SifSetDChain @ 0x8000c8b0 answers with the SIF0 channel control it left.
 constexpr u32 kSifDChainResult = 0x184;
 
+// A queued call that never runs stops every interrupt behind it.
+constexpr u32 kHeldCallsReported = 100000;
 constexpr u32 kGsImrRegister = 0x12001010;
 constexpr s32 kDeci2Call = 124;
 // KERNEL: Deci2CallHandler @ 0x8000ecc8 sends this one to KttyCall.
@@ -135,8 +137,8 @@ SyscallResult Kernel::handleSyscall() {
     const s32 raw = static_cast<s32>(static_cast<u32>(mContext.cpu.gpr[kSyscallRegister].lo));
     // The sign selects interrupt context, where there is no saved context to
     // switch away from, so those variants must not reschedule.
-    const bool interruptContext = raw < 0;
     const s32 number = raw < 0 ? -raw : raw;
+    const bool interruptContext = raw < 0 || isInterruptSyscall(number);
 
     // SyscallHandler jumps to the DECI2 manager on a positive 124 without ever
     // indexing the table.
@@ -1270,10 +1272,14 @@ s32 Kernel::enableDmac(u32 channel, bool enable) {
 // chain, so only what the chain itself raises reaches the check on the way out.
 void Kernel::queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32 cause) {
     mThreads.clearReschedule();
+    const usize before = mPendingCalls.size();
     for (const IntrHandler* handler : chain) {
         if (handler->state == handler_state::kUser && handler->func != 0) {
             mPendingCalls.push_back(GuestCall{handler->func, cause, handler->argument, 0, true});
         }
+    }
+    if (mPendingCalls.size() == before) {
+        log.trace("interrupt {} has no handler to run, {} in the chain", cause, chain.size());
     }
 }
 
@@ -1282,8 +1288,13 @@ void Kernel::queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32
 // KERNEL: InterruptHandler @ 0x800004c0
 void Kernel::deliverInterrupts() {
     if (!mPendingCalls.empty()) {
+        if (++mCallsHeld == kHeldCallsReported) {
+            log.warn("{} guest calls queued and not run, interrupts are held off",
+                     mPendingCalls.size());
+        }
         return;
     }
+    mCallsHeld = 0;
     const u32 status = mContext.cpu.cop0[cop0::kStatus];
     const bool enabled = (status & cop0::kInterruptEnable) != 0 &&
                          (status & kStatusMasterEnable) != 0 &&
@@ -1588,6 +1599,7 @@ u32 Kernel::sendSifDma(u32 transfers, u32 count) {
 }
 
 void Kernel::reportThreads() const {
+    mSif.report();
     for (usize i = 0; i < kThreadCount; ++i) {
         const ThreadControlBlock& thread = mThreads.at(i);
         if (thread.status == 0 || thread.status == status::kDormant) {

@@ -44,7 +44,7 @@ add_library(uee
     src/semaphores.cpp
     src/timers.cpp
     src/alarm.cpp
-    src/mmio.cpp
+    src/ee_mmio.cpp
     src/interrupts.cpp
     src/syscall_table.cpp
     src/sbus.cpp
@@ -66,6 +66,9 @@ add_library(uee
     src/hooks.cpp
     src/idle.cpp
     src/iop_rpc.cpp
+    src/adpcm.cpp
+    src/iop_mmio.cpp
+    src/sio2.cpp
     src/iop_interpreter.cpp
     src/iop_kernel.cpp
     src/iop_translate.cpp

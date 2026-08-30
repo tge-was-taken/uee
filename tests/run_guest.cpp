@@ -6,6 +6,7 @@
 #include "kernel.h"
 #include "memory.h"
 #include "run.h"
+#include "wav_sink.h"
 
 #include <cstdio>
 #include <format>
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -93,6 +95,24 @@ int main(int argc, char** argv) {
         kernel.symbols().load(std::filesystem::path(argv[1]).filename().string(), 0,
                               0xFFFFFFFFu);
     }
+
+    std::optional<uee::WavSink> audio;
+    if (const char* path = std::getenv("UEE_AUDIO")) {
+        // A transfer carries one core's sample upload, not the mix the hardware
+        // would play, so this is a single channel until voices are mixed.
+        audio.emplace(path, uee::kSpuSampleRate, 1);
+        if (!audio->isOpen()) {
+            log.fatal("cannot write audio to {}", path);
+            return 2;
+        }
+        kernel.attachAudio(&*audio);
+        log.info("writing audio to {}", path);
+    }
+
+    struct IdlePad : uee::PadSource {
+        u16 buttons() override { return 0xFFFF; }
+    } pad;
+    kernel.attachPad(&pad);
 
     if (const char* hooks = std::getenv("UEE_HOOKS")) {
         kernel.hooks().watch(kernel.symbols(), hooks);

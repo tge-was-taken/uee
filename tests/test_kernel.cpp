@@ -1,3 +1,4 @@
+#include "adpcm.h"
 #include "alarm.h"
 #include "gif.h"
 #include "gs.h"
@@ -10,6 +11,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <vector>
 
 namespace {
@@ -427,6 +429,55 @@ void checkGsHoldsFinishUntilTheScanlineIsOut() {
     checkEqual(gs.csr() & 2u, static_cast<u64>(2), "a scanline later it is");
 }
 
+// A block of zero nibbles with no filter decodes to silence whatever the shift.
+void checkAdpcmDecodesAFlatBlock() {
+    std::vector<u8> block(uee::kAdpcmBlockBytes, 0);
+    uee::AdpcmState state;
+    std::vector<s16> out;
+    uee::decodeAdpcm(block, state, out);
+    checkEqual(out.size(), uee::kAdpcmBlockSamples, "a block decodes 28 samples");
+    check(std::all_of(out.begin(), out.end(), [](s16 s) { return s == 0; }),
+          "zero nibbles decode to silence");
+}
+
+void checkAdpcmShiftScalesTheNibble() {
+    std::vector<u8> block(uee::kAdpcmBlockBytes, 0);
+    block[0] = 0x04;
+    block[2] = 0x01;
+    uee::AdpcmState state;
+    std::vector<s16> out;
+    uee::decodeAdpcm(block, state, out);
+    checkEqual(out[0], static_cast<s16>(1 << 12 >> 4), "the nibble shifts by the block's shift");
+}
+
+// Filter 1 carries 60/64 of the previous sample into the next.
+void checkAdpcmFilterFollowsThePreviousSamples() {
+    std::vector<u8> block(uee::kAdpcmBlockBytes, 0);
+    block[0] = 0x10;
+    uee::AdpcmState state{1024, 0};
+    std::vector<s16> out;
+    uee::decodeAdpcm(block, state, out);
+    checkEqual(out[0], static_cast<s16>(1024 * 60 / 64), "filter one weights the previous sample");
+}
+
+void checkAdpcmCarriesStateAcrossBlocks() {
+    std::vector<u8> block(uee::kAdpcmBlockBytes, 0);
+    block[0] = 0x04;
+    block[2] = 0x01;
+    uee::AdpcmState state;
+    std::vector<s16> first;
+    uee::decodeAdpcm(block, state, first);
+    check(state.previous == first.back(), "the state ends on the last sample decoded");
+}
+
+void checkAdpcmIgnoresAPartialBlock() {
+    std::vector<u8> partial(uee::kAdpcmBlockBytes - 1, 0);
+    uee::AdpcmState state;
+    std::vector<s16> out;
+    uee::decodeAdpcm(partial, state, out);
+    check(out.empty(), "a block short of its bytes decodes nothing");
+}
+
 void checkGsCsrClearsOnWritingOne() {
     uee::Gs gs;
     gs.raiseFinish();
@@ -469,6 +520,11 @@ int main() {
     checkImageCountsQuadwordsNotRegisters();
     checkGsHoldsFinishUntilTheScanlineIsOut();
     checkGsCsrClearsOnWritingOne();
+    checkAdpcmDecodesAFlatBlock();
+    checkAdpcmShiftScalesTheNibble();
+    checkAdpcmFilterFollowsThePreviousSamples();
+    checkAdpcmCarriesStateAcrossBlocks();
+    checkAdpcmIgnoresAPartialBlock();
 
     if (gFailures != 0) {
         spdlog::error("{} checks failed", gFailures);

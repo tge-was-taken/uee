@@ -51,7 +51,10 @@ inline int runIop(int argc, char** argv, TranslatedIrx* translated) {
                        translated != nullptr ? std::span<TranslatedIrx* const>(active)
                                              : std::span<TranslatedIrx* const>{}};
     const Symbols symbols;
-    const Stop stop = run(machine, kInstructionLimit, symbols);
+    Stop stop = IopScheduler(machine, symbols).run(kInstructionLimit);
+    if (stop.reason == StopReason::Returned) {
+        stop.reason = StopReason::Exited;
+    }
     const std::string& actual = console;
     const std::vector<u8> expectedBytes = readFile(argv[2]);
     const std::string expected(expectedBytes.begin(), expectedBytes.end());

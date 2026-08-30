@@ -14,7 +14,7 @@ constexpr u32 kSamples = 256;
 Idle::Idle(std::string processor, const Symbols& symbols)
     : mSymbols(symbols), mProcessor(std::move(processor)) {}
 
-void Idle::sample(u32 pc) {
+bool Idle::sample(u32 pc) {
     if (mLog.tracing()) {
         mLog.trace("{} at {}", mProcessor, mSymbols.describe(pc));
     }
@@ -26,17 +26,18 @@ void Idle::sample(u32 pc) {
             mRegionCount = 0;
             mSamples = 0;
             mReported = false;
-            return;
+            return false;
         }
         mSeen[mRegionCount] = pc;
         mRegions[mRegionCount++] = region;
     }
 
     if (++mSamples < kSamples || mReported) {
-        return;
+        return false;
     }
     mReported = true;
     report();
+    return true;
 }
 
 void Idle::report() const {

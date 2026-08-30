@@ -1,7 +1,11 @@
 // SIFCMD md5 bcdaf8bead75a7362a82c95bbbf479c7, SIFMAN md5
 // 35a6ac86ca2d7ee9c5a27de8328c3267, SLUS_216.21 md5 9074ba25f5a100940ed233c9f8f675ab.
 
+#include "disc.h"
 #include "log.h"
+
+#include <algorithm>
+#include <cstring>
 #include "sif.h"
 
 
@@ -50,8 +54,26 @@ constexpr u32 kRegisterIndex = 4;
 constexpr u32 kRegisterValue = 5;
 constexpr u32 kRpcInitialisedRegister = 0;
 
+// A reply the EE never collects stops every reply behind it.
+constexpr u32 kUndeliveredReported = 20000;
 // TODO: derive real values. Above IOP RAM, so a synthesized address can never
 // be taken for one a loaded module registered.
+// SIFCMD: the reset packet's argument follows its length and mode.
+constexpr u32 kResetArgumentLength = 4;
+constexpr u32 kResetArgument = 24;
+constexpr u32 kResetArgumentLimit = 80;
+
+// A ROMDIR entry names a file, its extra info and its length.
+constexpr usize kRomdirEntryBytes = 16;
+constexpr usize kRomdirNameBytes = 10;
+constexpr usize kRomdirSize = 12;
+constexpr usize kRomdirAlignment = 16;
+
+bool isIrx(std::span<const u8> image) {
+    return image.size() > 4 && image[0] == 0x7F && image[1] == 'E' && image[2] == 'L' &&
+           image[3] == 'F';
+}
+
 constexpr u32 kCommandBuffer = 0x00019600;
 constexpr u32 kServerBase = 0x01000000;
 constexpr u32 kServerStride = 0x1000;
@@ -97,7 +119,7 @@ void Sif::handleCommand(const Transfer& command, const std::optional<Transfer>& 
     const u32 packet = command.source;
     switch (mMemory.read32(packet + kHeaderCommand * 4)) {
         case sifcmd::kResetCommand:
-            reset();
+            reset(packet);
             return;
         case sifcmd::kInitCommand:
             initialiseCommand(packet);
@@ -120,11 +142,70 @@ void Sif::handleCommand(const Transfer& command, const std::optional<Transfer>& 
     }
 }
 
-void Sif::reset() {
+// SIFCMD: the reset packet carries the argument sceSifResetIop was given, which
+// names the module set the IOP is to come back up with.
+void Sif::reset(u32 packet) {
     mRebooting = true;
     mEeCommandBuffer = 0;
     mBound.clear();
     mPending.clear();
+
+    const u32 length = std::min(mMemory.read32(packet + kResetArgumentLength * 4), kResetArgumentLimit);
+    std::string argument;
+    for (u32 i = 0; i < length; ++i) {
+        const char letter = static_cast<char>(mMemory.read8(packet + kResetArgument + i));
+        if (letter == '\0') {
+            break;
+        }
+        argument.push_back(letter);
+    }
+    log.trace("sceSifResetIop({})", argument);
+    loadRebootImage(argument);
+}
+
+// The image is a ROMDIR archive: a directory of fixed size entries, then each
+// file in turn padded to the entry alignment. Only the modules are wanted, and
+// Iop::loadModule leaves the ones this runtime answers for alone.
+void Sif::loadRebootImage(const std::string& argument) {
+    const usize named = argument.rfind("cdrom0:");
+    if (mDisc == nullptr || named == std::string::npos) {
+        return;
+    }
+    std::string path = argument.substr(named + std::strlen("cdrom0:"));
+    path.resize(std::min(path.find(';'), path.size()));
+    const std::optional<DiscFile> file = mDisc->find(path);
+    if (!file) {
+        log.stub("the reboot image {} is not on the disc", path);
+        return;
+    }
+
+    std::vector<u8> image;
+    const u32 sectors = (file->size + kSectorBytes - 1) / kSectorBytes;
+    if (!mDisc->read(file->sector, sectors, image)) {
+        log.stub("the reboot image {} could not be read", path);
+        return;
+    }
+
+    usize data = 0;
+    usize loaded = 0;
+    for (usize entry = 0; entry + kRomdirEntryBytes <= image.size(); entry += kRomdirEntryBytes) {
+        std::string name(reinterpret_cast<const char*>(&image[entry]), kRomdirNameBytes);
+        name.resize(std::min(name.find('\0'), name.size()));
+        if (name.empty()) {
+            break;
+        }
+        const u32 size = static_cast<u32>(image[entry + kRomdirSize]) |
+                         static_cast<u32>(image[entry + kRomdirSize + 1]) << 8 |
+                         static_cast<u32>(image[entry + kRomdirSize + 2]) << 16 |
+                         static_cast<u32>(image[entry + kRomdirSize + 3]) << 24;
+        const usize aligned = (size + kRomdirAlignment - 1) & ~(kRomdirAlignment - 1);
+        if (data + size <= image.size() && isIrx(std::span(image).subspan(data, size))) {
+            mIop.loadModule(name, std::span(image).subspan(data, size));
+            ++loaded;
+        }
+        data += aligned;
+    }
+    log.info("{} carries {} modules", path, loaded);
 }
 
 // SIFCMD: sifcmd_SifInitCmd @ 0x2c8
@@ -216,6 +297,7 @@ void Sif::callServer(u32 packet, const std::optional<Transfer>& payload) {
         reportOnce(serverId, number);
     }
     const s32 result = server == nullptr ? -1 : server->call(serverId, call);
+    log.trace("SifExecRequest({:08x}, {}) answered {}", serverId, number, result);
     if (receiveSize >= 4) {
         mMemory.write32(receive, static_cast<u32>(result));
     }
@@ -260,6 +342,11 @@ void Sif::send(std::vector<u32> packet) {
     mPending.push_back(std::move(packet));
 }
 
+void Sif::report() const {
+    log.info("{} replies queued, buffer {:08x} holds {:08x}", mPending.size(), mEeCommandBuffer,
+             mEeCommandBuffer == 0 ? 0 : mMemory.read32(mEeCommandBuffer));
+}
+
 bool Sif::advance() {
     // SLUS-216.21: sceSifResetIop @ 0x50c848 clears BOOTEND before it sends the
     // reset and SIFINIT and CMDINIT on the two instructions after, so reporting
@@ -282,8 +369,13 @@ bool Sif::advance() {
     }
     // SLUS-216.21: sceSifCmdIntrHdlr @ 0x5066b0 clears this word once it takes a packet.
     if (mMemory.read32(mEeCommandBuffer) != 0) {
+        if (++mUndelivered == kUndeliveredReported) {
+            log.warn("{} replies waiting on a packet the EE has not taken from {:08x}",
+                     mPending.size(), mEeCommandBuffer);
+        }
         return false;
     }
+    mUndelivered = 0;
     const std::vector<u32>& packet = mPending.front();
     for (usize i = 0; i < packet.size(); ++i) {
         mMemory.write32(mEeCommandBuffer + static_cast<u32>(i) * 4, packet[i]);
