@@ -61,6 +61,7 @@ public:
     // What the EE asks for through the FILEIO heap server, which is the same
     // pool sysmem hands to the modules loaded here.
     u32 allocateMemory(u32 size);
+    u32 allocateMemory(u32 mode, u32 size, u32 address);
     bool freeMemory(u32 address);
 
     // Releases what WaitVblankEnd parked, which is the only clock the modules
@@ -111,7 +112,7 @@ private:
         bool used = false;
     };
 
-    u32 allocateBlock(u32 mode, u32 size);
+    u32 allocateBlock(u32 mode, u32 size, u32 wanted);
     bool freeBlock(u32 address);
     std::vector<Block>::iterator blockAt(u32 address);
     std::vector<Block>::iterator blockContaining(u32 address);

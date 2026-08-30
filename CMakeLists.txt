@@ -287,3 +287,8 @@ if(EE_GCC AND EXISTS "${PS2SDK}/ee/startup/linkfile")
 else()
     message(STATUS "guest tests skipped: EE_GCC=${EE_GCC} PS2SDK=${PS2SDK}")
 endif()
+
+# Not in the repository: an optional frontend based on sky2hook.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/frontends/sky2hook)
+    add_subdirectory(frontends/sky2hook)
+endif()

@@ -51,7 +51,7 @@ Step stopAt(R5900& cpu, Stop stop) {
 Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) {
     R5900& cpu = interpreter.ee.cpu;
     const Instruction insn{memory.read32(pc)};
-    if (auto address = memory.fault()) {
+    if (auto address = memory.takeFault()) {
         return stopAt(cpu, {StopReason::UnmappedAccess, pc,
                             std::format("fetch from {:08x}", *address)});
     }
@@ -76,7 +76,7 @@ Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) 
             return stopAt(cpu, {StopReason::Undecodable, pc, std::format("{:08x}", insn.word)});
     }
 
-    if (auto address = memory.fault()) {
+    if (auto address = memory.takeFault()) {
         return stopAt(cpu, {StopReason::UnmappedAccess, pc,
                             std::format("{} touched {:08x}", insn, *address)});
     }
@@ -239,7 +239,7 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
         }
 
         if (machine.functions != nullptr && machine.functions(machine, cpu.pc)) {
-            if (auto address = memory.fault()) {
+            if (auto address = memory.takeFault()) {
                 return Stop{StopReason::UnmappedAccess, cpu.pc,
                             std::format("touched {:08x}", *address)};
             }
@@ -251,6 +251,10 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
         kernel.countExecuted(1);
         kernel.advanceClock();
         kernel.deliverInterrupts();
+        if (machine.stopRequest != nullptr && (kernel.executed() & kIdleInterval) == 0 &&
+            machine.stopRequest->isStopRequested()) {
+            return Stop{StopReason::Stopped, cpu.pc, {}};
+        }
         if (idle != nullptr && (kernel.executed() & kIdleInterval) == 0) {
             progress->sample(kernel.executed());
             if (idle->sample(cpu.pc)) {
@@ -266,6 +270,10 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
         }
 
         const u32 pc = cpu.pc;
+        if (machine.calls != nullptr && machine.calls->isHooked(pc) &&
+            machine.calls->enter(interpreter.ee)) {
+            continue;
+        }
         if (!kernel.hooks().empty()) {
             kernel.hooks().enter(memory, pc, static_cast<u32>(cpu.gpr[4].lo),
                                  static_cast<u32>(cpu.gpr[5].lo), static_cast<u32>(cpu.gpr[6].lo),
@@ -369,6 +377,7 @@ std::string_view nameOf(StopReason reason) {
         case StopReason::UnmappedAccess: return "unmapped access";
         case StopReason::Deadlocked: return "every thread is blocked";
         case StopReason::WentIdle: return "the processor went idle with nothing left to wake it";
+        case StopReason::Stopped: return "the host stopped the run";
     }
     return "unknown";
 }

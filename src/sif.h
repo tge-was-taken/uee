@@ -70,6 +70,7 @@ private:
     };
 
     Transfer readTransfer(u32 address) const;
+    void sendToIop(const Transfer& transfer);
     void handleCommand(const Transfer& command, const std::optional<Transfer>& payload);
     void reset(u32 packet);
     void loadRebootImage(const std::string& argument);

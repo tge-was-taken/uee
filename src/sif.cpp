@@ -102,12 +102,28 @@ Sif::Transfer Sif::readTransfer(u32 address) const {
 }
 
 // SIFMAN: sifman_SifSetDma @ 0x740
+// A transfer without the interrupt attribute carries data rather than a
+// command. It still lands in the other memory, and the command after it, if
+// there is one, names what to do with what arrived.
+void Sif::sendToIop(const Transfer& transfer) {
+    if (transfer.destination >= kIopRamSize || transfer.size == 0) {
+        return;
+    }
+    log.trace("dma {:08x} to {:08x}, {} bytes", transfer.source, transfer.destination,
+              transfer.size);
+    Memory& iopMemory = mIop.memory();
+    for (u32 i = 0; i < transfer.size; ++i) {
+        iopMemory.write8(transfer.destination + i, mMemory.read8(transfer.source + i));
+    }
+}
+
 void Sif::receive(u32 transfers, u32 count) {
     std::optional<Transfer> payload;
     for (u32 i = 0; i < count; ++i) {
         const Transfer transfer = readTransfer(transfers + i * kTransferSize);
         if ((transfer.attribute & kInterruptOnSend) == 0) {
             payload = transfer;
+            sendToIop(transfer);
             continue;
         }
         handleCommand(transfer, payload);

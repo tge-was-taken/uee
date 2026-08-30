@@ -22,6 +22,7 @@ enum class StopReason {
     UnmappedAccess,
     Deadlocked,
     WentIdle,
+    Stopped,
 };
 
 struct Stop {
@@ -31,5 +32,14 @@ struct Stop {
 };
 
 std::string describe(const Stop& stop);
+
+// Asked between batches of instructions whether the guest should carry on, for
+// a host that ends the run from another thread.
+class StopRequest {
+public:
+    virtual ~StopRequest() = default;
+
+    virtual bool isStopRequested() = 0;
+};
 
 }  // namespace uee

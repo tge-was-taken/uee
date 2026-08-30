@@ -1,5 +1,6 @@
 #pragma once
 
+#include "call_hooks.h"
 #include "elf.h"
 #include "translator.h"
 #include "interpreter.h"
@@ -23,6 +24,8 @@ struct Machine {
     Memory& memory;
     Kernel& kernel;
     FunctionRunner functions = nullptr;
+    CallHooks* calls = nullptr;
+    StopRequest* stopRequest = nullptr;
 
     EeContext& ee() const { return interpreter.ee; }
     Vu& vu1() const { return interpreter.vu1; }

@@ -683,10 +683,10 @@ std::vector<IopKernel::Block>::iterator IopKernel::blockContaining(u32 address) 
 
 // SYSMEM: AllocSysMemory @ 0x2ec
 void IopKernel::allocSysMemory() {
-    returnValue(allocateBlock(argument(0), argument(1)));
+    returnValue(allocateBlock(argument(0), argument(1), argument(2)));
 }
 
-u32 IopKernel::allocateBlock(u32 mode, u32 requested) {
+u32 IopKernel::allocateBlock(u32 mode, u32 requested, u32 wanted) {
     const u32 size = (requested + kBlockAlignment - 1) & ~(kBlockAlignment - 1);
     if (mode > kAllocAddress || size == 0) {
         return 0;
@@ -697,7 +697,7 @@ u32 IopKernel::allocateBlock(u32 mode, u32 requested) {
         if (block->used || block->size < size) {
             continue;
         }
-        if (mode == kAllocAddress && block->start > argument(2)) {
+        if (mode == kAllocAddress && block->start > wanted) {
             continue;
         }
         if (chosen == mBlocks.end() || mode != kAllocFirst) {
@@ -1147,7 +1147,7 @@ void IopKernel::createThread() {
     }
 
     const u32 rounded = (stackSize + kBlockAlignment - 1) & ~(kBlockAlignment - 1);
-    const u32 stack = allocateBlock(kAllocLast, rounded);
+    const u32 stack = allocateBlock(kAllocLast, rounded, 0);
     if (stack == 0) {
         returnValue(kNoMemory);
         return;
@@ -1740,7 +1740,11 @@ void IopKernel::waitVblankEnd() {
 }
 
 u32 IopKernel::allocateMemory(u32 size) {
-    return allocateBlock(kAllocFirst, size);
+    return allocateBlock(kAllocFirst, size, 0);
+}
+
+u32 IopKernel::allocateMemory(u32 mode, u32 size, u32 address) {
+    return allocateBlock(mode, size, address);
 }
 
 bool IopKernel::freeMemory(u32 address) {

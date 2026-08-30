@@ -26,6 +26,10 @@ public:
     s32 call(u32 serverId, const RpcCall& call) override;
 
 private:
+    s32 allocate(u32 argument);
+    s32 allocateSystem(u32 argument);
+    s32 free(u32 argument);
+
     s32 open(u32 argument);
     s32 close(u32 argument);
     s32 read(u32 argument);

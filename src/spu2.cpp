@@ -6,11 +6,14 @@
 #include "spu2.h"
 
 #include "adpcm.h"
+#include "log.h"
 
 #include <algorithm>
 
 namespace uee {
 namespace {
+
+LoggerChannel log("spu2");
 
 // LIBSD keeps the register addresses in a table at 0x4ca0 and reaches them with
 // sceSdSetParam @ 0x39a0 and sceSdSetAddr @ 0x3acc: a core every 0x400, a
@@ -260,6 +263,7 @@ void Spu2::receive(u32 core, std::span<const u8> bytes) {
 // A voice starts from the address in its SSAH/L register, and the loop address
 // it had is forgotten.
 void Spu2::keyOn(Core& core, u32 voices) {
+    log.trace("key on {:06x}", voices);
     for (u32 i = 0; i < kVoices; ++i) {
         if ((voices & (1u << i)) != 0) {
             startVoice(core.voices[i]);
@@ -269,6 +273,7 @@ void Spu2::keyOn(Core& core, u32 voices) {
 }
 
 void Spu2::keyOff(Core& core, u32 voices) {
+    log.trace("key off {:06x}", voices);
     for (u32 i = 0; i < kVoices; ++i) {
         if ((voices & (1u << i)) != 0 && core.voices[i].phase != Phase::Off) {
             core.voices[i].phase = Phase::Release;

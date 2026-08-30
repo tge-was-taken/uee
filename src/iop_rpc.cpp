@@ -1,6 +1,13 @@
 #include "iop_rpc.h"
 
+#include "log.h"
+
 namespace uee {
+namespace {
+
+LoggerChannel log("ioprpc");
+
+}  // namespace
 
 IopRpc::IopRpc(Memory& memory, Iop& iop) : mMemory(memory), mIop(iop) {}
 
@@ -44,10 +51,19 @@ s32 IopRpc::call(u32 serverId, const RpcCall& call) {
         iopMemory.write8(call.destination + i, mMemory.read8(call.argument + i));
     }
 
+    log.trace("server {:08x} call {:x}, {} bytes in, {} out", serverId, call.number,
+              call.argumentSize, call.receiveSize);
     const u32 arguments[3] = {call.number, server->buffer, call.argumentSize};
     const u32 reply = mIop.callFunction(server->handler, server->gp, arguments);
 
-    if (reply == 0 || call.receiveSize < 4) {
+    // A handler that refuses a request answers with something that is not an
+    // address, and reading from it would fault the machine on its behalf.
+    if (reply >= kIopRamSize) {
+        log.warn("server {:08x} call {:x} answered {:08x}, which is not a reply", serverId,
+                 call.number, reply);
+        return 0;
+    }
+    if (call.receiveSize < 4) {
         return 0;
     }
     for (u32 i = 0; i < call.receiveSize; ++i) {

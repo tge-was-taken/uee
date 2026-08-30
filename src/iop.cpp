@@ -78,6 +78,17 @@ bool Iop::dispatchPendingHandlers() {
     return !pending.empty();
 }
 
+// What the processor was holding when it stopped, so a fault on a computed
+// address says which register carried it.
+void Iop::reportRegisters() const {
+    const R3000A& cpu = mInterpreter.iop.cpu;
+    std::string text;
+    for (u32 i = 1; i < 32; ++i) {
+        text += std::format("{}={:08x} ", reg::nameOf(i), cpu.gpr[i]);
+    }
+    log.info("at {} {}", mSymbols.describe(cpu.pc), text);
+}
+
 void Iop::runHandler(const IopHandlerCall& call) {
     log.trace("handler {:08x}({:08x})", call.handler, call.argument);
     const usize interrupted = mKernel.enterInterruptThread();
@@ -200,17 +211,19 @@ u32 Iop::callFunction(u32 address, u32 gp, std::span<const u32> arguments) {
         cpu.gpr[kFirstArgumentRegister + i] = arguments[i];
     }
 
-    // A call is part of the running machine, so the devices around it keep their
-    // own pace rather than being jumped forward to whatever would unblock this.
-    const Stop stop = enter(IopScheduler::Skipping::Blocked);
+    // Nothing else moves the clock while the EE is parked on a call, so a call
+    // that waits on a transfer has to be allowed to reach its completion.
+    const Stop stop = enter();
     if (stop.reason != StopReason::Exited) {
-        log.stub("iop call {:08x}({:08x}, {:08x}, {:08x}): {}", address,
+        log.stub("iop call {} ({:08x}, {:08x}, {:08x}): {}", mSymbols.describe(address),
                  arguments.size() > 0 ? arguments[0] : 0, arguments.size() > 1 ? arguments[1] : 0,
                  arguments.size() > 2 ? arguments[2] : 0, describe(stop));
+        reportRegisters();
+        mKernel.reportThreads(mSymbols);
         return 0;
     }
     const u32 result = cpu.gpr[kResultRegister];
-    settle(IopScheduler::Skipping::Blocked);
+    settle();
     return result;
 }
 

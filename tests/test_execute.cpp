@@ -396,7 +396,7 @@ int main(int argc, char** argv) {
                  ee.cpu.pc, k.pcAfter);
         }
         if (k.hasMemory) {
-            if (window.fault()) {
+            if (window.takeFault()) {
                 fail("{:08x} {}: reached outside the window at {:08x}", k.word,
                      disassemble(insn), k.window);
             }

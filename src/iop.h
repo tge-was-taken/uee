@@ -36,6 +36,9 @@ public:
     const std::vector<IopRpcServer>& rpcServers() const { return mKernel.rpcServers(); }
 
     u32 allocateMemory(u32 size) { return mKernel.allocateMemory(size); }
+    u32 allocateMemory(u32 mode, u32 size, u32 address) {
+        return mKernel.allocateMemory(mode, size, address);
+    }
     bool freeMemory(u32 address) { return mKernel.freeMemory(address); }
     void attachAudio(AudioSink* audio) { mMmio.attachAudio(audio); }
     void attachPad(PadSource* pad) { mMmio.attachPad(pad); }
@@ -44,6 +47,7 @@ public:
     void endVblank();
     void advance(u64 instructions);
     void reportThreads() const { mKernel.reportThreads(mSymbols); }
+    void reportRegisters() const;
 
     Symbols& symbols() { return mSymbols; }
 

@@ -36,7 +36,7 @@ Step stopAt(R3000A& cpu, Stop stop) {
 Step stepOnce(IopMachine& machine, u32 pc) {
     R3000A& cpu = machine.iop().cpu;
     const Instruction insn{machine.memory.read32(pc)};
-    if (auto address = machine.memory.fault()) {
+    if (auto address = machine.memory.takeFault()) {
         return stopAt(cpu, {StopReason::UnmappedAccess, pc,
                             std::format("fetch from {:08x}", *address)});
     }
@@ -58,7 +58,7 @@ Step stepOnce(IopMachine& machine, u32 pc) {
             return stopAt(cpu, {StopReason::Undecodable, pc, std::format("{:08x}", insn.word)});
     }
 
-    if (auto address = machine.memory.fault()) {
+    if (auto address = machine.memory.takeFault()) {
         return stopAt(cpu, {StopReason::UnmappedAccess, pc,
                             std::format("{} touched {:08x}", insn, *address)});
     }
@@ -93,7 +93,7 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instruc
         }
 
         if (runTranslated(machine, cpu.pc)) {
-            if (auto address = machine.memory.fault()) {
+            if (auto address = machine.memory.takeFault()) {
                 return Stop{StopReason::UnmappedAccess, cpu.pc,
                             std::format("touched {:08x}", *address)};
             }

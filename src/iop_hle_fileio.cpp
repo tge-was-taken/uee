@@ -1,4 +1,8 @@
-// FILEIO md5 edf4a7d5624cb54db0cfa518d74c9559.
+// A `FILEIO:` tag names the routine reimplemented below. A `(310)` one names
+// the build in IOPRP310.IMG instead, which is the one a game that reboots the
+// IOP with it runs:
+//   FILEIO       md5 edf4a7d5624cb54db0cfa518d74c9559
+//   FILEIO (310) md5 d84a3fa1f02e29217fac56ac1319ad64
 
 #include "log.h"
 #include "iop_hle_fileio.h"
@@ -25,9 +29,15 @@ constexpr u32 kRead = 2;
 constexpr u32 kWrite = 3;
 constexpr u32 kSeek = 4;
 
-// FILEIO: IopHeapRpcDispatch @ 0xec0
+// FILEIO (310): IopHeapRpcDispatch @ 0x27d4. The build in the BIOS answers only
+// the first three of these.
 constexpr u32 kAllocate = 1;
 constexpr u32 kFree = 2;
+constexpr u32 kAllocateSystem = 4;
+
+constexpr u32 kAllocateSize = 0;
+constexpr u32 kAllocateMode = 4;
+constexpr u32 kAllocateAddress = 8;
 
 constexpr u32 kDescriptor = 0;
 constexpr u32 kBuffer = 1;
@@ -104,17 +114,9 @@ s32 IopHleFileio::call(u32 serverId, const RpcCall& call) {
             break;
         case kIopHeap:
             switch (call.number) {
-                case kAllocate: {
-                    const u32 size = mMemory.read32(call.argument);
-                    const u32 block = mIop.allocateMemory(size);
-                    log.trace("IopHeapAlloc(size={}) = {:08x}", size, block);
-                    return static_cast<s32>(block);
-                }
-                case kFree: {
-                    const u32 block = mMemory.read32(call.argument);
-                    log.trace("IopHeapFree(block={:08x})", block);
-                    return mIop.freeMemory(block) ? 0 : -1;
-                }
+                case kAllocate: return allocate(call.argument);
+                case kAllocateSystem: return allocateSystem(call.argument);
+                case kFree: return free(call.argument);
                 default: break;
             }
             break;
@@ -122,6 +124,33 @@ s32 IopHleFileio::call(u32 serverId, const RpcCall& call) {
     }
     log.stub("{:08x} call {}", serverId, call.number);
     return -1;
+}
+
+// FILEIO (310): IopHeapAlloc @ 0x2578 asks sysmem for the size at the head of
+// the request, from the bottom of the heap.
+s32 IopHleFileio::allocate(u32 argument) {
+    const u32 size = mMemory.read32(argument + kAllocateSize);
+    const u32 block = mIop.allocateMemory(size);
+    log.trace("allocate({} bytes) = {:08x}", size, block);
+    return static_cast<s32>(block);
+}
+
+// FILEIO (310): IopHeapAllocSysMemory @ 0x25cc passes on the mode and the
+// address the request carries as well as its size.
+s32 IopHleFileio::allocateSystem(u32 argument) {
+    const u32 size = mMemory.read32(argument + kAllocateSize);
+    const u32 mode = mMemory.read32(argument + kAllocateMode);
+    const u32 wanted = mMemory.read32(argument + kAllocateAddress);
+    const u32 block = mIop.allocateMemory(mode, size, wanted);
+    log.trace("allocate({} bytes, mode {}, at {:08x}) = {:08x}", size, mode, wanted, block);
+    return static_cast<s32>(block);
+}
+
+// FILEIO (310): IopHeapFree @ 0x2624
+s32 IopHleFileio::free(u32 argument) {
+    const u32 block = mMemory.read32(argument);
+    log.trace("free({:08x})", block);
+    return mIop.freeMemory(block) ? 0 : -1;
 }
 
 std::filesystem::path IopHleFileio::resolve(std::string_view path) const {

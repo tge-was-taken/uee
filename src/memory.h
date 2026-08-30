@@ -5,6 +5,7 @@
 
 #include <bit>
 #include <cstring>
+#include <span>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -72,7 +73,21 @@ public:
         }
     }
 
-    std::optional<u32> fault() const { return mFault; }
+    // Reported once: whoever turns a fault into a stop takes it, so the next
+    // access is judged on its own.
+    std::optional<u32> takeFault() { return std::exchange(mFault, std::nullopt); }
+
+    // Whole region behind an address, for a reader that overlays guest structs
+    // rather than going through one access at a time. Empty when no region
+    // starts there.
+    std::span<u8> regionAt(u32 base) {
+        for (Region& candidate : mRegions) {
+            if (candidate.base == base) {
+                return candidate.bytes;
+            }
+        }
+        return {};
+    }
 
     std::optional<u8> peek8(u32 address) const {
         const u8* p = find(address, 1);

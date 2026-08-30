@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 
 namespace uee {
 namespace {
@@ -73,7 +74,10 @@ bool namesMatch(const std::string& wanted, const u8* name, u32 length) {
 
 }  // namespace
 
-Disc::Disc(const std::string& path) : mFile(std::fopen(path.c_str(), "rb")) {}
+// Opening a directory succeeds and every read of it then fails, which looks
+// like a disc with nothing on it rather than no disc.
+Disc::Disc(const std::string& path)
+    : mFile(std::filesystem::is_regular_file(path) ? std::fopen(path.c_str(), "rb") : nullptr) {}
 
 Disc::~Disc() {
     if (mFile != nullptr) {

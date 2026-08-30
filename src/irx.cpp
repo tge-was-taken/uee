@@ -279,7 +279,7 @@ IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base,
     relocate(memory, base, sections, image);
     // A write outside memory is dropped, so without this the module would run
     // with whatever was already there.
-    if (const std::optional<u32> address = memory.fault()) {
+    if (const std::optional<u32> address = memory.takeFault()) {
         throw std::runtime_error(std::format(
             "the module reaches {:08x}, which is not mapped, so it cannot be loaded at {:08x}",
             *address, base));
