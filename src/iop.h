@@ -39,6 +39,7 @@ public:
     bool freeMemory(u32 address) { return mKernel.freeMemory(address); }
     void attachAudio(AudioSink* audio) { mMmio.attachAudio(audio); }
     void attachPad(PadSource* pad) { mMmio.attachPad(pad); }
+    void attachCard(CardStorage* card) { mMmio.attachCard(card); }
     void startVblank();
     void endVblank();
     void advance(u64 instructions);

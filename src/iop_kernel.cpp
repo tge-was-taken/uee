@@ -224,6 +224,7 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"loadcore", 27, "SetRebootTimeLibraryHandlingMode",
          &IopKernel::setRebootTimeLibraryHandlingMode, true},
         {"secrman", 5, "SecrSetMcDevIDHandler", &IopKernel::setMcDevIdHandler, true},
+        {"secrman", 6, "SecrAuthCard", &IopKernel::authCard},
         {"secrman", 4, "SecrSetMcCommandHandler", &IopKernel::setMcCommandHandler, true},
         {"sysmem", 14, "Kprintf", &IopKernel::kprintf},
         {"thbase", 4, "CreateThread", &IopKernel::createThread},
@@ -1085,6 +1086,13 @@ void IopKernel::startDma() {
 // what a library asks to survive one does not matter.
 void IopKernel::setRebootTimeLibraryHandlingMode() {
     returnValue(0);
+}
+
+// SECRMAN: SecrAuthCard @ 0xa4 runs the card through a challenge the console's
+// own keys answer, which is not something a card modelled here can hold, so the
+// authentication is answered rather than run.
+void IopKernel::authCard() {
+    returnValue(1);
 }
 
 // SECRMAN: SecrSetMcDevIDHandler @ 0x84

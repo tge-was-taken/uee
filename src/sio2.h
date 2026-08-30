@@ -1,6 +1,7 @@
 #pragma once
 
 #include "host.h"
+#include "card.h"
 #include "pad.h"
 #include "types.h"
 
@@ -12,20 +13,18 @@ namespace uee {
 
 class IopKernel;
 
-// SIO2MAN md5 ea22447abe3a4b56a26f3149316370a3 drives the pads and the memory
-// cards through this. Sio2TransferSubmit @ 0x1c4 fills SEND3 with one entry per
-// command, pushes the command bytes in through one FIFO, and Sio2IntrHandler @
-// 0x384 collects the answers out of the other.
+// The bus the pads and the memory cards answer on. SIO2MAN queues one command
+// per device in SEND3 and moves the bytes through the two FIFOs.
 class Sio2 {
 public:
     void attach(IopKernel& kernel) { mKernel = &kernel; }
     void attachPad(PadSource* pad) { mPads[0] = DualShock{pad}; }
+    void attachCard(CardStorage* card) { mCards[0] = MemoryCard{card}; }
 
     std::optional<u32> read(u32 address);
     bool write(u32 address, u32 value);
 
-    // What the SIO2 DMA channels move when a module drives the FIFOs that way
-    // rather than a byte at a time.
+    // What the SIO2 DMA channels move, rather than a byte at a time.
     void writeFifoIn(std::span<const u8> bytes);
     void readFifoOut(std::span<u8> bytes);
     usize pendingOut() const { return mOut.size(); }
@@ -33,13 +32,16 @@ public:
 private:
     static constexpr usize kQueued = 16;
     static constexpr usize kPortControls = 8;
+    // Ports 0 and 1 are the controllers, 2 and 3 the card slots.
     static constexpr usize kPorts = 2;
 
     void runQueue();
-    void answerCommand(u32 port, usize length);
+    void answerCommand(u32 port, usize sent, usize clocked);
+    bool answerAsDevice(u32 port, std::span<const u8> command, std::span<u8> response);
 
     IopKernel* mKernel = nullptr;
     DualShock mPads[kPorts] = {DualShock{nullptr}, DualShock{nullptr}};
+    MemoryCard mCards[kPorts] = {MemoryCard{nullptr}, MemoryCard{nullptr}};
     u32 mSend3[kQueued] = {};
     u32 mPortControl[kPortControls] = {};
     u32 mControl = 0;

@@ -1,4 +1,5 @@
 #include "irx.h"
+#include "dmacman.h"
 #include "intrman.h"
 #include "stdio.h"
 #include "sysclib.h"
@@ -62,6 +63,11 @@ I_WaitSema
 I_PollSema
 I_ReferSemaStatus
 thsemap_IMPORTS_end
+
+dmacman_IMPORTS_start
+I_sceSetSliceDMA
+I_sceStartDMA
+dmacman_IMPORTS_end
 
 thevent_IMPORTS_start
 I_CreateEventFlag

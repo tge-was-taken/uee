@@ -174,6 +174,7 @@ private:
     void startDma();
     void setRebootTimeLibraryHandlingMode();
     void setMcDevIdHandler();
+    void authCard();
     void setMcCommandHandler();
     void kprintf();
 

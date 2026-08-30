@@ -18,22 +18,27 @@ s16 clampToSample(s32 value) {
 
 }  // namespace
 
-void decodeAdpcm(std::span<const u8> blocks, AdpcmState& state, std::vector<s16>& out) {
-    for (usize block = 0; block + kAdpcmBlockBytes <= blocks.size(); block += kAdpcmBlockBytes) {
-        const u8 header = blocks[block];
-        const u32 shift = (header & 0x0Fu) > kWidestShift ? kShiftForWider : (header & 0x0Fu);
-        const usize filter = std::min<usize>((header >> 4) & 0x07u, 4);
+void decodeAdpcmBlock(std::span<const u8> block, AdpcmState& state, std::span<s16> out) {
+    const u8 header = block[0];
+    const u32 shift = (header & 0x0Fu) > kWidestShift ? kShiftForWider : (header & 0x0Fu);
+    const usize filter = std::min<usize>((header >> 4) & 0x07u, 4);
 
-        for (usize i = 0; i < kAdpcmBlockSamples; ++i) {
-            const u8 byte = blocks[block + 2 + i / 2];
-            const u32 nibble = (i % 2 == 0) ? (byte & 0x0Fu) : (byte >> 4);
-            s32 sample = static_cast<s16>(nibble << 12) >> shift;
-            sample += (state.previous * kPrevious[filter] + state.older * kOlder[filter]) >> 6;
-            const s16 decoded = clampToSample(sample);
-            out.push_back(decoded);
-            state.older = state.previous;
-            state.previous = decoded;
-        }
+    for (usize i = 0; i < kAdpcmBlockSamples && i < out.size(); ++i) {
+        const u8 byte = block[2 + i / 2];
+        const u32 nibble = (i % 2 == 0) ? (byte & 0x0Fu) : (byte >> 4);
+        s32 sample = static_cast<s16>(nibble << 12) >> shift;
+        sample += (state.previous * kPrevious[filter] + state.older * kOlder[filter]) >> 6;
+        out[i] = clampToSample(sample);
+        state.older = state.previous;
+        state.previous = out[i];
+    }
+}
+
+void decodeAdpcm(std::span<const u8> blocks, AdpcmState& state, std::vector<s16>& out) {
+    s16 samples[kAdpcmBlockSamples] = {};
+    for (usize block = 0; block + kAdpcmBlockBytes <= blocks.size(); block += kAdpcmBlockBytes) {
+        decodeAdpcmBlock(blocks.subspan(block, kAdpcmBlockBytes), state, samples);
+        out.insert(out.end(), std::begin(samples), std::end(samples));
     }
 }
 

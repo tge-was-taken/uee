@@ -1,9 +1,9 @@
 #pragma once
 
-#include "adpcm.h"
 #include "host.h"
 #include "memory.h"
 #include "sio2.h"
+#include "spu2.h"
 #include "mmio.h"
 #include "types.h"
 
@@ -18,6 +18,10 @@ public:
     void attach(Memory& memory, IopKernel& kernel);
     void attachAudio(AudioSink* audio) { mAudio = audio; }
     void attachPad(PadSource* pad) { mSio2.attachPad(pad); }
+    void attachCard(CardStorage* card) { mSio2.attachCard(card); }
+
+    // The mixer runs off the same clock the transfers are paced by.
+    void advance(u64 cycles);
 
     std::span<const MmioSegment> segments() const override {
         static constexpr MmioSegment kSegments[] = {{kIopHardwareBase, kIopHardwareSize},
@@ -42,7 +46,7 @@ private:
     };
 
     void startTransfer(DmaChannel& channel);
-    void sendToAudio(const DmaChannel& channel, u32 words);
+    void sendToSoundMemory(const DmaChannel& channel, u32 words);
     void writeToSio2(const DmaChannel& channel, u32 bytes);
     void readFromSio2();
 
@@ -50,17 +54,16 @@ private:
     const DmaChannel* channelFor(u32 address) const;
 
     Sio2 mSio2;
+    Spu2 mSpu2;
     AudioSink* mAudio = nullptr;
-    AdpcmState mAdpcm;
+    u64 mAudioCycles = 0;
     Memory* mMemory = nullptr;
     IopKernel* mKernel = nullptr;
 
-    // LIBSD md5 7e79d40b99f8d87a5084188956550cd5 drives one channel per SPU2
-    // core and waits on that channel's interrupt line.
+    // LIBSD drives one channel per SPU2 core and waits on its interrupt.
     DmaChannel mSpuChannels[2] = {{0x1F8010C0, 36}, {0x1F801500, 40}};
 
-    // SIO2MAN md5 ea22447abe3a4b56a26f3149316370a3 moves its FIFOs with these
-    // two and waits on the SIO2 interrupt, so neither carries a line of its own.
+    // SIO2MAN waits on the SIO2 interrupt instead, so these carry no line.
     DmaChannel mSio2Write{0x1F801540};
     DmaChannel mSio2Read{0x1F801550};
 };

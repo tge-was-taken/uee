@@ -1,9 +1,11 @@
 #include "iop_mmio.h"
 
+#include "adpcm.h"
 #include "iop_kernel.h"
 #include "timers.h"
 #include "log.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace uee {
@@ -26,14 +28,12 @@ constexpr u64 samplesIn(u32 words) {
     return static_cast<u64>(words) * 4 / kAdpcmBlockBytes * kAdpcmBlockSamples;
 }
 
-// SIO2MAN md5 ea22447abe3a4b56a26f3149316370a3 drives the pads and cards here.
+// How many frames are rendered at once, so a slice of guest time costs one call
+// into the sink rather than one per sample.
+constexpr usize kRenderFrames = 256;
+
 constexpr u32 kSio2Base = 0x1F808200;
 constexpr u32 kSio2Size = 0x100;
-
-constexpr u32 kCoreStride = 0x400;
-constexpr u32 kCore0Statx = kSpu2Base + 0x344;
-constexpr u32 kCore1Statx = kCore0Statx + kCoreStride;
-constexpr u16 kTransferReady = 0x0080;
 
 }  // namespace
 
@@ -58,10 +58,9 @@ const IopMmio::DmaChannel* IopMmio::channelFor(u32 address) const {
     return const_cast<IopMmio*>(this)->channelFor(address);
 }
 
-// LIBSD: SpuInitCores @ 0x29ec waits on bit 7 of STATX before it touches a core
 std::optional<u16> IopMmio::readHalf(u32 address) const {
-    if (address == kCore0Statx || address == kCore1Statx) {
-        return kTransferReady;
+    if (address - kSpu2Base < kSpu2Size) {
+        return mSpu2.readHalf(address - kSpu2Base);
     }
     const DmaChannel* channel = channelFor(address);
     if (channel == nullptr) {
@@ -95,6 +94,9 @@ bool IopMmio::writeByte(u32 address, u8 value) {
 // LIBSD programs the channel a halfword at a time, so the word the start bit
 // arrives in has to be rebuilt from the half already there.
 bool IopMmio::writeHalf(u32 address, u16 value) {
+    if (address - kSpu2Base < kSpu2Size) {
+        return mSpu2.writeHalf(address - kSpu2Base, value);
+    }
     DmaChannel* channel = channelFor(address);
     if (channel == nullptr) {
         return false;
@@ -125,26 +127,39 @@ std::optional<u32> IopMmio::readWord(u32 address) const {
     }
 }
 
-void IopMmio::sendToAudio(const DmaChannel& channel, u32 words) {
-    if (mAudio == nullptr || words == 0) {
+// A transfer moves waveform data into the sound processor's own memory, at the
+// address the core's transfer register names.
+void IopMmio::sendToSoundMemory(const DmaChannel& channel, u32 words) {
+    std::vector<u8> bytes(static_cast<usize>(words) * 4);
+    for (usize i = 0; i < bytes.size(); ++i) {
+        bytes[i] = mMemory->read8(channel.madr + static_cast<u32>(i));
+    }
+    mSpu2.receive(&channel == &mSpuChannels[0] ? 0 : 1, bytes);
+}
+
+void IopMmio::advance(u64 cycles) {
+    if (mAudio == nullptr) {
         return;
     }
-    std::vector<u8> blocks(static_cast<usize>(words) * 4);
-    for (usize i = 0; i < blocks.size(); ++i) {
-        blocks[i] = mMemory->read8(channel.madr + static_cast<u32>(i));
+    mAudioCycles += cycles;
+    const u64 frames = mAudioCycles / kIopCyclesPerSample;
+    mAudioCycles -= frames * kIopCyclesPerSample;
+
+    for (u64 done = 0; done < frames; done += kRenderFrames) {
+        const usize count = static_cast<usize>(std::min<u64>(kRenderFrames, frames - done));
+        std::vector<s16> stereo(count * kSpuChannels);
+        mSpu2.render(stereo);
+        mAudio->write(stereo);
     }
-    std::vector<s16> samples;
-    decodeAdpcm(blocks, mAdpcm, samples);
-    mAudio->write(samples);
 }
 
 // The device answers the queue as the start bit is written, so the channel that
 // reads it back is the one write that has to look at the device afterwards.
 void IopMmio::readFromSio2() {
-    const u32 bytes = (mSio2Read.bcr & 0xFFFF) * (mSio2Read.bcr >> 16) * 4;
-    if ((mSio2Read.chcr & kStart) == 0 || mSio2.pendingOut() < bytes) {
+    if ((mSio2Read.chcr & kStart) == 0 || mSio2.pendingOut() == 0) {
         return;
     }
+    const u32 bytes = (mSio2Read.bcr & 0xFFFF) * (mSio2Read.bcr >> 16) * 4;
     std::vector<u8> answer(bytes);
     mSio2.readFifoOut(answer);
     for (usize i = 0; i < answer.size(); ++i) {
@@ -161,8 +176,8 @@ void IopMmio::writeToSio2(const DmaChannel& channel, u32 bytes) {
     mSio2.writeFifoIn(command);
 }
 
-// The transfer to sound RAM is not modelled: the samples go to the host and
-// LIBSD waits on the interrupt, not on the data.
+// LIBSD waits on the channel's interrupt rather than on the data, and pacing it
+// at the rate the samples play keeps a driver that refills on it in step.
 void IopMmio::startTransfer(DmaChannel& channel) {
     const u32 words = (channel.bcr & 0xFFFF) * (channel.bcr >> 16);
     if (channel.base == mSio2Write.base) {
@@ -174,7 +189,7 @@ void IopMmio::startTransfer(DmaChannel& channel) {
         return;
     }
     log.trace("spu dma from {:08x}, {} words, line {}", channel.madr, words, channel.line);
-    sendToAudio(channel, words);
+    sendToSoundMemory(channel, words);
     channel.chcr &= ~kStart;
     mKernel->raiseInterruptAfter(channel.line, kIopCyclesPerSample * samplesIn(words));
 }

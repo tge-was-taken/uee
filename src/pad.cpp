@@ -1,3 +1,6 @@
+// A `Pad*` tag names the routine that settles a detail, in PADMAN
+// md5 0fa9dbfe8794e172733189ed945aff45.
+
 #include "pad.h"
 
 #include <algorithm>
@@ -5,13 +8,8 @@
 namespace uee {
 namespace {
 
-// PADMAN md5 0fa9dbfe8794e172733189ed945aff45 builds every frame as the device
-// address, the command, a pad byte and then the payload: PadCmd43ConfigMode @
-// 0x71a0, PadCmd45QueryModel @ 0x71d8, PadCmd46QueryAct @ 0x7210,
-// PadCmd47QueryComb @ 0x7248, PadCmd4CQueryMode @ 0x7280,
-// PadCmd41QueryButtonMask @ 0x72b8, PadCmd4FSetButtonInfo @ 0x72f0,
-// PadCmd40SetVrefParam0 @ 0x7324, PadCmd44SetMainMode @ 0x7358 and
-// PadCmd4DSetActAlign @ 0x738c, each returning a nine byte frame.
+// The commands PadCmd43ConfigMode @ 0x71a0 and its neighbours send, each in a
+// nine byte frame.
 constexpr u8 kPoll = 0x42;
 constexpr u8 kEnterConfig = 0x43;
 constexpr u8 kSetMainMode = 0x44;
@@ -24,21 +22,18 @@ constexpr u8 kSetButtonInfo = 0x4F;
 constexpr u8 kSetVrefParam = 0x40;
 constexpr u8 kQueryButtonMask = 0x41;
 
-// PADMAN: PadPortOpenStart @ 0x2574 drops a frame whose third byte is not 0x5A
-// or whose second byte is not the id it expects, and PadProbeXferStep4 @ 0x1414
-// expects 0xF3 for every frame it sends while the pad is in config mode.
+// PadPortOpenStart @ 0x2574 drops a frame whose marker or id is wrong, and
+// PadProbeXferStep4 @ 0x1414 expects 0xF3 while a pad is in config mode.
 constexpr u8 kIdle = 0xFF;
 constexpr u8 kMarker = 0x5A;
 constexpr u8 kConfig = 0xF3;
 
-// The id also says how much data follows: PADMAN reads two bytes of buttons out
-// of a 0x41 frame and six out of a 0x73 one, which is what PadCmd42Payload5 @
-// 0x66d0 and PadCmd42Payload7 @ 0x6570 send.
+// PadCmd42Payload5 @ 0x66d0 reads two bytes of buttons out of a 0x41 frame and
+// PadCmd42Payload7 @ 0x6570 six out of a 0x73 one.
 constexpr u8 kDigital = 0x41;
 constexpr u8 kAnalog = 0x73;
 
-// What this pad answers when asked what it is: one controller with a digital
-// and an analog mode, the analog one second in its table.
+// One controller with a digital and an analog mode, the analog one second.
 constexpr u8 kModelDualShock = 0x03;
 constexpr u8 kModes = 0x02;
 constexpr u8 kModeOffset = 0x02;
@@ -94,8 +89,7 @@ void DualShock::answer(std::span<const u8> command, std::span<u8> response) {
     }
 }
 
-// Nothing on the host side moves a stick or presses hard enough to register a
-// pressure, so only the buttons come from it.
+// The host has no stick or pressure input, so only the buttons come from it.
 void DualShock::readButtons(std::span<u8> data) {
     const u16 buttons = mButtons->buttons();
     put(data, {static_cast<u8>(buttons >> 8), static_cast<u8>(buttons), kStickCentre,
@@ -110,20 +104,19 @@ void DualShock::enterConfig(u8 selector, std::span<u8> data) {
     mInConfig = selector != 0;
 }
 
-// PADMAN: scePadSetMainMode @ 0x45ec asks for one of the modes reportModel
-// lists.
+// scePadSetMainMode @ 0x45ec asks for one of the modes reportModel lists.
 void DualShock::setMainMode(u8 selector) {
     mAnalog = selector != 0;
 }
 
-// PADMAN: scePadInfoMode @ 0x447c hands the game what this reports.
+// scePadInfoMode @ 0x447c hands the game what this reports.
 void DualShock::reportModel(std::span<u8> data) {
     put(data, {kModelDualShock, kModes, static_cast<u8>(mAnalog ? 0x01 : 0x00), kModeOffset,
                kFirstMode, 0x00});
 }
 
-// PADMAN: scePadInfoAct @ 0x4344 reads the actuator this describes. The pad has
-// one per motor, and the second takes a speed rather than a switch.
+// scePadInfoAct @ 0x4344 reads these. This pad has one actuator per motor, and
+// the second takes a speed rather than a switch.
 void DualShock::reportActuator(u8 selector, std::span<u8> data) {
     if (selector == 0) {
         put(data, {0x00, 0x00, 0x01, 0x02, 0x00, 0x0A});
@@ -132,7 +125,7 @@ void DualShock::reportActuator(u8 selector, std::span<u8> data) {
     put(data, {0x00, 0x00, 0x01, 0x01, 0x01, 0x14});
 }
 
-// PADMAN: scePadInfoComb @ 0x453c reads how many actuators can run at once.
+// scePadInfoComb @ 0x453c reads how many actuators can run at once.
 void DualShock::reportCombination(std::span<u8> data) {
     put(data, {0x00, 0x00, 0x02, 0x00, 0x01, 0x00});
 }
@@ -142,8 +135,7 @@ void DualShock::reportMode(u8 selector, std::span<u8> data) {
     put(data, {0x00, 0x00, static_cast<u8>(id >> 4), 0x00, 0x00, 0x00});
 }
 
-// PADMAN: scePadSetActAlign @ 0x484c maps the motors, and the frame answers
-// with the mapping it replaces.
+// scePadSetActAlign @ 0x484c maps the motors.
 void DualShock::mapMotors(std::span<const u8> payload, std::span<u8> data) {
     for (usize i = 0; i < std::size(mMotors); ++i) {
         if (i < data.size()) {

@@ -6,6 +6,7 @@
 #include "kernel.h"
 #include "memory.h"
 #include "run.h"
+#include "card_file.h"
 #include "wav_sink.h"
 
 #include <cstdio>
@@ -98,9 +99,7 @@ int main(int argc, char** argv) {
 
     std::optional<uee::WavSink> audio;
     if (const char* path = std::getenv("UEE_AUDIO")) {
-        // A transfer carries one core's sample upload, not the mix the hardware
-        // would play, so this is a single channel until voices are mixed.
-        audio.emplace(path, uee::kSpuSampleRate, 1);
+        audio.emplace(path, uee::kSpuSampleRate, uee::kSpuChannels);
         if (!audio->isOpen()) {
             log.fatal("cannot write audio to {}", path);
             return 2;
@@ -119,6 +118,17 @@ int main(int argc, char** argv) {
         log.info("holding pad buttons {:04x}", pad.held);
     }
     kernel.attachPad(&pad);
+
+    std::optional<uee::CardFile> card;
+    if (const char* path = std::getenv("UEE_CARD")) {
+        card.emplace(path);
+        if (!card->isOpen()) {
+            log.fatal("cannot open memory card image {}", path);
+            return 2;
+        }
+        kernel.attachCard(&*card);
+        log.info("memory card image {}", path);
+    }
 
     if (const char* hooks = std::getenv("UEE_HOOKS")) {
         kernel.hooks().watch(kernel.symbols(), hooks);

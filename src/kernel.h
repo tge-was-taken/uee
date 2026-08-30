@@ -70,6 +70,7 @@ public:
     void attachFiles(std::filesystem::path root) { mSif.attachFiles(std::move(root)); }
     void attachAudio(AudioSink* audio) { mIop.attachAudio(audio); }
     void attachPad(PadSource* pad) { mIop.attachPad(pad); }
+    void attachCard(CardStorage* card) { mIop.attachCard(card); }
 
     // Advances the timers and queues any alarm that has expired.
     void advanceClock();

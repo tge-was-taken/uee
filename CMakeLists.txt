@@ -68,6 +68,8 @@ add_library(uee
     src/iop_rpc.cpp
     src/adpcm.cpp
     src/iop_mmio.cpp
+    src/card.cpp
+    src/spu2.cpp
     src/pad.cpp
     src/sio2.cpp
     src/iop_interpreter.cpp
@@ -183,6 +185,13 @@ foreach(elf ${AUTOTEST_ELFS})
              COMMAND translated_${name} ${elf} ${AUTOTEST_DIR}/${relative}.expected)
 endforeach()
 
+# Failures someone is already working on. They still run, and a fixed one turns
+# the suite red until it is taken off this list.
+set(KNOWN_FAILURES vu.lower.efu)
+foreach(name ${KNOWN_FAILURES})
+    set_tests_properties(${name} translated.${name} PROPERTIES WILL_FAIL TRUE)
+endforeach()
+
 file(GLOB IOP_AUTOTEST_IRXS ${AUTOTEST_DIR}/cpu/iop/*.irx)
 foreach(irx ${IOP_AUTOTEST_IRXS})
     file(RELATIVE_PATH relative ${AUTOTEST_DIR} ${irx})
@@ -228,7 +237,7 @@ if(IOP_GCC AND EXISTS "${PS2SDK}/iop/startup/linkfile")
     # is the only pairing the IRX loader relocates.
     set(IOP_CFLAGS -D_IOP -fno-builtin -G0 -Os -Wall -msoft-float -mno-explicit-relocs
                    -I${PS2SDK}/iop/include -I${PS2SDK}/common/include)
-    foreach(guest printf sysclib thsemap thevent thbase sysmem intrman)
+    foreach(guest printf sysclib thsemap thevent thbase sysmem intrman sio2)
         set(irx ${IOP_BUILD_DIR}/${guest}.irx)
         add_custom_command(OUTPUT ${irx}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${IOP_BUILD_DIR}

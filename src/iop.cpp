@@ -175,6 +175,7 @@ void Iop::advance(u64 instructions) {
     }
     mAdvancing = true;
     mKernel.advanceTime(instructions);
+    mMmio.advance(instructions);
     // The host thread is only the EE's way in. Leaving it runnable would hand
     // every slice straight back, since it sits on the address a call returns to.
     mKernel.exitHostThread();

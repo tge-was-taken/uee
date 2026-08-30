@@ -19,6 +19,9 @@ struct AdpcmState {
     s32 older = 0;
 };
 
+// One block, for a voice that reads its stream a block at a time.
+void decodeAdpcmBlock(std::span<const u8> block, AdpcmState& state, std::span<s16> out);
+
 void decodeAdpcm(std::span<const u8> blocks, AdpcmState& state, std::vector<s16>& out);
 
 }  // namespace uee

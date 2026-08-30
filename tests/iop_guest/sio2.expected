@@ -1,0 +1,25 @@
+-- TEST BEGIN
+poll: ff 41 5a
+poll buttons: ff ff
+poll failed: 0
+empty: ff ff ff
+empty failed: 0
+entering config: ff 41 5a
+in config: ff f3 5a
+analog: ff 73 5a
+digital again: ff 41 5a
+dma: ff 41 5a
+dma buttons: ff ff
+card ack: 1
+card terminator: 1
+card page bytes: 512
+card block pages: 16
+card pages: 16384
+card specs checksum: 1
+card specs terminator: 1
+card terminator read: 55
+card write acked: 1
+card read: 10 11 12 13
+card read checksum: 1
+card read terminator: 1
+-- TEST END

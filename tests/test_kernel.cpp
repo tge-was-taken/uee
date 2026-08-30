@@ -4,6 +4,11 @@
 #include "gs.h"
 #include "ee_context.h"
 #include "interrupts.h"
+#include "iop_interpreter.h"
+#include "iop_kernel.h"
+#include "pad.h"
+#include "sio2.h"
+#include "spu2.h"
 #include "kernel.h"
 #include "queue.h"
 #include "syscall_table.h"
@@ -12,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <format>
 #include <vector>
 
 namespace {
@@ -478,6 +484,314 @@ void checkAdpcmIgnoresAPartialBlock() {
     check(out.empty(), "a block short of its bytes decodes nothing");
 }
 
+// Nothing is pressed unless a check says otherwise, so a frame reads the same
+// way every run.
+struct TestPad : uee::PadSource {
+    u16 held = 0;
+    u16 buttons() override { return static_cast<u16>(~held); }
+};
+
+std::vector<u8> askPad(uee::DualShock& pad, std::initializer_list<u8> command, usize length) {
+    std::vector<u8> frame(command);
+    frame.resize(std::max(frame.size(), length), 0);
+    std::vector<u8> answer(length, 0);
+    pad.answer(frame, answer);
+    return answer;
+}
+
+void checkPadAnswersAPoll() {
+    TestPad source;
+    source.held = 0x0800;
+    uee::DualShock pad{&source};
+
+    const std::vector<u8> answer = askPad(pad, {0x01, 0x42, 0x00}, 5);
+    checkEqual(answer[0], static_cast<u8>(0xFF), "the address byte reads as an idle line");
+    checkEqual(answer[1], static_cast<u8>(0x41), "a pad out of config mode answers as digital");
+    checkEqual(answer[2], static_cast<u8>(0x5A), "the marker follows the id");
+    checkEqual(answer[3], static_cast<u8>(0xF7), "the held button clears its bit");
+    checkEqual(answer[4], static_cast<u8>(0xFF), "the buttons nothing holds read as ones");
+}
+
+void checkPadReportsConfigMode() {
+    TestPad source;
+    uee::DualShock pad{&source};
+
+    const std::vector<u8> entering = askPad(pad, {0x01, 0x43, 0x00, 0x01}, 9);
+    checkEqual(entering[1], static_cast<u8>(0x41),
+               "the frame that asks for config mode still answers as what it was");
+    checkEqual(askPad(pad, {0x01, 0x42, 0x00}, 9)[1], static_cast<u8>(0xF3),
+               "a pad in config mode answers as config");
+    askPad(pad, {0x01, 0x43, 0x00, 0x00}, 9);
+    checkEqual(askPad(pad, {0x01, 0x42, 0x00}, 9)[1], static_cast<u8>(0x41),
+               "leaving config mode puts the id back");
+}
+
+void checkPadSwitchesToAnalog() {
+    TestPad source;
+    uee::DualShock pad{&source};
+
+    askPad(pad, {0x01, 0x43, 0x00, 0x01}, 9);
+    checkEqual(askPad(pad, {0x01, 0x45, 0x00}, 9)[5], static_cast<u8>(0x00),
+               "the model says analog is off");
+    askPad(pad, {0x01, 0x44, 0x00, 0x01}, 9);
+    checkEqual(askPad(pad, {0x01, 0x45, 0x00}, 9)[5], static_cast<u8>(0x01),
+               "the model says analog is on");
+    askPad(pad, {0x01, 0x43, 0x00, 0x00}, 9);
+
+    const std::vector<u8> answer = askPad(pad, {0x01, 0x42, 0x00}, 9);
+    checkEqual(answer[1], static_cast<u8>(0x73), "an analog pad answers with the analog id");
+    checkEqual(answer[5], static_cast<u8>(0x80), "the sticks read centred");
+}
+
+void checkPadAnswersTheMappingItReplaces() {
+    TestPad source;
+    uee::DualShock pad{&source};
+
+    askPad(pad, {0x01, 0x43, 0x00, 0x01}, 9);
+    const std::vector<u8> first = askPad(pad, {0x01, 0x4D, 0x00, 0x00, 0x01}, 9);
+    checkEqual(first[3], static_cast<u8>(0xFF), "an unmapped motor reads as unmapped");
+    const std::vector<u8> second = askPad(pad, {0x01, 0x4D, 0x00, 0xFF, 0xFF}, 9);
+    checkEqual(second[3], static_cast<u8>(0x00), "the answer carries the mapping it replaces");
+    checkEqual(second[4], static_cast<u8>(0x01), "both motors are answered");
+}
+
+// The device raises an interrupt when the queue is answered, which is the only
+// reason it needs a kernel at all.
+struct Sio2Fixture {
+    uee::Memory memory = uee::makeIopMemory();
+    uee::Memory mainMemory = uee::makeMainMemory();
+    uee::IopInterpreter interpreter{memory};
+    std::vector<uee::Import> imports;
+    std::string console;
+    uee::IopKernel kernel{interpreter.iop,  memory, mainMemory, imports,
+                          {uee::kIopHeapBase, 0}, console};
+    TestPad source;
+    uee::Sio2 device;
+
+    Sio2Fixture() {
+        device.attach(kernel);
+        device.attachPad(&source);
+    }
+
+    void write(u32 address, u32 value) { device.write(address, value); }
+    u32 read(u32 address) { return device.read(address).value_or(0); }
+};
+
+constexpr u32 kSio2Send3 = 0x00;
+constexpr u32 kSio2FifoIn = 0x60;
+constexpr u32 kSio2FifoOut = 0x64;
+constexpr u32 kSio2Control = 0x68;
+
+void checkSio2AnswersEveryQueuedCommand() {
+    Sio2Fixture sio2;
+    sio2.write(kSio2Send3, 0 | (5 << 8));
+    sio2.write(kSio2Send3 + 4, 1 | (5 << 8));
+    sio2.write(kSio2Control, 0x3BC);
+    for (const u8 byte : {0x01, 0x42, 0x00, 0x00, 0x00, 0x01, 0x42, 0x00, 0x00, 0x00}) {
+        sio2.write(kSio2FifoIn, byte);
+    }
+    sio2.write(kSio2Control, 0x3BD);
+
+    std::vector<u8> answer;
+    for (int i = 0; i < 10; ++i) {
+        answer.push_back(static_cast<u8>(sio2.read(kSio2FifoOut)));
+    }
+    checkEqual(answer[1], static_cast<u8>(0x41), "the port with a pad answers as one");
+    checkEqual(answer[6], static_cast<u8>(0xFF),
+               "the port with nothing in it answers with an idle line");
+}
+
+// SIO2MAN leaves the FIFO reset bits set once Sio2FifoReset @ 0x1a4 has written
+// them, so a level triggered reset would throw away the command that follows.
+void checkSio2KeepsTheCommandWrittenAfterAReset() {
+    Sio2Fixture sio2;
+    sio2.write(kSio2Control, 0x3BC);
+    sio2.write(kSio2Send3, 0 | (5 << 8));
+    sio2.write(kSio2Control, 0x3BC | 0xC);
+    for (const u8 byte : {0x01, 0x42, 0x00, 0x00, 0x00}) {
+        sio2.write(kSio2FifoIn, byte);
+    }
+    sio2.write(kSio2Control, 0x3BC | 0xC | 0x1);
+
+    sio2.read(kSio2FifoOut);
+    checkEqual(static_cast<u8>(sio2.read(kSio2FifoOut)), static_cast<u8>(0x41),
+               "the command survives the write that starts the queue");
+}
+
+// The queue ends at the first empty entry, so a command left over from a longer
+// transfer is not answered again.
+void checkSio2StopsAtAnEmptyEntry() {
+    Sio2Fixture sio2;
+    sio2.write(kSio2Send3, 0 | (5 << 8));
+    sio2.write(kSio2Send3 + 4, 0);
+    sio2.write(kSio2Send3 + 8, 0 | (5 << 8));
+    sio2.write(kSio2Control, 0x3BC);
+    for (const u8 byte : {0x01, 0x42, 0x00, 0x00, 0x00}) {
+        sio2.write(kSio2FifoIn, byte);
+    }
+    sio2.write(kSio2Control, 0x3BD);
+
+    for (int i = 0; i < 5; ++i) {
+        sio2.read(kSio2FifoOut);
+    }
+    checkEqual(static_cast<u8>(sio2.read(kSio2FifoOut)), static_cast<u8>(0xFF),
+               "nothing follows the answer to the one command queued");
+}
+
+// The register offsets LIBSD addresses, from its table at 0x4ca0.
+constexpr u32 kVoiceVolumeLeft = 0x000;
+constexpr u32 kVoiceVolumeRight = 0x002;
+constexpr u32 kVoicePitch = 0x004;
+constexpr u32 kVoiceAdsr1 = 0x006;
+constexpr u32 kVoiceAdsr2 = 0x008;
+constexpr u32 kVoiceEnvelope = 0x00A;
+constexpr u32 kCoreMixLeft = 0x188;
+constexpr u32 kCoreMixRight = 0x190;
+constexpr u32 kCoreKeyOn = 0x1A0;
+constexpr u32 kCoreTransfer = 0x1A8;
+constexpr u32 kVoiceStart = 0x1C0;
+constexpr u32 kCoreEndx = 0x340;
+constexpr u32 kCoreMasterLeft = 0x760;
+constexpr u32 kCoreMasterRight = 0x762;
+
+// A block of one nibble each, which decodes to a constant with the widest
+// shift and no filter.
+constexpr s16 kFlatSample = 0x1000;
+constexpr u32 kBlockAddress = 0x1000;
+
+std::vector<u8> makeFlatBlock(u8 flags) {
+    std::vector<u8> block(uee::kAdpcmBlockBytes, 0x11);
+    block[0] = 0x00;
+    block[1] = flags;
+    return block;
+}
+
+// Full volume in every stage, and an envelope that rises in three samples and
+// then stays there. The decay runs for one sample even at the top sustain
+// level, so the slowest decay rate is what keeps it full.
+void programVoice(uee::Spu2& spu2, u16 pitch) {
+    spu2.writeHalf(kCoreTransfer, 0);
+    spu2.writeHalf(kCoreTransfer + 2, kBlockAddress);
+    spu2.writeHalf(kVoiceStart, 0);
+    spu2.writeHalf(kVoiceStart + 2, kBlockAddress);
+    spu2.writeHalf(kVoiceVolumeLeft, 0x3FFF);
+    spu2.writeHalf(kVoiceVolumeRight, 0x3FFF);
+    spu2.writeHalf(kVoicePitch, pitch);
+    spu2.writeHalf(kVoiceAdsr1, 0x00FF);
+    spu2.writeHalf(kVoiceAdsr2, 0x1FC0);
+    spu2.writeHalf(kCoreMixLeft, 1);
+    spu2.writeHalf(kCoreMixRight, 1);
+    spu2.writeHalf(kCoreMasterLeft, 0x3FFF);
+    spu2.writeHalf(kCoreMasterRight, 0x3FFF);
+}
+
+// The envelope, the voice volume and the master volume each scale by a
+// fifteen bit fraction, so a full scale chain lands a few units below the
+// sample it started from.
+void checkLevel(s16 actual, s16 expected, const std::string& what) {
+    if (std::abs(actual - expected) > 4) {
+        spdlog::error("failed: {}: expected about {}, got {}", what, expected, actual);
+        ++gFailures;
+    }
+}
+
+std::vector<s16> render(uee::Spu2& spu2, usize frames) {
+    std::vector<s16> stereo(frames * 2);
+    spu2.render(stereo);
+    return stereo;
+}
+
+void checkSpu2PlaysAKeyedOnVoice() {
+    uee::Spu2 spu2;
+    const std::vector<u8> block = makeFlatBlock(0);
+    programVoice(spu2, 0x1000);
+    spu2.receive(0, block);
+    spu2.writeHalf(kCoreKeyOn, 1);
+
+    const std::vector<s16> stereo = render(spu2, 8);
+    checkEqual(stereo[0] != 0, true, "the voice is heard as soon as it is keyed on");
+    checkLevel(stereo[14], kFlatSample, "a flat block plays back at its own level");
+    checkLevel(stereo[15], kFlatSample, "both channels carry it");
+    check(spu2.readHalf(kVoiceEnvelope).value_or(0) == 0x7FFF,
+          "the envelope has reached the top");
+}
+
+// The volumes set the panpot, so a voice can be put on one channel alone.
+void checkSpu2PansAVoice() {
+    uee::Spu2 spu2;
+    programVoice(spu2, 0x1000);
+    spu2.writeHalf(kVoiceVolumeRight, 0);
+    spu2.receive(0, makeFlatBlock(0));
+    spu2.writeHalf(kCoreKeyOn, 1);
+
+    const std::vector<s16> stereo = render(spu2, 8);
+    checkLevel(stereo[14], kFlatSample, "the left channel carries the voice");
+    checkEqual(stereo[15], static_cast<s16>(0), "the right channel is silent");
+}
+
+// Waveform data with an endpoint and no loop stops the voice and leaves the
+// envelope reading zero.
+void checkSpu2StopsAtAnEndpoint() {
+    uee::Spu2 spu2;
+    programVoice(spu2, 0x1000);
+    spu2.receive(0, makeFlatBlock(0x01));
+    spu2.writeHalf(kCoreKeyOn, 1);
+
+    render(spu2, uee::kAdpcmBlockSamples + 2);
+    checkEqual(spu2.readHalf(kCoreEndx).value_or(0), static_cast<u16>(1),
+               "the voice reports that it ended");
+    checkEqual(spu2.readHalf(kVoiceEnvelope).value_or(1), static_cast<u16>(0),
+               "the envelope reads zero once it has");
+}
+
+// An endpoint block that also loops sends generation back to the loop point
+// instead of stopping.
+void checkSpu2LoopsBackToItsLoopPoint() {
+    uee::Spu2 spu2;
+    programVoice(spu2, 0x1000);
+    spu2.receive(0, makeFlatBlock(0x07));
+    spu2.writeHalf(kCoreKeyOn, 1);
+
+    const std::vector<s16> stereo = render(spu2, uee::kAdpcmBlockSamples * 3);
+    checkLevel(stereo.back(), kFlatSample, "the voice is still playing after the endpoint");
+    checkEqual(spu2.readHalf(kVoiceEnvelope).value_or(0), static_cast<u16>(0x7FFF),
+               "a looping voice keeps its envelope");
+}
+
+// Half the pitch takes twice as long to reach the end of the data.
+void checkSpu2PitchSetsThePace() {
+    uee::Spu2 slow;
+    programVoice(slow, 0x0800);
+    slow.receive(0, makeFlatBlock(0x01));
+    slow.writeHalf(kCoreKeyOn, 1);
+
+    render(slow, uee::kAdpcmBlockSamples + 2);
+    checkEqual(slow.readHalf(kCoreEndx).value_or(1), static_cast<u16>(0),
+               "at half pitch the block is only half read");
+    render(slow, uee::kAdpcmBlockSamples + 2);
+    checkEqual(slow.readHalf(kCoreEndx).value_or(0), static_cast<u16>(1),
+               "twice the frames reach the end of it");
+}
+
+// A rate's period doubles every four steps, so an attack of rate 0 crosses the
+// envelope in 3 samples and one of rate 0x10 takes 37.
+void checkSpu2AttackMatchesThePublishedRate() {
+    for (const auto& [rate, samples] : {std::pair<u16, usize>{0x00, 3}, {0x10, 37}}) {
+        uee::Spu2 spu2;
+        programVoice(spu2, 0x1000);
+        spu2.writeHalf(kVoiceAdsr1, static_cast<u16>((rate << 8) | 0x00FF));
+        spu2.receive(0, makeFlatBlock(0x07));
+        spu2.writeHalf(kCoreKeyOn, 1);
+
+        render(spu2, samples - 1);
+        check(spu2.readHalf(kVoiceEnvelope).value_or(0) < 0x7FFF,
+              std::format("attack {:02x} has not finished a sample early", rate));
+        render(spu2, 1);
+        checkEqual(spu2.readHalf(kVoiceEnvelope).value_or(0), static_cast<u16>(0x7FFF),
+                   std::format("attack {:02x} reaches the top on time", rate));
+    }
+}
+
 void checkGsCsrClearsOnWritingOne() {
     uee::Gs gs;
     gs.raiseFinish();
@@ -525,6 +839,19 @@ int main() {
     checkAdpcmFilterFollowsThePreviousSamples();
     checkAdpcmCarriesStateAcrossBlocks();
     checkAdpcmIgnoresAPartialBlock();
+    checkPadAnswersAPoll();
+    checkPadReportsConfigMode();
+    checkPadSwitchesToAnalog();
+    checkPadAnswersTheMappingItReplaces();
+    checkSio2AnswersEveryQueuedCommand();
+    checkSio2KeepsTheCommandWrittenAfterAReset();
+    checkSio2StopsAtAnEmptyEntry();
+    checkSpu2PlaysAKeyedOnVoice();
+    checkSpu2PansAVoice();
+    checkSpu2StopsAtAnEndpoint();
+    checkSpu2LoopsBackToItsLoopPoint();
+    checkSpu2PitchSetsThePace();
+    checkSpu2AttackMatchesThePublishedRate();
 
     if (gFailures != 0) {
         spdlog::error("{} checks failed", gFailures);
