@@ -225,7 +225,10 @@ private:
     void strtol();
 
     void sifInit();
+    void runSifTransfers(u32 transfers, u32 count);
     void sifSetDma();
+    void sifSetDmaIntr();
+    void sifGetOtherData();
     void sifCheckInit();
     void sifInitRpc();
     void sifBindRpc();

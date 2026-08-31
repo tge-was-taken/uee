@@ -28,7 +28,7 @@ public:
     // Translated modules keep their bases; everything else loads above.
     Iop(Memory& mainMemory, std::string& console,
         std::span<TranslatedIrx* const> translated = {},
-        std::span<const std::string> hostModules = {});
+        std::span<const std::string> hostModules = {}, std::span<const u32> watched = {});
 
     bool loadModule(const std::string& name, std::span<const u8> image);
     u32 callFunction(u32 address, u32 gp, std::span<const u32> arguments);
@@ -68,6 +68,7 @@ private:
     std::vector<Import> mImports;
     IopKernel mKernel;
     Symbols mSymbols;
+    std::vector<u32> mWatched;
     std::vector<IrxModule> mLoaded;
     std::span<TranslatedIrx* const> mTranslated;
     std::vector<std::string> mHostModules;
@@ -75,7 +76,7 @@ private:
     std::vector<TranslatedIrx*> mActive;
     u32 mNextBase = kIopModuleBase;
     IopMachine mMachine{mInterpreter, mMemory, mKernel, mActive};
-    IopScheduler mScheduler{mMachine, mSymbols};
+    IopScheduler mScheduler{mMachine, mSymbols, mWatched};
     bool mAdvancing = false;
     u64 mHandlersRun = 0;
 };

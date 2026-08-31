@@ -45,6 +45,7 @@ private:
 
     void start(usize index);
     void interleave(usize index);
+    void sendTagCodes(usize index, u32 tagAddress);
     void transfer(usize index, u32 address, u32 quadwords);
     void followChain(usize index);
 

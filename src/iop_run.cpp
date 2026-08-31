@@ -125,8 +125,9 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instruc
 
 }  // namespace
 
-IopScheduler::IopScheduler(IopMachine& machine, const Symbols& symbols)
-    : mMachine(machine), mIdle("iop", symbols) {}
+IopScheduler::IopScheduler(IopMachine& machine, const Symbols& symbols,
+                           std::span<const u32> watched)
+    : mMachine(machine), mIdle("iop", symbols, machine.memory, watched) {}
 
 IopScheduler::~IopScheduler() {
     for (mco_coro* coroutine : mCoroutines) {

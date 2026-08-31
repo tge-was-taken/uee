@@ -1,9 +1,15 @@
 [iop]
 preload = []
+# IOPRP310.IMG on the disc carries every module named here, so each is a choice
+# not to run the game's own copy: cdvdman, cdvdfsv, fileio, ioman, loadfile,
+# romdrv and stdio reach the drive, filesystem or console; threadman and
+# loadcore are this runtime's coroutines and its loader; sysmem hands out the
+# memory that loader uses; sifcmd and sifman wait on Sif carrying the wire
+# protocol. Anything absent runs from the image.
 host = [
-    "cdvdman",
-    "sysclib", "stdio", "sysmem", "threadman", "sifcmd", "sifman", "loadcore",
-    "fileio", "ioman", "romdrv", "cdvdfsv", "loadfile",
+    "cdvdman", "cdvdfsv", "fileio", "ioman", "loadfile", "romdrv", "stdio",
+    "threadman", "loadcore", "sysmem",
+    "sifcmd", "sifman",
 ]
 
 # SLUS_216.21 md5 9074ba25f5a100940ed233c9f8f675ab: H_Dbprt_FmtLog @ 0x1052b0

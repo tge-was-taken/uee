@@ -14,6 +14,7 @@
 
 #include <array>
 #include <map>
+#include <span>
 #include <vector>
 #include <optional>
 #include <string>
@@ -36,9 +37,8 @@ struct GuestCall {
     u32 argument = 0;
     u32 secondArgument = 0;
     u32 thirdArgument = 0;
-    // A handler in an interrupt chain, which a negative return cancels the
-    // rest of.
-    bool inChain = false;
+    // Zero outside a chain; a negative return cancels the rest of this one.
+    u32 chain = 0;
 };
 
 class Kernel {
@@ -97,6 +97,7 @@ public:
     Symbols& iopSymbols() { return mIop.symbols(); }
     // The port preloads the modules it knows the game replaces.
     Iop& iop() { return mIop; }
+    std::span<const u32> watched() const { return mWatched; }
 
     // Everything a stop that was not clean needs explaining.
     void reportThreads() const;
@@ -180,6 +181,7 @@ private:
     std::string mOutput;
     Symbols mSymbols;
     Hooks mHooks;
+    std::vector<u32> mWatched;
     Iop mIop;
     Sif mSif{mMemory, mMmio.sbus(), mOutput, mIop};
 
@@ -226,6 +228,8 @@ private:
     std::array<u32, 0x20> mSifRegisters = {};
     u32 mDmaTransferId = 0;
     std::vector<GuestCall> mPendingCalls;
+    u32 mChains = 0;
+    u32 mRunningChain = 0;
     u32 mCallsHeld = 0;
 
 };

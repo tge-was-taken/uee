@@ -63,6 +63,12 @@ GameConfig loadGameConfig(const std::string& path) {
         }
     }
 
+    if (const toml::array* addresses = file["watch"].as_array()) {
+        for (usize i = 0; i < addresses->size(); ++i) {
+            config.watch.push_back(wordAt(*addresses->get(i), path, i));
+        }
+    }
+
     // The load is what binds imports, and host skips it.
     for (const std::string& module : config.preload) {
         const std::string bare = moduleNameOf(module);

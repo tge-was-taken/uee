@@ -57,6 +57,9 @@ constexpr usize kVif0 = 0;
 constexpr usize kVif1 = 1;
 constexpr usize kGif = 2;
 
+// CHCR: the channel sends each tag's codes to the unit ahead of the data.
+constexpr u32 kTagTransfer = 1u << 6;
+
 constexpr u32 kInterleaveMode = 2;
 constexpr u32 kSkipQuadword = 0x1000E030;
 constexpr u32 kScratchpadQuadwordMask = 0x3FF0;
@@ -166,6 +169,7 @@ bool Dmac::write(u32 address, u32 value) {
             case kControl:
                 mChannels[i].control = value;
                 if ((value & kStart) != 0) {
+                    log.trace("channel {} started, control {:08x}", i, value);
                     start(i);
                 }
                 return true;
@@ -214,6 +218,7 @@ void Dmac::start(usize index) {
     }
 
     channel.control &= ~kStart;
+    log.trace("channel {} finished, mode {}", index, mode);
     mInterrupts->raiseDmac(static_cast<u32>(index));
 }
 
@@ -237,6 +242,15 @@ void Dmac::interleave(usize index) {
             channel.address += skip * kQuadwordBytes;
         }
     }
+}
+
+// A tag's upper half holds two VIFcodes, read before the data the tag names.
+void Dmac::sendTagCodes(usize index, u32 tagAddress) {
+    if ((index != kVif0 && index != kVif1) ||
+        (mChannels[index].control & kTagTransfer) == 0) {
+        return;
+    }
+    mVif[index]->writeTag(mMemory->read64(tagAddress + 8));
 }
 
 void Dmac::transfer(usize index, u32 address, u32 quadwords) {
@@ -282,6 +296,7 @@ void Dmac::followChain(usize index) {
                           (mMemory->read32(resolve(channel.tagAddress)) & 0xFFFF0000u);
 
         const u32 follow = resolve(channel.tagAddress) + kQuadwordBytes;
+        sendTagCodes(index, resolve(channel.tagAddress));
         switch (tag.id) {
             case kReferenceAndEnd:
             case kReference:

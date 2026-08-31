@@ -1,10 +1,13 @@
 #pragma once
 
 #include "log.h"
+#include "memory.h"
 #include "symbols.h"
 #include "types.h"
 
 #include <array>
+#include <span>
+#include <vector>
 #include <string>
 
 namespace uee {
@@ -12,7 +15,8 @@ namespace uee {
 // Tells a guest polling hardware nothing here drives apart from one doing work.
 class Idle {
 public:
-    Idle(std::string processor, const Symbols& symbols);
+    Idle(std::string processor, const Symbols& symbols, Memory& memory,
+         std::span<const u32> watched);
 
     // True on the sample that counts as idle busy loop
     bool sample(u32 pc);
@@ -25,6 +29,9 @@ private:
     void report() const;
 
     const Symbols& mSymbols;
+    Memory& mMemory;
+    // Reported beside the spinning loop.
+    std::vector<u32> mWatched;
     LoggerChannel mLog{"idle"};
     std::string mProcessor;
     std::array<u32, kRegions> mRegions{};

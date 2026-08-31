@@ -1,10 +1,14 @@
 #include "vif.h"
 
+#include "log.h"
+
 #include "gif.h"
 #include "memory.h"
 
 namespace uee {
 namespace {
+
+LoggerChannel log("vif");
 
 constexpr u32 kRegisterSpan = 0x180;
 constexpr u32 kFifoSpan = 0x1000;
@@ -19,7 +23,13 @@ namespace code {
 constexpr u32 kNop = 0x00, kStcycl = 0x01, kOffset = 0x02, kBase = 0x03;
 constexpr u32 kItop = 0x04, kStmod = 0x05, kMskpath3 = 0x06, kMark = 0x07;
 constexpr u32 kStmask = 0x20, kStrow = 0x30, kStcol = 0x31;
+// These carry data of their own, and a count of zero means the field's
+// maximum rather than nothing.
+constexpr u32 kMpg = 0x4A, kDirect = 0x50, kDirectHl = 0x51;
 }  // namespace code
+
+constexpr u32 kMicroWordsMax = 256 * 2;
+constexpr u32 kDirectQuadwordsMax = 0x10000;
 
 constexpr u32 kDataWait = 1;
 constexpr u32 kDecoding = 2;
@@ -121,6 +131,11 @@ bool Vif::write(u32 address, u32 value) {
     }
 }
 
+void Vif::writeTag(u64 codes) {
+    consume(static_cast<u32>(codes));
+    consume(static_cast<u32>(codes >> 32));
+}
+
 void Vif::writeQuadword(u64 low, u64 high) {
     consume(static_cast<u32>(low));
     consume(static_cast<u32>(low >> 32));
@@ -134,6 +149,15 @@ void Vif::consume(u32 word) {
     if (mStalled) {
         return;
     }
+    if (mDirectWords != 0) {
+        sendToGif(word);
+        return;
+    }
+    // The microcode is not run here; its words are still consumed.
+    if (mMicroWords != 0) {
+        --mMicroWords;
+        return;
+    }
     if (mPendingTarget != nullptr) {
         *mPendingTarget++ = word;
         if (--mPending == 0) {
@@ -145,7 +169,23 @@ void Vif::consume(u32 word) {
         execute(word);
     }
     if (mStallRequested && mPendingTarget == nullptr && mRemaining == 0) {
+        log.warn("unit {} stalled on {:08x}", mUnit, mCode);
         mStalled = true;
+    }
+}
+
+void Vif::sendToGif(u32 word) {
+    mDirectQuadword[mDirectFill++] = word;
+    --mDirectWords;
+    if (mDirectFill < 4) {
+        return;
+    }
+    mDirectFill = 0;
+    if (mGif != nullptr) {
+        mGif->writeQuadword(static_cast<u64>(mDirectQuadword[0]) |
+                                (static_cast<u64>(mDirectQuadword[1]) << 32),
+                            static_cast<u64>(mDirectQuadword[2]) |
+                                (static_cast<u64>(mDirectQuadword[3]) << 32));
     }
 }
 
@@ -183,6 +223,15 @@ void Vif::execute(u32 code) {
             if ((code & kCodeInterrupt) != 0) {
                 mStatus |= kInterruptFlag;
             }
+            return;
+        case code::kMpg: {
+            const u32 count = (code >> 16) & 0xFFu;
+            mMicroWords = (count == 0 ? kMicroWordsMax : count * 2);
+            return;
+        }
+        case code::kDirect:
+        case code::kDirectHl:
+            mDirectWords = (immediate == 0 ? kDirectQuadwordsMax : immediate) * 4;
             return;
         case code::kStmask: mPending = 1; mPendingTarget = &mMask; return;
         case code::kStrow: mPending = 4; mPendingTarget = mRow; return;

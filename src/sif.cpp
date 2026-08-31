@@ -151,6 +151,10 @@ void Sif::handleCommand(const Transfer& command, const std::optional<Transfer>& 
             return;
         case sifcmd::kChangeSubAddress:
             return;
+        // Unhandled by design: SifCmdIntrHandler @ 0x590 finds no entry for
+        // it. sceSifSetDmaInternal @ 0x505fc0 sends it to raise the interrupt.
+        case sifcmd::kSetDmaMarker:
+            return;
         default:
             log.stub("command {:08x}",
                                    mMemory.read32(packet + kHeaderCommand * 4));

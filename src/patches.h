@@ -20,6 +20,8 @@ struct GameConfig {
     std::vector<std::string> hostModules;
     // Loaded before the game runs, in order: an import binds to what is resident.
     std::vector<std::string> preload;
+    // Guest addresses to report alongside a loop that is spinning on one.
+    std::vector<u32> watch;
 };
 
 GameConfig loadGameConfig(const std::string& path);

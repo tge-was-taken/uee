@@ -22,6 +22,9 @@ public:
 
     void writeQuadword(u64 low, u64 high);
 
+    // The two codes a DMA tag carries in its upper half.
+    void writeTag(u64 codes);
+
 private:
     u32 registerBase() const;
     u32 fifoBase() const;
@@ -31,6 +34,7 @@ private:
     void consume(u32 word);
     void execute(u32 code);
     void beginUnpack(u32 code);
+    void sendToGif(u32 word);
     void unpack(u32 word);
     bool needsData(u32 index) const;
     void drainMaskedQuadwords();
@@ -67,6 +71,10 @@ private:
     bool mMasked = false;
     bool mStalled = false;
     bool mStallRequested = false;
+    u32 mDirectWords = 0;
+    u32 mDirectQuadword[4] = {};
+    u32 mDirectFill = 0;
+    u32 mMicroWords = 0;
     u32 mPending = 0;
     u32* mPendingTarget = nullptr;
 };

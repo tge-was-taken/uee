@@ -15,6 +15,9 @@
 // A tag reading `<MODULE> (310)` names the build in IOPRP310.IMG instead, which
 // is what a game that reboots the IOP with it links against:
 //   SIFMAN   md5 4ba22fd5071ea28bcbe20f5d6dddfee7
+// An ordinal no resident build exports under the name its callers use is
+// settled by one of them instead:
+//   DBCMAN   md5 f6abf28d3eaf9277a7e4d35d3d2df607
 
 #include "log.h"
 #include "iop_kernel.h"
@@ -292,6 +295,7 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"sysclib", 36, "strtol", &IopKernel::strtol},
         {"sifman", 5, "sceSifInit", &IopKernel::sifInit, true},
         {"sifman", 7, "sceSifSetDma", &IopKernel::sifSetDma},
+        {"sifman", 32, "sceSifSetDmaIntr", &IopKernel::sifSetDmaIntr},
         {"sifman", 29, "sceSifCheckInit", &IopKernel::sifCheckInit, true},
         {"sifcmd", 14, "sceSifInitRpc", &IopKernel::sifInitRpc, true},
         {"sifman", 8, "sceSifDmaStat", &IopKernel::sifDmaStat, true},
@@ -300,6 +304,7 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"sifcmd", 17, "sceSifRegisterRpc", &IopKernel::sifRegisterRpc},
         {"sifcmd", 19, "sceSifSetRpcQueue", &IopKernel::sifSetRpcQueue},
         {"sifcmd", 22, "sceSifRpcLoop", &IopKernel::sifRpcLoop, true},
+        {"sifcmd", 23, "sceSifGetOtherData", &IopKernel::sifGetOtherData},
         {"sifcmd", 24, "sceSifRemoveRpc", &IopKernel::sifRemoveRpc},
         {"sifcmd", 25, "sceSifRemoveRpcQueue", &IopKernel::sifRemoveRpcQueue, true},
         {"vblank", 5, "WaitVblankEnd", &IopKernel::waitVblankEnd, true},
@@ -383,7 +388,12 @@ std::string IopKernel::nameOf(u32 index) const {
 
 bool IopKernel::call(u32 index) {
     while (mServices.size() < mImports.size()) {
-        mServices.push_back(lookup(mImports[mServices.size()]));
+        const Import& want = mImports[mServices.size()];
+        const Service* found = lookup(want);
+        if (found == nullptr) {
+            log.stub("nothing answers {}.{}", want.module, want.id);
+        }
+        mServices.push_back(found);
     }
     if (index >= mServices.size() || mServices[index] == nullptr) {
         return false;
@@ -1649,9 +1659,7 @@ void IopKernel::sifInit() {
 // destination, size, attribute} and moves each one to main memory. PADMAN md5
 // 0fa9dbfe8794e172733189ed945aff45 sends the pad state to the EE this way in
 // PadSifDmaSend @ 0x360, so the game reads nothing without it.
-void IopKernel::sifSetDma() {
-    const u32 transfers = argument(0);
-    const u32 count = argument(1);
+void IopKernel::runSifTransfers(u32 transfers, u32 count) {
     for (u32 i = 0; i < count; ++i) {
         const u32 entry = transfers + i * kSifTransferSize;
         const u32 source = mMemory.read32(entry);
@@ -1662,6 +1670,34 @@ void IopKernel::sifSetDma() {
         }
         log.trace("sif dma {:08x} to {:08x}, {} bytes", source, destination, size);
     }
+}
+
+void IopKernel::sifSetDma() {
+    const u32 count = argument(1);
+    runSifTransfers(argument(0), count);
+    returnValue(count);
+}
+
+// SIFCMD: SifGetOtherData @ 0xad4
+// It asks the EE for the bytes and leaves the packet to be polled; here they
+// are in place by the time it returns.
+void IopKernel::sifGetOtherData() {
+    const u32 source = argument(1);
+    const u32 destination = argument(2);
+    const u32 size = argument(3);
+    for (u32 offset = 0; offset < size; ++offset) {
+        mMemory.write8(destination + offset, mMainMemory.read8(source + offset));
+    }
+    log.trace("sif read {:08x} to {:08x}, {} bytes", source, destination, size);
+    returnValue(0);
+}
+
+// DBCMAN: dbcman_e8 @ 0x31c, which imports it as sifman ordinal 32. The
+// handler falls due as soon as the bytes are moved.
+void IopKernel::sifSetDmaIntr() {
+    const u32 count = argument(1);
+    runSifTransfers(argument(0), count);
+    mPendingHandlers.push_back({argument(2), argument(3), mIop.cpu.gpr[reg::gp]});
     returnValue(count);
 }
 

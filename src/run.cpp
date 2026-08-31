@@ -192,7 +192,8 @@ private:
 
     Machine& mMachine;
     u64 mInstructionLimit;
-    Idle mIdle{"ee", mMachine.kernel.symbols()};
+    Idle mIdle{"ee", mMachine.kernel.symbols(), mMachine.memory,
+               mMachine.kernel.watched()};
     Progress mProgress;
     std::vector<mco_coro*> mCoroutines;
     Stop mStop;
@@ -300,7 +301,7 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
         // A nested run must not start a queued call of its own: chaining them
         // that way would finish a handler chain in the reverse of its order.
         if (idling == Idling::Allowed) if (auto call = kernel.takePendingCall()) {
-            log.trace("callback {:08x}", call->function);
+            log.trace("callback {:08x} for {}", call->function, call->argument);
             const EeContext caller = interpreter.ee;
             cpu.pc = call->function;
             cpu.write64(kArgumentRegister, call->argument);
@@ -412,7 +413,7 @@ void countExecuted(Machine& machine, u32 instructions) {
         cpu.write64(kArgumentRegister + 2, call->thirdArgument);
         cpu.write64(kReturnAddressRegister, kCallbackReturn);
 
-        log.trace("callback {:08x}", call->function);
+        log.trace("callback {:08x} for {}", call->function, call->argument);
         kernel.enterHandler();
         const Stop stop = runUntil(machine, kCallbackReturn,
                                    kernel.executed() + kCallLimit, Idling::Blocked);

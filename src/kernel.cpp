@@ -94,7 +94,8 @@ constexpr u32 kSoftwareRegisters = 0x20;
 }  // namespace
 
 Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config)
-    : mContext(ctx), mMemory(memory), mIop(memory, mOutput, {}, config.hostModules) {
+    : mContext(ctx), mMemory(memory), mWatched(config.watch),
+      mIop(memory, mOutput, {}, config.hostModules, mWatched) {
     mMemory.attach(&mMmio);
     mMmio.attach(mMemory, mContext.cpu);
     installSyscallTable(mMemory);
@@ -1273,9 +1274,10 @@ s32 Kernel::enableDmac(u32 channel, bool enable) {
 void Kernel::queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32 cause) {
     mThreads.clearReschedule();
     const usize before = mPendingCalls.size();
+    ++mChains;
     for (const IntrHandler* handler : chain) {
         if (handler->state == handler_state::kUser && handler->func != 0) {
-            mPendingCalls.push_back(GuestCall{handler->func, cause, handler->argument, 0, true});
+            mPendingCalls.push_back(GuestCall{handler->func, cause, handler->argument, 0, mChains});
         }
     }
     if (mPendingCalls.size() == before) {
@@ -1308,6 +1310,7 @@ void Kernel::deliverInterrupts() {
     if ((status & kStatusIntc) != 0) {
         if (const std::optional<u32> cause = interrupts.pendingIntc()) {
             interrupts.acknowledgeIntc(*cause);
+            log.trace("intc interrupt on cause {}", *cause);
             queueHandlerChain(interrupts.intcChain(*cause), *cause);
             return;
         }
@@ -1315,6 +1318,7 @@ void Kernel::deliverInterrupts() {
     if ((status & kStatusDmac) != 0) {
         if (const std::optional<u32> channel = interrupts.pendingDmac()) {
             interrupts.acknowledgeDmac(*channel);
+            log.trace("dmac interrupt on channel {}", *channel);
             queueHandlerChain(interrupts.dmacChain(*channel), *channel);
         }
     }
@@ -1518,11 +1522,13 @@ bool Kernel::resumeFromSyscallHandler() {
     return true;
 }
 
+// A negative answer ends the handler's own chain, not one an interrupt started
+// while it ran.
 void Kernel::completePendingCall(u32 result) {
-    if (static_cast<s32>(result) >= 0) {
+    if (static_cast<s32>(result) >= 0 || mRunningChain == 0) {
         return;
     }
-    while (!mPendingCalls.empty() && mPendingCalls.front().inChain) {
+    while (!mPendingCalls.empty() && mPendingCalls.front().chain == mRunningChain) {
         mPendingCalls.erase(mPendingCalls.begin());
     }
 }
@@ -1533,6 +1539,7 @@ std::optional<GuestCall> Kernel::takePendingCall() {
     }
     const GuestCall call = mPendingCalls.front();
     mPendingCalls.erase(mPendingCalls.begin());
+    mRunningChain = call.chain;
     return call;
 }
 

@@ -26,6 +26,7 @@ private:
     void reportModel(std::span<u8> data);
     void reportActuator(u8 selector, std::span<u8> data);
     void reportCombination(std::span<u8> data);
+    void reportButtonMask(std::span<u8> data);
     void reportMode(u8 selector, std::span<u8> data);
     void mapMotors(std::span<const u8> payload, std::span<u8> data);
 

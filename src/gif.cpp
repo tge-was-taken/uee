@@ -10,6 +10,12 @@ constexpr u32 kModeRegister = 0x10003010;
 constexpr u32 kStatusRegister = 0x10003020;
 constexpr u32 kPath3Masked = 1u << 1;
 
+// GIF_STAT's count of the quadwords queued in the FIFO. This GIF takes one as
+// it arrives and nothing ever queues, so the count is reported as one to let a
+// poll for data having reached the GIF finish.
+constexpr u32 kFifoCountShift = 24;
+constexpr u32 kFifoCount = 1;
+
 constexpr u32 kSignalLabelId = 0x12001080;
 
 constexpr u32 kSignal = 0x60;
@@ -42,7 +48,7 @@ std::optional<u32> Gif::read(u32 address) const {
     switch (address) {
         case kControlRegister: return mControl;
         case kModeRegister: return mMode;
-        case kStatusRegister: return mStatus;
+        case kStatusRegister: return mStatus | (kFifoCount << kFifoCountShift);
         default: return std::nullopt;
     }
 }

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "idle.h"
+
+#include <span>
 #include "iop_context.h"
 #include "iop_translate.h"
 #include "irx.h"
@@ -25,7 +27,8 @@ void enterModule(IopContext& iop, const IrxModule& module);
 // One coroutine per guest thread.
 class IopScheduler {
 public:
-    IopScheduler(IopMachine& machine, const Symbols& symbols);
+    IopScheduler(IopMachine& machine, const Symbols& symbols,
+                 std::span<const u32> watched = {});
     ~IopScheduler();
 
     IopScheduler(const IopScheduler&) = delete;

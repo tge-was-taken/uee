@@ -36,7 +36,7 @@ private:
     static constexpr usize kPorts = 2;
 
     void runQueue();
-    void answerCommand(u32 port, usize sent, usize clocked);
+    bool answerCommand(u32 port, usize sent, usize clocked);
     bool answerAsDevice(u32 port, std::span<const u8> command, std::span<u8> response);
 
     IopKernel* mKernel = nullptr;

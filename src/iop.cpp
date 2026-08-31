@@ -23,10 +23,11 @@ constexpr u32 kResultRegister = 2;
 }  // namespace
 
 Iop::Iop(Memory& mainMemory, std::string& console, std::span<TranslatedIrx* const> translated,
-         std::span<const std::string> hostModules)
+         std::span<const std::string> hostModules, std::span<const u32> watched)
     : mKernel(mInterpreter.iop, mMemory, mainMemory, mImports,
               {kIopHeapBase, kIopStackTop - kIopStackSize}, console),
-      mTranslated(translated), mHostModules(hostModules.begin(), hostModules.end()) {
+      mTranslated(translated), mHostModules(hostModules.begin(), hostModules.end()),
+      mWatched(watched.begin(), watched.end()) {
     mMmio.attach(mMemory, mKernel);
     for (const TranslatedIrx* module : mTranslated) {
         mNextBase = std::max(mNextBase, (module->end + 0xFu) & ~0xFu);

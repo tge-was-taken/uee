@@ -28,6 +28,7 @@ constexpr u32 kChangeSubAddress = 0x80000000;
 constexpr u32 kSetRegister = 0x80000001;
 constexpr u32 kInitCommand = 0x80000002;
 constexpr u32 kResetCommand = 0x80000003;
+constexpr u32 kSetDmaMarker = 0x80000004;
 constexpr u32 kRpcEnd = 0x80000008;
 constexpr u32 kRpcBind = 0x80000009;
 constexpr u32 kRpcCall = 0x8000000A;

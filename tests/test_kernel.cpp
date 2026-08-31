@@ -540,7 +540,7 @@ void checkPadSwitchesToAnalog() {
 
     const std::vector<u8> answer = askPad(pad, {0x01, 0x42, 0x00}, 9);
     checkEqual(answer[1], static_cast<u8>(0x73), "an analog pad answers with the analog id");
-    checkEqual(answer[5], static_cast<u8>(0x80), "the sticks read centred");
+    checkEqual(answer[5], static_cast<u8>(0x7F), "the sticks read centred");
 }
 
 void checkPadAnswersTheMappingItReplaces() {
@@ -599,6 +599,38 @@ void checkSio2AnswersEveryQueuedCommand() {
     checkEqual(answer[1], static_cast<u8>(0x41), "the port with a pad answers as one");
     checkEqual(answer[6], static_cast<u8>(0xFF),
                "the port with nothing in it answers with an idle line");
+}
+
+// Mc2Sio2RunTransfer @ 0x8b8 retries unless bits 12 to 15 of RECV1 read 0x1000,
+// and PadStateSlotGet @ 0x4950 gives up on the entry whose bit from 16 is set.
+void checkSio2ReportsWhichQueueEntryFoundNothing() {
+    constexpr u32 kSio2Receive1 = 0x6C;
+    constexpr u32 kTransferBits = 0xF000;
+    constexpr u32 kFinished = 0x1000;
+
+    Sio2Fixture withPadOnly;
+    withPadOnly.write(kSio2Send3, 0 | (5 << 8));
+    withPadOnly.write(kSio2Control, 0x3BC);
+    for (const u8 byte : {0x01, 0x42, 0x00, 0x00, 0x00}) {
+        withPadOnly.write(kSio2FifoIn, byte);
+    }
+    withPadOnly.write(kSio2Control, 0x3BD);
+    const u32 answered = withPadOnly.read(kSio2Receive1);
+    checkEqual(answered & kTransferBits, kFinished, "a queue that found its device reads as done");
+    checkEqual((answered >> 16) & 1, 0u, "and leaves its entry unmarked");
+
+    Sio2Fixture withEmptySecond;
+    withEmptySecond.write(kSio2Send3, 0 | (5 << 8));
+    withEmptySecond.write(kSio2Send3 + 4, 1 | (5 << 8));
+    withEmptySecond.write(kSio2Control, 0x3BC);
+    for (const u8 byte : {0x01, 0x42, 0x00, 0x00, 0x00, 0x01, 0x42, 0x00, 0x00, 0x00}) {
+        withEmptySecond.write(kSio2FifoIn, byte);
+    }
+    withEmptySecond.write(kSio2Control, 0x3BD);
+    const u32 missed = withEmptySecond.read(kSio2Receive1);
+    checkEqual((missed >> 16) & 1, 0u, "the entry that found a pad stays unmarked");
+    checkEqual((missed >> 17) & 1, 1u, "the entry that found nothing is named");
+    checkEqual(missed & kTransferBits, 0xD000u, "and the queue no longer reads as done");
 }
 
 // SIO2MAN leaves the FIFO reset bits set once Sio2FifoReset @ 0x1a4 has written
@@ -844,6 +876,7 @@ int main() {
     checkPadSwitchesToAnalog();
     checkPadAnswersTheMappingItReplaces();
     checkSio2AnswersEveryQueuedCommand();
+    checkSio2ReportsWhichQueueEntryFoundNothing();
     checkSio2KeepsTheCommandWrittenAfterAReset();
     checkSio2StopsAtAnEmptyEntry();
     checkSpu2PlaysAKeyedOnVoice();

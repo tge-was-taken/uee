@@ -45,10 +45,17 @@ constexpr u32 kLengthMask = 0x1FF;
 constexpr u32 kSendShift = 8;
 constexpr u32 kReceiveShift = 18;
 
-// PadSlotStateAdvance @ 0x4c4c gives up on a slot when bit 13 of RECV1 is set,
-// which an empty port is not: it answers with an idle line.
-constexpr u32 kDeviceAnswered = 0x1100;
-constexpr u32 kNoDevice = 0x1D100;
+// What a finished queue leaves in RECV1, with one bit per entry that found no
+// device at 16 and again at 8. Mc2Sio2RunTransfer @ 0x8b8 reads the first two,
+// PadStateSlotGet @ 0x4950 the bit at 16, over the place in the queue that
+// PadSlotResultFetch @ 0x4b30 gave the entry.
+constexpr u32 kQueueFinished = 0x1000;
+constexpr u32 kQueueIncomplete = 0xC000;
+constexpr u32 kMissingShift = 16;
+constexpr u32 kMissingLowShift = 8;
+
+// RECV2 does not vary with what answered.
+constexpr u32 kQueueStatus = 0x0F;
 constexpr u8 kIdle = 0xFF;
 
 // The address that leads a command: PadCmd42Payload5 @ 0x66d0 sends 0x01 and
@@ -140,13 +147,20 @@ void Sio2::readFifoOut(std::span<u8> bytes) {
 
 void Sio2::runQueue() {
     mOut.clear();
+    mReceive1 = kQueueFinished;
+    mReceive2 = kQueueStatus;
+    u32 index = 0;
     for (const u32 entry : mSend3) {
         if (entry == 0) {
             break;
         }
         const usize sent = (entry >> kSendShift) & kLengthMask;
         const usize received = (entry >> kReceiveShift) & kLengthMask;
-        answerCommand(entry & kPortMask, sent, std::max(sent, received));
+        if (!answerCommand(entry & kPortMask, sent, std::max(sent, received))) {
+            mReceive1 |= kQueueIncomplete | (1u << (kMissingShift + index)) |
+                         (1u << (kMissingLowShift + index));
+        }
+        ++index;
     }
     mIn.clear();
     mReceive3 = static_cast<u32>(mOut.size());
@@ -173,7 +187,7 @@ bool Sio2::answerAsDevice(u32 port, std::span<const u8> command, std::span<u8> r
 
 // A command's bytes are taken even when nothing answers it, since the next
 // entry's follow them in the same FIFO.
-void Sio2::answerCommand(u32 port, usize sent, usize clocked) {
+bool Sio2::answerCommand(u32 port, usize sent, usize clocked) {
     std::vector<u8> command(sent, 0);
     for (u8& byte : command) {
         if (mIn.empty()) {
@@ -185,11 +199,11 @@ void Sio2::answerCommand(u32 port, usize sent, usize clocked) {
 
     std::vector<u8> response(clocked, kIdle);
     const bool answered = answerAsDevice(port, command, response);
-    mReceive1 = answered ? kDeviceAnswered : kNoDevice;
     if (log.tracing()) {
         log.trace("port {} sent {}got {}", port, toHex(command), toHex(response));
     }
     mOut.insert(mOut.end(), response.begin(), response.end());
+    return answered;
 }
 
 }  // namespace uee
