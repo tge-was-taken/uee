@@ -17,6 +17,7 @@ public:
     void answer(std::span<const u8> command, std::span<u8> response);
 
 private:
+    std::span<u8> replyTo(usize commandBytes, std::span<u8> response);
     void reportSpecs(std::span<u8> data);
     void reportTerminator(std::span<u8> data);
     void setTerminator(u8 value);

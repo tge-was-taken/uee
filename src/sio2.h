@@ -5,9 +5,9 @@
 #include "pad.h"
 #include "types.h"
 
-#include <deque>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace uee {
 
@@ -24,10 +24,11 @@ public:
     std::optional<u32> read(u32 address);
     bool write(u32 address, u32 value);
 
-    // What the SIO2 DMA channels move, rather than a byte at a time.
-    void writeFifoIn(std::span<const u8> bytes);
-    void readFifoOut(std::span<u8> bytes);
-    usize pendingOut() const { return mOut.size(); }
+    // The DMA gives each queued command a block of its own, where a driver
+    // writing the FIFO a byte at a time packs them end to end.
+    void writeFifoIn(std::span<const u8> bytes, u32 blockBytes);
+    void readFifoOut(std::span<u8> bytes, u32 blockBytes);
+    bool hasAnswers() const { return !mAnswerStarts.empty(); }
 
 private:
     static constexpr usize kQueued = 16;
@@ -36,7 +37,7 @@ private:
     static constexpr usize kPorts = 2;
 
     void runQueue();
-    bool answerCommand(u32 port, usize sent, usize clocked);
+    bool answerCommand(u32 port, std::span<const u8> command, usize clocked);
     bool answerAsDevice(u32 port, std::span<const u8> command, std::span<u8> response);
 
     IopKernel* mKernel = nullptr;
@@ -49,8 +50,11 @@ private:
     u32 mReceive2 = 0;
     u32 mReceive3 = 0;
     u32 mStatus = 0;
-    std::deque<u8> mIn;
-    std::deque<u8> mOut;
+    std::vector<u8> mIn;
+    std::vector<u8> mOut;
+    std::vector<u32> mAnswerStarts;
+    u32 mInBlock = 0;
+    usize mOutRead = 0;
 };
 
 }  // namespace uee

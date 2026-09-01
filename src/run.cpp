@@ -31,9 +31,15 @@ constexpr u32 kNoHalt = 1;
 // Guest calls become host calls, so this carries the guest's own call depth.
 constexpr usize kThreadStackSize = 8 * 1024 * 1024;
 
-constexpr u64 kCallLimit = 1'000'000'000;
+// A syscall the guest is inside cannot outlast the run that made it, so this
+// only has to be long enough that a real one never trips it.
+constexpr std::chrono::seconds kCallLimit{30};
 
 constexpr u64 kIdleStep = kInstructionsPerHsync;
+
+// A guest waiting on the display is idle for a field or two, so longer than this
+// is nothing coming rather than a run that ended mid wait.
+constexpr u64 kIdleFieldsStuck = 60;
 
 struct Step {
     std::optional<Stop> stop;
@@ -95,8 +101,32 @@ constexpr u64 kIdleInterval = 0xFFFF;
 // progress on the stack it is parked on.
 constexpr u64 kIdleResumesReported = 100000;
 
-// The deadline is an executed-instruction count, not a budget: a nested run
-// shares the one counter the clock reads, so it cannot have one of its own.
+// Wall clock, because how far a guest gets in a given instruction count says
+// more about this interpreter's speed than about the guest.
+class Deadline {
+public:
+    explicit Deadline(std::optional<std::chrono::milliseconds> limit)
+        : mAt(limit ? std::chrono::steady_clock::now() + *limit
+                    : std::chrono::steady_clock::time_point::max()) {}
+
+    bool passed() {
+        if (++mSteps < kStride) {
+            return mPassed;
+        }
+        mSteps = 0;
+        mPassed = std::chrono::steady_clock::now() >= mAt;
+        return mPassed;
+    }
+
+private:
+    // Asking the clock costs more than the step it bounds.
+    static constexpr u32 kStride = 1024;
+
+    std::chrono::steady_clock::time_point mAt;
+    u32 mSteps = 0;
+    bool mPassed = false;
+};
+
 // How fast the guest is actually running. A run that slows to a crawl reads as a
 // hang without this, since everything downstream simply stops happening.
 class Progress {
@@ -122,16 +152,17 @@ private:
 
 constexpr usize kRunningThread = static_cast<usize>(-1);
 
-Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* idle = nullptr,
+Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling,
+              Idle* idle = nullptr,
               Progress* progress = nullptr, usize owner = kRunningThread);
-std::optional<Stop> runIdle(Machine& machine, u64 deadline);
+std::optional<Stop> runIdle(Machine& machine, Deadline& deadline);
 
 // A thread that gives up the processor part way through a call tree has to
 // resume there, which needs its host stack kept intact.
 class Scheduler {
 public:
-    Scheduler(Machine& machine, u64 instructionLimit)
-        : mMachine(machine), mInstructionLimit(instructionLimit) {}
+    Scheduler(Machine& machine, std::optional<std::chrono::milliseconds> limit)
+        : mMachine(machine), mDeadline(limit) {}
 
     ~Scheduler() {
         for (mco_coro* coroutine : mCoroutines) {
@@ -143,8 +174,8 @@ public:
 
     Stop run() {
         for (;;) {
-            if (mMachine.kernel.executed() >= mInstructionLimit) {
-                return Stop{StopReason::ReachedLimit, mMachine.ee().cpu.pc, {}};
+            if (mDeadline.passed()) {
+                return Stop{StopReason::TimedOut, mMachine.ee().cpu.pc, {}};
             }
             mResuming = mMachine.kernel.currentThread();
             mco_coro* coroutine = coroutineFor(mResuming);
@@ -173,7 +204,7 @@ private:
     }
 
     void runThread() {
-        mStop = runUntil(mMachine, kNoHalt, mInstructionLimit, Idling::Allowed, &mIdle, &mProgress,
+        mStop = runUntil(mMachine, kNoHalt, mDeadline, Idling::Allowed, &mIdle, &mProgress,
                          mResuming);
         mStopped = true;
     }
@@ -191,7 +222,7 @@ private:
     }
 
     Machine& mMachine;
-    u64 mInstructionLimit;
+    Deadline mDeadline;
     Idle mIdle{"ee", mMachine.kernel.symbols(), mMachine.memory,
                mMachine.kernel.watched()};
     Progress mProgress;
@@ -223,14 +254,14 @@ Step runDelaySlot(Machine& machine, u32 pc) {
     }
 }
 
-Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* idle,
+Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, Idle* idle,
               Progress* progress, usize owner) {
     Interpreter& interpreter = machine.interpreter;
     Memory& memory = machine.memory;
     Kernel& kernel = machine.kernel;
     R5900& cpu = interpreter.ee.cpu;
 
-    while (kernel.executed() < deadline) {
+    while (!deadline.passed()) {
         if (cpu.pc == kSyscallHandlerReturn && kernel.resumeFromSyscallHandler()) {
             continue;
         }
@@ -328,17 +359,19 @@ Stop runUntil(Machine& machine, u32 haltPc, u64 deadline, Idling idling, Idle* i
         }
     }
 
-    return Stop{StopReason::ReachedLimit, cpu.pc, {}};
+    return Stop{StopReason::TimedOut, cpu.pc, {}};
 }
 
 // A stop here is the callback's own, not a deadlock; returning nothing means
 // the processor has work again.
-std::optional<Stop> runIdle(Machine& machine, u64 deadline) {
+std::optional<Stop> runIdle(Machine& machine, Deadline& deadline) {
     Kernel& kernel = machine.kernel;
     R5900& cpu = machine.ee().cpu;
 
-    while (kernel.isIdle() && kernel.executed() < deadline) {
+    u64 idled = 0;
+    while (kernel.isIdle() && !deadline.passed()) {
         kernel.countExecuted(kIdleStep);
+        idled += kIdleStep;
         kernel.advanceClock();
         kernel.deliverInterrupts();
 
@@ -360,11 +393,14 @@ std::optional<Stop> runIdle(Machine& machine, u64 deadline) {
             kernel.dispatchAfterInterrupt();
         }
     }
-    if (kernel.isIdle()) {
-        kernel.reportNoActiveThreads();
-        return Stop{StopReason::WentIdle, cpu.pc, {}};
+    if (!kernel.isIdle()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    if (idled < kIdleFieldsStuck * kHsyncPerField * kIdleStep) {
+        return Stop{StopReason::TimedOut, cpu.pc, {}};
+    }
+    kernel.reportNoActiveThreads();
+    return Stop{StopReason::WentIdle, cpu.pc, {}};
 }
 
 std::string_view nameOf(StopReason reason) {
@@ -372,6 +408,7 @@ std::string_view nameOf(StopReason reason) {
         case StopReason::Exited: return "exited";
         case StopReason::Returned: return "returned";
         case StopReason::ReachedLimit: return "hit the instruction limit";
+        case StopReason::TimedOut: return "ran out of time";
         case StopReason::Unimplemented: return "unimplemented instruction";
         case StopReason::Undecodable: return "undecodable instruction";
         case StopReason::UnknownSyscall: return "unknown syscall";
@@ -415,8 +452,8 @@ void countExecuted(Machine& machine, u32 instructions) {
 
         log.trace("callback {:08x} for {}", call->function, call->argument);
         kernel.enterHandler();
-        const Stop stop = runUntil(machine, kCallbackReturn,
-                                   kernel.executed() + kCallLimit, Idling::Blocked);
+        Deadline deadline{kCallLimit};
+        const Stop stop = runUntil(machine, kCallbackReturn, deadline, Idling::Blocked);
         kernel.leaveHandler();
 
         kernel.completePendingCall(static_cast<u32>(cpu.gpr[kResultRegister].lo));
@@ -451,7 +488,7 @@ bool syscall(Machine& machine, s32 number, u32 resumePc) {
     // thread looks blocked for as long as it is on the stack. Idling there would
     // report a processor with nothing to run and unwind the handler.
     const Idling idling = kernel.inHandler() ? Idling::Blocked : Idling::Allowed;
-    const u64 deadline = kernel.executed() + kCallLimit;
+    Deadline deadline{kCallLimit};
     while (kernel.isIdle() && idling == Idling::Allowed) {
         if (runIdle(machine, deadline)) {
             return false;
@@ -475,7 +512,8 @@ void step(Machine& machine, u32 pc) {
     // Without this the pc could land on a function entry and re-enter translated
     // code, running a whole call tree, while only one instruction was asked for.
     Machine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
-    runUntil(interpretOnly, pc + 4, machine.kernel.executed() + kCallLimit,
+    Deadline deadline{kCallLimit};
+    runUntil(interpretOnly, pc + 4, deadline,
              machine.kernel.inHandler() ? Idling::Blocked : Idling::Allowed);
 }
 
@@ -485,14 +523,15 @@ bool call(Machine& machine, u32 target, u32 returnTo) {
         // Dispatching inside the subtree would put host frames at a depth
         // the guest stack does not have.
         Machine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
-        runUntil(interpretOnly, returnTo, machine.kernel.executed() + kCallLimit,
+        Deadline deadline{kCallLimit};
+        runUntil(interpretOnly, returnTo, deadline,
                  machine.kernel.inHandler() ? Idling::Blocked : Idling::Allowed);
     }
     return machine.ee().cpu.pc == returnTo;
 }
 
-Stop run(Machine& machine, u64 instructionLimit) {
-    return Scheduler(machine, instructionLimit).run();
+Stop run(Machine& machine, std::optional<std::chrono::milliseconds> limit) {
+    return Scheduler(machine, limit).run();
 }
 
 }  // namespace uee

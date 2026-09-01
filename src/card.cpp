@@ -21,13 +21,26 @@ constexpr u8 kSetTerminator = 0x27;
 constexpr u8 kGetTerminator = 0x28;
 constexpr u8 kMagicGate = 0xF3;
 
-constexpr u8 kIdle = 0xFF;
+// Mc2SendCmd12 @ 0xa64, Mc2SendCmd24 @ 0x13c0, Mc2SendCmd25 @ 0x1674 and
+// Mc2SendCmdBF @ 0x18a0 check only the terminator, so nothing else is modelled.
+constexpr u8 kCommand12 = 0x12;
+constexpr u8 kCommand24 = 0x24;
+constexpr u8 kCommand25 = 0x25;
+constexpr u8 kCommandBF = 0xBF;
+
 constexpr u8 kAck = 0x2B;
-constexpr usize kAckIndex = 2;
-constexpr usize kPayloadIndex = 3;
 
 // Mc2PageAddressPack @ 0x193c checks an address with the same xor.
 constexpr usize kAddressBytes = 4;
+
+// Sio2dPortABuildCmd @ 0x1350 pads its probe to five bytes where the card reads
+// two, so what the card decodes is not what SIO2 clocks.
+constexpr usize kShortCommand = 2;
+constexpr usize kOneArgument = 3;
+constexpr usize kPageCommand = 7;
+// The address, the command and the count around the bytes written, plus the xor
+// after them: Mc2PackWriteData @ 0x1314.
+constexpr usize kWriteOverhead = 4;
 
 u8 xorOf(std::span<const u8> bytes) {
     u8 sum = 0;
@@ -49,33 +62,52 @@ void put(std::span<u8> data, std::initializer_list<u8> bytes) {
 }  // namespace
 
 void MemoryCard::answer(std::span<const u8> command, std::span<u8> response) {
-    std::fill(response.begin(), response.end(), kIdle);
-    if (command.size() < 2 || response.size() < kPayloadIndex + 1) {
+    std::fill(response.begin(), response.end(), 0);
+    if (command.size() < 2) {
         return;
     }
-    response[kAckIndex] = kAck;
-    response.back() = mTerminator;
-
     const std::span<const u8> payload = command.subspan(2);
-    const std::span<u8> data = response.subspan(kPayloadIndex, response.size() - kPayloadIndex - 1);
+    const usize count = payload.empty() ? 0 : payload[0];
 
     switch (command[1]) {
-        case kGetSpecs: reportSpecs(data); return;
-        case kGetTerminator: reportTerminator(data); return;
+        case kGetSpecs: reportSpecs(replyTo(kShortCommand, response)); return;
+        case kGetTerminator: reportTerminator(replyTo(kShortCommand, response)); return;
         case kSetTerminator:
+            replyTo(kOneArgument, response);
             setTerminator(payload.empty() ? mTerminator : payload[0]);
             return;
+        case kCommand12:
+        case kCommand24:
+        case kCommandBF: replyTo(kOneArgument, response); return;
         case kSetReadPage:
         case kSetWritePage:
-        case kSetErasePage: setPage(payload); return;
-        case kReadData: readData(data, payload.empty() ? 0 : payload[0]); return;
-        case kWriteData: writeData(payload, payload.empty() ? 0 : payload[0]); return;
+        case kSetErasePage:
+            replyTo(kPageCommand, response);
+            setPage(payload);
+            return;
+        case kReadData: readData(replyTo(kOneArgument, response), count); return;
+        case kWriteData:
+            replyTo(count + kWriteOverhead, response);
+            writeData(payload, count);
+            return;
         // MC2_S1: Mc2SendCmdF3 @ 0x934 wants an ack where every other command
         // has its first answer byte.
-        case kMagicGate: put(data, {kAck}); return;
+        case kMagicGate: put(replyTo(kShortCommand, response), {kAck}); return;
         case kProbe:
-        default: return;
+        case kCommand25:
+        default: replyTo(kShortCommand, response); return;
     }
+}
+
+// Mc2ReadPage @ 0xdb8 takes the answer to `81 43 <n>` from the fourth byte, so
+// the ack follows the command rather than sitting at a fixed offset.
+std::span<u8> MemoryCard::replyTo(usize commandBytes, std::span<u8> response) {
+    if (response.size() < commandBytes + 2) {
+        return {};
+    }
+    response[commandBytes] = kAck;
+    response.back() = mTerminator;
+    return response.subspan(commandBytes + 1, response.size() - commandBytes - 2);
 }
 
 // Mc2GetSpecs @ 0x14cc checks the xor of these eight bytes against the one
@@ -119,20 +151,15 @@ void MemoryCard::setPage(std::span<const u8> payload) {
 
 // Mc2ReadPage @ 0xdb8 takes the answer 128 bytes at a time, xor last.
 void MemoryCard::readData(std::span<u8> data, usize count) {
-    if (data.empty()) {
-        return;
-    }
-    data[0] = kAck;
     std::vector<u8> page(kCardPageBytes + kCardSpareBytes);
     mStorage->readPage(mPage, page);
 
-    const std::span<u8> out = data.subspan(1);
-    for (usize i = 0; i < count && i < out.size(); ++i) {
+    for (usize i = 0; i < count && i < data.size(); ++i) {
         const usize at = mOffset + i;
-        out[i] = at < page.size() ? page[at] : 0;
+        data[i] = at < page.size() ? page[at] : 0;
     }
-    if (count < out.size()) {
-        out[count] = xorOf(out.subspan(0, count));
+    if (count < data.size()) {
+        data[count] = xorOf(data.subspan(0, count));
     }
     mOffset += count;
 }

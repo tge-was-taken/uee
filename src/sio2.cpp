@@ -81,14 +81,8 @@ std::optional<u32> Sio2::read(u32 address) {
         return mPortControl[(address - kPortControl) / 4];
     }
     switch (address) {
-        case kFifoOut: {
-            if (mOut.empty()) {
-                return kIdle;
-            }
-            const u8 byte = mOut.front();
-            mOut.pop_front();
-            return byte;
-        }
+        case kFifoOut:
+            return mOutRead < mOut.size() ? mOut[mOutRead++] : kIdle;
         case kControl: return mControl;
         case kReceive1: return mReceive1;
         // PADMAN: PadTransferStart @ 0x5680 reads two bits out of RECV2 that
@@ -110,7 +104,10 @@ bool Sio2::write(u32 address, u32 value) {
         return true;
     }
     switch (address) {
-        case kFifoIn: mIn.push_back(static_cast<u8>(value)); return true;
+        case kFifoIn:
+            mIn.push_back(static_cast<u8>(value));
+            mInBlock = 0;
+            return true;
         case kControl: {
             // SIO2MAN leaves the reset bits set once Sio2FifoReset @ 0x1a4 has
             // written them, so only the write that raises one empties a FIFO.
@@ -118,9 +115,12 @@ bool Sio2::write(u32 address, u32 value) {
             mControl = value;
             if ((raised & kResetIn) != 0) {
                 mIn.clear();
+                mInBlock = 0;
             }
             if ((raised & kResetOut) != 0) {
                 mOut.clear();
+                mAnswerStarts.clear();
+                mOutRead = 0;
             }
             if ((value & kStart) != 0) {
                 runQueue();
@@ -132,23 +132,33 @@ bool Sio2::write(u32 address, u32 value) {
     }
 }
 
-void Sio2::writeFifoIn(std::span<const u8> bytes) {
+void Sio2::writeFifoIn(std::span<const u8> bytes, u32 blockBytes) {
     mIn.insert(mIn.end(), bytes.begin(), bytes.end());
+    mInBlock = blockBytes;
 }
 
-void Sio2::readFifoOut(std::span<u8> bytes) {
-    for (u8& byte : bytes) {
-        byte = mOut.empty() ? kIdle : mOut.front();
-        if (!mOut.empty()) {
-            mOut.pop_front();
+void Sio2::readFifoOut(std::span<u8> bytes, u32 blockBytes) {
+    std::fill(bytes.begin(), bytes.end(), 0);
+    for (usize entry = 0; entry < mAnswerStarts.size(); ++entry) {
+        const usize from = mAnswerStarts[entry];
+        const usize to = entry + 1 < mAnswerStarts.size() ? mAnswerStarts[entry + 1] : mOut.size();
+        const usize at = entry * blockBytes;
+        for (usize i = 0; i < to - from && at + i < bytes.size(); ++i) {
+            bytes[at + i] = mOut[from + i];
         }
     }
+    mOut.clear();
+    mAnswerStarts.clear();
+    mOutRead = 0;
 }
 
 void Sio2::runQueue() {
     mOut.clear();
+    mAnswerStarts.clear();
+    mOutRead = 0;
     mReceive1 = kQueueFinished;
     mReceive2 = kQueueStatus;
+    usize packed = 0;
     u32 index = 0;
     for (const u32 entry : mSend3) {
         if (entry == 0) {
@@ -156,13 +166,21 @@ void Sio2::runQueue() {
         }
         const usize sent = (entry >> kSendShift) & kLengthMask;
         const usize received = (entry >> kReceiveShift) & kLengthMask;
-        if (!answerCommand(entry & kPortMask, sent, std::max(sent, received))) {
+        const usize at = mInBlock != 0 ? index * mInBlock : packed;
+        packed += sent;
+
+        std::vector<u8> command(sent, 0);
+        for (usize i = 0; i < sent && at + i < mIn.size(); ++i) {
+            command[i] = mIn[at + i];
+        }
+        if (!answerCommand(entry & kPortMask, command, std::max(sent, received))) {
             mReceive1 |= kQueueIncomplete | (1u << (kMissingShift + index)) |
                          (1u << (kMissingLowShift + index));
         }
         ++index;
     }
     mIn.clear();
+    mInBlock = 0;
     mReceive3 = static_cast<u32>(mOut.size());
     mControl &= ~kStart;
     mStatus |= 1;
@@ -185,23 +203,13 @@ bool Sio2::answerAsDevice(u32 port, std::span<const u8> command, std::span<u8> r
     return false;
 }
 
-// A command's bytes are taken even when nothing answers it, since the next
-// entry's follow them in the same FIFO.
-bool Sio2::answerCommand(u32 port, usize sent, usize clocked) {
-    std::vector<u8> command(sent, 0);
-    for (u8& byte : command) {
-        if (mIn.empty()) {
-            break;
-        }
-        byte = mIn.front();
-        mIn.pop_front();
-    }
-
+bool Sio2::answerCommand(u32 port, std::span<const u8> command, usize clocked) {
     std::vector<u8> response(clocked, kIdle);
     const bool answered = answerAsDevice(port, command, response);
     if (log.tracing()) {
         log.trace("port {} sent {}got {}", port, toHex(command), toHex(response));
     }
+    mAnswerStarts.push_back(static_cast<u32>(mOut.size()));
     mOut.insert(mOut.end(), response.begin(), response.end());
     return answered;
 }

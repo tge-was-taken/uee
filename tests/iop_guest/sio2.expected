@@ -22,4 +22,6 @@ card write acked: 1
 card read: 10 11 12 13
 card read checksum: 1
 card read terminator: 1
+block 0 terminator: 55
+block 1 page bytes: 512
 -- TEST END

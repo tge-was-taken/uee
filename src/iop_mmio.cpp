@@ -35,6 +35,15 @@ constexpr usize kRenderFrames = 256;
 constexpr u32 kSio2Base = 0x1F808200;
 constexpr u32 kSio2Size = 0x100;
 
+// SIO2MAN gives the channel one block per queued command, counted in words.
+constexpr u32 blockBytesOf(u32 bcr) {
+    return (bcr & 0xFFFF) * 4;
+}
+
+constexpr u32 blocksIn(u32 bcr) {
+    return bcr >> 16;
+}
+
 }  // namespace
 
 void IopMmio::attach(Memory& memory, IopKernel& kernel) {
@@ -156,38 +165,40 @@ void IopMmio::advance(u64 cycles) {
 // The device answers the queue as the start bit is written, so the channel that
 // reads it back is the one write that has to look at the device afterwards.
 void IopMmio::readFromSio2() {
-    if ((mSio2Read.chcr & kStart) == 0 || mSio2.pendingOut() == 0) {
+    if ((mSio2Read.chcr & kStart) == 0 || !mSio2.hasAnswers()) {
         return;
     }
-    const u32 bytes = (mSio2Read.bcr & 0xFFFF) * (mSio2Read.bcr >> 16) * 4;
-    std::vector<u8> answer(bytes);
-    mSio2.readFifoOut(answer);
+    const u32 block = blockBytesOf(mSio2Read.bcr);
+    std::vector<u8> answer(static_cast<usize>(block) * blocksIn(mSio2Read.bcr));
+    mSio2.readFifoOut(answer, block);
     for (usize i = 0; i < answer.size(); ++i) {
         mMemory->write8(mSio2Read.madr + static_cast<u32>(i), answer[i]);
     }
     mSio2Read.chcr &= ~kStart;
 }
 
-void IopMmio::writeToSio2(const DmaChannel& channel, u32 bytes) {
-    std::vector<u8> command(bytes);
+void IopMmio::writeToSio2(const DmaChannel& channel) {
+    const u32 block = blockBytesOf(channel.bcr);
+    std::vector<u8> command(static_cast<usize>(block) * blocksIn(channel.bcr));
     for (usize i = 0; i < command.size(); ++i) {
         command[i] = mMemory->read8(channel.madr + static_cast<u32>(i));
     }
-    mSio2.writeFifoIn(command);
+    mSio2.writeFifoIn(command, block);
 }
 
 // LIBSD waits on the channel's interrupt rather than on the data, and pacing it
 // at the rate the samples play keeps a driver that refills on it in step.
 void IopMmio::startTransfer(DmaChannel& channel) {
-    const u32 words = (channel.bcr & 0xFFFF) * (channel.bcr >> 16);
     if (channel.base == mSio2Write.base) {
-        writeToSio2(channel, words * 4);
+        writeToSio2(channel);
         channel.chcr &= ~kStart;
         return;
     }
     if (channel.base == mSio2Read.base) {
         return;
     }
+
+    const u32 words = (channel.bcr & 0xFFFF) * blocksIn(channel.bcr);
     log.trace("spu dma from {:08x}, {} words, line {}", channel.madr, words, channel.line);
     sendToSoundMemory(channel, words);
     channel.chcr &= ~kStart;

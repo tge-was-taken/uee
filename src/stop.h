@@ -16,6 +16,7 @@ enum class StopReason {
     Exited,
     Returned,
     ReachedLimit,
+    TimedOut,
     Unimplemented,
     Undecodable,
     UnknownSyscall,

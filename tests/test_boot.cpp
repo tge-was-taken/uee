@@ -7,6 +7,7 @@
 #include "types.h"
 
 #include <charconv>
+#include <chrono>
 #include <format>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <string_view>
 #include <vector>
 
@@ -21,7 +23,8 @@ namespace {
 
 uee::LoggerChannel log("boot");
 
-constexpr u64 kInstructionLimit = 2'000'000'000;
+// Only a bound on a guest that never reaches its checkpoint.
+constexpr std::chrono::seconds kTimeLimit{300};
 
 struct Options {
     std::filesystem::path elf;
@@ -72,17 +75,32 @@ Options parseArguments(int argc, char** argv) {
     return options;
 }
 
-// Running out of budget is what a game that is still going looks like, and a
-// guest that returned from main has finished on purpose. Every other reason is
-// the runtime failing to keep up with the guest.
+// A guest stops on its checkpoint or returns from main. Every other reason,
+// running out of time included, is the runtime failing to keep up with it.
 bool isClean(uee::StopReason reason) {
-    return reason == uee::StopReason::ReachedLimit || reason == uee::StopReason::Exited;
+    return reason == uee::StopReason::Stopped || reason == uee::StopReason::Exited;
 }
 
-u64 instructionLimit() {
-    const char* limit = std::getenv("UEE_LIMIT");
-    return limit != nullptr ? std::strtoull(limit, nullptr, 0) : kInstructionLimit;
+std::chrono::milliseconds timeLimit() {
+    const char* seconds = std::getenv("UEE_SECONDS");
+    return seconds != nullptr ? std::chrono::milliseconds(std::strtoull(seconds, nullptr, 0) * 1000)
+                              : std::chrono::duration_cast<std::chrono::milliseconds>(kTimeLimit);
 }
+
+// Ending on the checkpoint rather than on the clock keeps what the test covers
+// the same however fast the host is.
+class UntilCheckpoint : public uee::StopRequest {
+public:
+    UntilCheckpoint(const uee::Hooks& hooks, std::string checkpoint, u64 entries)
+        : mHooks(hooks), mCheckpoint(std::move(checkpoint)), mEntries(entries) {}
+
+    bool isStopRequested() override { return mHooks.getHits(mCheckpoint) >= mEntries; }
+
+private:
+    const uee::Hooks& mHooks;
+    std::string mCheckpoint;
+    u64 mEntries;
+};
 
 }  // namespace
 
@@ -112,8 +130,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    uee::Machine machine{interpreter, memory, kernel, nullptr};
-    const uee::Stop stop = uee::run(machine, instructionLimit());
+    UntilCheckpoint until{kernel.hooks(), options.checkpoint, options.entries};
+    uee::Machine machine{interpreter, memory, kernel, nullptr, nullptr,
+                         options.checkpoint.empty() ? nullptr : &until};
+    const uee::Stop stop = uee::run(machine, timeLimit());
     const u64 reached = kernel.hooks().getHits(options.checkpoint);
 
     if (isClean(stop.reason) && reached >= options.entries) {

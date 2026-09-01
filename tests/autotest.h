@@ -15,11 +15,13 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <chrono>
 #include <vector>
 
 namespace uee::autotest {
 
-constexpr u64 kInstructionLimit = 500'000'000;
+// Only a bound on a guest that never finishes: one that does prints and exits.
+constexpr std::chrono::seconds kTimeLimit{120};
 constexpr usize kReportedDifferences = 12;
 
 inline std::vector<u8> readFile(const std::filesystem::path& path) {
@@ -88,7 +90,7 @@ inline int run(int argc, char** argv, FunctionRunner translated) {
     interpreter.ee.cpu.pc = loadElf(readFile(elfPath), memory).entry;
 
     Machine machine{interpreter, memory, kernel, translated};
-    const Stop stop = run(machine, kInstructionLimit);
+    const Stop stop = run(machine, kTimeLimit);
     const std::string& actual = kernel.readOutput();
     const std::vector<u8> expectedBytes = readFile(argv[2]);
     const std::string expected(expectedBytes.begin(), expectedBytes.end());

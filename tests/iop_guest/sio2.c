@@ -214,7 +214,8 @@ static void setPage(int cmd, int page)
 }
 
 // MC2_S1: Mc2WritePage @ 0x111c sets the page and then sends the bytes with
-// their checksum, and Mc2ReadPage @ 0xdb8 reads them back the same way.
+// their checksum, and Mc2ReadPage @ 0xdb8 reads them back the same way. The ack
+// follows the command, which is why the two land differently.
 static void cardPage(void)
 {
     int i;
@@ -226,7 +227,7 @@ static void cardPage(void)
     command[2] = 4;
     command[7] = checksum(&command[3], 4);
     card(CARD_WRITE, 8, 10);
-    printf("card write acked: %d\n", answer[2] == CARD_ACK);
+    printf("card write acked: %d\n", answer[8] == CARD_ACK);
 
     setPage(CARD_READ_PAGE, 1);
     command[2] = 4;
@@ -235,6 +236,43 @@ static void cardPage(void)
            answer[CARD_DATA + 2], answer[CARD_DATA + 3]);
     printf("card read checksum: %d\n", answer[CARD_DATA + 4] == checksum(&answer[CARD_DATA], 4));
     printf("card read terminator: %d\n", answer[9] == CARD_TERMINATOR);
+}
+
+// MC2_S1: Mc2Sio2QueueCommand @ 0x7c4 packs its commands 256 bytes apart and
+// Mc2ReadPage @ 0xdb8 reads every answer back at the same stride.
+#define BLOCK_WORDS 64
+#define BLOCK_BYTES 256
+
+static u8 blocks[2 * BLOCK_BYTES] __attribute__((aligned(16)));
+static u8 blockAnswers[2 * BLOCK_BYTES] __attribute__((aligned(16)));
+
+static void cardBlocks(void)
+{
+    int i;
+
+    for (i = 0; i < (int)sizeof(blocks); ++i) {
+        blocks[i] = 0;
+        blockAnswers[i] = 0;
+    }
+    blocks[0] = 0x81;
+    blocks[1] = CARD_TERM_GET;
+    blocks[BLOCK_BYTES] = 0x81;
+    blocks[BLOCK_BYTES + 1] = CARD_SPECS;
+
+    *SIO2_CTRL = CTRL_RESET;
+    SIO2_SEND3[0] = (u32)(CARD_PORT | (2 << 8) | (5 << 18));
+    SIO2_SEND3[1] = (u32)(CARD_PORT | (2 << 8) | (13 << 18));
+    SIO2_SEND3[2] = 0;
+    *SIO2_CTRL |= CTRL_FIFO;
+    sceSetSliceDMA(IOP_DMAC_SIO2in, blocks, BLOCK_WORDS, 2, 1);
+    sceStartDMA(IOP_DMAC_SIO2in);
+    sceSetSliceDMA(IOP_DMAC_SIO2out, blockAnswers, BLOCK_WORDS, 2, 0);
+    sceStartDMA(IOP_DMAC_SIO2out);
+    *SIO2_CTRL |= CTRL_START;
+
+    printf("block 0 terminator: %02x\n", blockAnswers[3]);
+    printf("block 1 page bytes: %d\n",
+           blockAnswers[BLOCK_BYTES + 3] | (blockAnswers[BLOCK_BYTES + 4] << 8));
 }
 
 int _start(int argc, char *argv[])
@@ -251,6 +289,7 @@ int _start(int argc, char *argv[])
     cardSpecs();
     cardTerminator();
     cardPage();
+    cardBlocks();
     printf("-- TEST END\n");
     return 0;
 }

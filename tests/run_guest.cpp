@@ -9,6 +9,7 @@
 #include "card_file.h"
 #include "wav_sink.h"
 
+#include <chrono>
 #include <cstdio>
 #include <format>
 #include <cstdlib>
@@ -108,14 +109,20 @@ int main(int argc, char** argv) {
         log.info("writing audio to {}", path);
     }
 
-    // A held mask, as libpad reports it: SCE_PADstart is 0x0800.
-    struct HeldPad : uee::PadSource {
+    // A held mask, as libpad reports it: SCE_PADstart is 0x0800. A menu acts on
+    // the press rather than the level, so the mask is let go between presses.
+    struct PressedPad : uee::PadSource {
         u16 held = 0;
-        u16 buttons() override { return static_cast<u16>(~held); }
+        u32 polls = 0;
+
+        u16 buttons() override {
+            const bool down = polls++ / 20 % 2 == 0;
+            return static_cast<u16>(~(down ? held : 0));
+        }
     } pad;
     if (const char* held = std::getenv("UEE_PAD")) {
         pad.held = static_cast<u16>(std::strtoul(held, nullptr, 0));
-        log.info("holding pad buttons {:04x}", pad.held);
+        log.info("pressing pad buttons {:04x}", pad.held);
     }
     kernel.attachPad(&pad);
 
@@ -137,9 +144,11 @@ int main(int argc, char** argv) {
     logging = &kernel;
 
     uee::Machine machine{interpreter, memory, kernel, nullptr};
-    const char* limit = std::getenv("UEE_LIMIT");
-    const uee::Stop stop = uee::run(machine, limit != nullptr ? std::strtoull(limit, nullptr, 0)
-                                                             : 2'000'000'000);
+    std::optional<std::chrono::milliseconds> limit;
+    if (const char* seconds = std::getenv("UEE_SECONDS")) {
+        limit = std::chrono::seconds(std::strtoull(seconds, nullptr, 0));
+    }
+    const uee::Stop stop = uee::run(machine, limit);
 
     std::fputs(kernel.readOutput().c_str(), stdout);
     if (stop.reason == uee::StopReason::Exited) {

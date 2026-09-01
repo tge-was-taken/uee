@@ -7,6 +7,7 @@
 #include "iop_interpreter.h"
 #include "iop_kernel.h"
 #include "pad.h"
+#include "card.h"
 #include "sio2.h"
 #include "spu2.h"
 #include "kernel.h"
@@ -670,6 +671,111 @@ void checkSio2StopsAtAnEmptyEntry() {
                "nothing follows the answer to the one command queued");
 }
 
+// A card image small enough to check by hand, erased the way a fresh one reads.
+struct TestCard : uee::CardStorage {
+    static constexpr u32 kPages = 4;
+    static constexpr u32 kBytes = uee::kCardPageBytes + uee::kCardSpareBytes;
+
+    std::vector<u8> bytes = std::vector<u8>(kPages * kBytes, 0xFF);
+
+    void readPage(u32 page, std::span<u8> out) override {
+        std::fill(out.begin(), out.end(), 0xFF);
+        if (page >= kPages) {
+            return;
+        }
+        std::copy_n(bytes.begin() + page * kBytes, std::min<usize>(out.size(), kBytes),
+                    out.begin());
+    }
+
+    void writePage(u32 page, std::span<const u8> in) override {
+        if (page >= kPages) {
+            return;
+        }
+        std::copy_n(in.begin(), std::min<usize>(in.size(), kBytes),
+                    bytes.begin() + page * kBytes);
+    }
+};
+
+// Mc2Sio2QueueCommand @ 0x7c4 packs the port, the command length and the answer
+// length the way SIO2MAN's Sio2TransferSubmit @ 0x1c4 hands them to the device.
+constexpr u32 kCardPort = 2;
+u32 queueEntry(u32 port, u32 sent, u32 received) {
+    return (port & 3) | 0x70 | (sent << 8) | (received << 18);
+}
+
+// MC2_S1 packs its commands 256 bytes apart and reads every answer back at the
+// same stride, so a queue the DMA moves takes one block per command.
+void checkSio2GivesEachDmaCommandItsOwnBlock() {
+    constexpr usize kBlock = 256;
+    Sio2Fixture sio2;
+    TestCard card;
+    sio2.device.attachCard(&card);
+
+    sio2.write(kSio2Send3, queueEntry(kCardPort, 2, 5));
+    sio2.write(kSio2Send3 + 4, queueEntry(kCardPort, 2, 13));
+    sio2.write(kSio2Control, 0x3BC);
+
+    std::vector<u8> commands(2 * kBlock, 0);
+    commands[0] = 0x81;
+    commands[1] = 0x28;
+    commands[kBlock] = 0x81;
+    commands[kBlock + 1] = 0x26;
+    sio2.device.writeFifoIn(commands, kBlock);
+    sio2.write(kSio2Control, 0x3BD);
+
+    std::vector<u8> answers(2 * kBlock);
+    sio2.device.readFifoOut(answers, kBlock);
+    checkEqual(answers[3], static_cast<u8>(0x55), "the first command answers in the first block");
+    checkEqual(answers[kBlock + 3], static_cast<u8>(uee::kCardPageBytes & 0xFF),
+               "the second command reads its bytes from the block of its own");
+    checkEqual(answers[kBlock + 5], static_cast<u8>(uee::kCardPagesPerBlock),
+               "and answers the specs it was asked for");
+}
+
+// The card answers the byte after the command it decoded, which Mc2ReadPage
+// @ 0xdb8 relies on to find the 128 bytes it reads back.
+void checkCardAnswersAfterTheCommandItRead() {
+    TestCard card;
+    uee::MemoryCard device{&card};
+
+    std::vector<u8> terminator(5);
+    device.answer(std::vector<u8>{0x81, 0x28}, terminator);
+    checkEqual(terminator[2], static_cast<u8>(0x2B), "a two byte command is acked third");
+
+    std::vector<u8> page(9);
+    device.answer(std::vector<u8>{0x81, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00}, page);
+    checkEqual(page[7], static_cast<u8>(0x2B), "a seven byte command is acked eighth");
+    checkEqual(page[8], static_cast<u8>(0x55), "and the terminator closes the transfer");
+
+    // Sio2dPortABuildCmd @ 0x1350 clocks five bytes where the card reads two.
+    std::vector<u8> padded(5);
+    device.answer(std::vector<u8>{0x81, 0xF3, 0x00, 0x00, 0x00}, padded);
+    checkEqual(padded[2], static_cast<u8>(0x2B), "a padded command is acked where it ended");
+}
+
+void checkCardReadsBackWhatWasWritten() {
+    TestCard card;
+    uee::MemoryCard device{&card};
+    constexpr usize kChunk = 128;
+
+    std::vector<u8> written{0x81, 0x42, kChunk};
+    for (usize i = 0; i < kChunk; ++i) {
+        written.push_back(static_cast<u8>(i));
+    }
+    written.push_back(0);
+
+    std::vector<u8> ignored(kChunk + 6);
+    device.answer(std::vector<u8>{0x81, 0x22, 0x01, 0x00, 0x00, 0x00, 0x00}, ignored);
+    device.answer(written, ignored);
+
+    std::vector<u8> answer(kChunk + 6);
+    device.answer(std::vector<u8>{0x81, 0x23, 0x01, 0x00, 0x00, 0x00, 0x00}, ignored);
+    device.answer(std::vector<u8>{0x81, 0x43, kChunk}, answer);
+    checkEqual(answer[4], static_cast<u8>(0), "the page reads back from its first byte");
+    checkEqual(answer[4 + kChunk - 1], static_cast<u8>(kChunk - 1), "and through to its last");
+    checkEqual(answer[kChunk + 5], static_cast<u8>(0x55), "the terminator closes the answer");
+}
+
 // The register offsets LIBSD addresses, from its table at 0x4ca0.
 constexpr u32 kVoiceVolumeLeft = 0x000;
 constexpr u32 kVoiceVolumeRight = 0x002;
@@ -879,6 +985,9 @@ int main() {
     checkSio2ReportsWhichQueueEntryFoundNothing();
     checkSio2KeepsTheCommandWrittenAfterAReset();
     checkSio2StopsAtAnEmptyEntry();
+    checkSio2GivesEachDmaCommandItsOwnBlock();
+    checkCardAnswersAfterTheCommandItRead();
+    checkCardReadsBackWhatWasWritten();
     checkSpu2PlaysAKeyedOnVoice();
     checkSpu2PansAVoice();
     checkSpu2StopsAtAnEndpoint();

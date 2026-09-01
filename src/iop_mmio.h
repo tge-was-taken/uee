@@ -47,7 +47,7 @@ private:
 
     void startTransfer(DmaChannel& channel);
     void sendToSoundMemory(const DmaChannel& channel, u32 words);
-    void writeToSio2(const DmaChannel& channel, u32 bytes);
+    void writeToSio2(const DmaChannel& channel);
     void readFromSio2();
 
     DmaChannel* channelFor(u32 address);

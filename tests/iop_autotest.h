@@ -22,6 +22,9 @@
 
 namespace uee::autotest {
 
+// The IOP scheduler runs an instruction slice, not a clock.
+constexpr u64 kIopInstructionLimit = 500'000'000;
+
 inline int runIop(int argc, char** argv, TranslatedIrx* translated) {
     configureLogging();
     if (argc < 3) {
@@ -84,7 +87,7 @@ inline int runIop(int argc, char** argv, TranslatedIrx* translated) {
                        translated != nullptr ? std::span<TranslatedIrx* const>(active)
                                              : std::span<TranslatedIrx* const>{}};
     const Symbols symbols;
-    Stop stop = IopScheduler(machine, symbols).run(kInstructionLimit);
+    Stop stop = IopScheduler(machine, symbols).run(kIopInstructionLimit);
     if (stop.reason == StopReason::Returned) {
         stop.reason = StopReason::Exited;
     }
