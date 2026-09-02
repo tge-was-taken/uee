@@ -152,6 +152,17 @@ private:
 
 constexpr usize kRunningThread = static_cast<usize>(-1);
 
+// In the order the run was composed with, so a host watching a call comes ahead
+// of whatever answers it.
+bool answerCall(Machine& machine, u32 pc) {
+    for (Hook* hook : machine.hooks) {
+        if (hook->isHooked(pc) && hook->enter(machine.interpreter.ee)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling,
               Idle* idle = nullptr,
               Progress* progress = nullptr, usize owner = kRunningThread);
@@ -302,14 +313,14 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
         }
 
         const u32 pc = cpu.pc;
-        if (machine.calls != nullptr && machine.calls->isHooked(pc) &&
-            machine.calls->enter(interpreter.ee)) {
-            continue;
-        }
+        // Watching before answering, so a host still sees a call it does not run.
         if (!kernel.hooks().empty()) {
             kernel.hooks().enter(memory, pc, static_cast<u32>(cpu.gpr[4].lo),
                                  static_cast<u32>(cpu.gpr[5].lo), static_cast<u32>(cpu.gpr[6].lo),
                                  static_cast<u32>(cpu.gpr[7].lo));
+        }
+        if (answerCall(machine, pc)) {
+            continue;
         }
         const usize self = owner == kRunningThread ? kernel.currentThread() : owner;
         const Step step = stepOnce(interpreter, memory, kernel, pc);

@@ -1,3 +1,8 @@
+# SLUS_216.21: sceMpegGetPicture @ 0x500b18. Nothing here drives the IPU, so the
+# runtime answers it from whatever decoder the host attached.
+[movie]
+sceMpegGetPicture = 0x00500b18
+
 [iop]
 preload = []
 # IOPRP310.IMG on the disc carries every module named here, so each is a choice
@@ -37,16 +42,3 @@ words = [
     0x0000000A,  # "\n" at 0x1052f0
 ]
 
-# SLUS_216.21: H_SfdPlay_UpdateTask @ 0x10a860 switches on the movie player's
-# state at work+0x1e4, where 2 plays and 6 counts a frame down before releasing
-# the movie. This enters the finish state in place of playing, which is what the
-# PC port's movie_skip does. Nothing here decodes MPEG, so a movie left to play
-# scans for a start code the IPU never delivers.
-[[patch]]
-address = 0x0010a910
-words = [
-    0x24020006,  # addiu $v0, $zero, 6
-    0xA66201E4,  # sh    $v0, 0x1e4($s3)
-    0x08042DE7,  # j     H_SfdPlay_UpdateTask+0xf3c
-    0x00000000,  # nop
-]

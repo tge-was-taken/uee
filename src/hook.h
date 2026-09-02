@@ -9,9 +9,9 @@ struct EeContext;
 // Redirects guest functions to host code. The run loop asks isHooked about
 // every address it is about to execute, so that check is on the hot path;
 // enter runs only for an address that answered yes.
-class CallHooks {
+class Hook {
 public:
-    virtual ~CallHooks() = default;
+    virtual ~Hook() = default;
 
     virtual bool isHooked(u32 pc) const = 0;
 

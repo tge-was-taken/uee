@@ -4,6 +4,7 @@
 #include "gif.h"
 #include "gs.h"
 #include "interrupts.h"
+#include "ipu.h"
 #include "r5900.h"
 #include "mmio.h"
 #include "sbus.h"
@@ -33,7 +34,7 @@ public:
         mGif.attach(memory, mGs);
         mVif[0].attach(memory, mGif, 0);
         mVif[1].attach(memory, mGif, 1);
-        mDmac.attach(memory, mInterrupts, mGif, mVif[0], mVif[1]);
+        mDmac.attach(memory, mInterrupts, mGif, mVif[0], mVif[1], mIpu);
         refreshCondition();
     }
 
@@ -54,6 +55,7 @@ public:
     Sbus& sbus() { return mSbus; }
     Dmac& dmac() { return mDmac; }
     Gif& gif() { return mGif; }
+    Ipu& ipu() { return mIpu; }
     Gs& gs() { return mGs; }
     Vif& vif(u32 unit) { return mVif[unit]; }
     const Sbus& sbus() const { return mSbus; }
@@ -65,6 +67,7 @@ private:
     Gif mGif;
     Gs mGs;
     Vif mVif[2];
+    Ipu mIpu;
     Dmac mDmac;
     R5900* mCpu = nullptr;
 };

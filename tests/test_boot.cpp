@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     }
 
     UntilCheckpoint until{kernel.hooks(), options.checkpoint, options.entries};
-    uee::Machine machine{interpreter, memory, kernel, nullptr, nullptr,
+    uee::Machine machine{interpreter, memory, kernel, nullptr, {},
                          options.checkpoint.empty() ? nullptr : &until};
     const uee::Stop stop = uee::run(machine, timeLimit());
     const u64 reached = kernel.hooks().getHits(options.checkpoint);

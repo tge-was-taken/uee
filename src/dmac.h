@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ipu.h"
 #include "types.h"
 
 #include <array>
@@ -27,7 +28,8 @@ constexpr u32 kSuspended = 0x10000;
 // the start bit, so a channel is never seen busy.
 class Dmac {
 public:
-    void attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1);
+    void attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1,
+                Ipu& ipu);
 
     std::optional<u32> read(u32 address) const;
     bool write(u32 address, u32 value);
@@ -53,6 +55,7 @@ private:
     u32 mEnable = 0;
     u32 mSkipQuadword = 0;
     Gif* mGif = nullptr;
+    Ipu* mIpu = nullptr;
     Vif* mVif[2] = {nullptr, nullptr};
     Memory* mMemory = nullptr;
     Interrupts* mInterrupts = nullptr;

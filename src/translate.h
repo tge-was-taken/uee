@@ -1,12 +1,14 @@
 #pragma once
 
-#include "call_hooks.h"
+#include "hook.h"
 #include "elf.h"
 #include "translator.h"
 #include "interpreter.h"
 #include "memory.h"
 #include "ee_context.h"
 #include "types.h"
+
+#include <span>
 
 #include <string>
 #include <string_view>
@@ -24,7 +26,7 @@ struct Machine {
     Memory& memory;
     Kernel& kernel;
     FunctionRunner functions = nullptr;
-    CallHooks* calls = nullptr;
+    std::span<Hook* const> hooks = {};
     StopRequest* stopRequest = nullptr;
 
     EeContext& ee() const { return interpreter.ee; }

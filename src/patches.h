@@ -22,6 +22,8 @@ struct GameConfig {
     std::vector<std::string> preload;
     // Guest addresses to report alongside a loop that is spinning on one.
     std::vector<u32> watch;
+    // Zero leaves the game's own sceMpegGetPicture to run.
+    u32 mpegGetPicture = 0;
 };
 
 GameConfig loadGameConfig(const std::string& path);

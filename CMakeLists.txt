@@ -49,6 +49,8 @@ add_library(uee
     src/syscall_table.cpp
     src/sbus.cpp
     src/dmac.cpp
+    src/ipu.cpp
+    src/movie.cpp
     src/sif.cpp
     src/iop_hle_fileio.cpp
     src/iop_hle_loadfile.cpp

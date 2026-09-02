@@ -8,6 +8,7 @@
 #include "memory.h"
 
 #include <format>
+#include <vector>
 
 namespace uee {
 namespace {
@@ -56,6 +57,7 @@ constexpr u32 kQuadwordBytes = 16;
 constexpr usize kVif0 = 0;
 constexpr usize kVif1 = 1;
 constexpr usize kGif = 2;
+constexpr usize kToIpu = 4;
 
 // CHCR: the channel sends each tag's codes to the unit ahead of the data.
 constexpr u32 kTagTransfer = 1u << 6;
@@ -108,11 +110,13 @@ u32 resolve(u32 address) {
 
 }  // namespace
 
-void Dmac::attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1) {
+void Dmac::attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1,
+                  Ipu& ipu) {
     mMemory = &memory;
     mGif = &gif;
     mVif[0] = &vif0;
     mVif[1] = &vif1;
+    mIpu = &ipu;
     mInterrupts = &interrupts;
 }
 
@@ -218,6 +222,9 @@ void Dmac::start(usize index) {
     }
 
     channel.control &= ~kStart;
+    if (index == kToIpu) {
+        log.trace("ipu fed {} bytes", mIpu->getStream().size());
+    }
     log.trace("channel {} finished, mode {}", index, mode);
     mInterrupts->raiseDmac(static_cast<u32>(index));
 }
@@ -265,6 +272,15 @@ void Dmac::transfer(usize index, u32 address, u32 quadwords) {
                 mVif[index]->writeQuadword(low, high);
             }
         }
+        return;
+    }
+    if (index == kToIpu) {
+        std::vector<u8> bytes(static_cast<usize>(quadwords) * kQuadwordBytes);
+        const u32 source = resolve(address);
+        for (usize i = 0; i < bytes.size(); ++i) {
+            bytes[i] = mMemory->read8(source + static_cast<u32>(i));
+        }
+        mIpu->receive(bytes);
         return;
     }
     if (index != kFromScratchpad && index != kToScratchpad) {

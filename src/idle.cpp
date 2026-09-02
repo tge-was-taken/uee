@@ -14,8 +14,8 @@ constexpr u32 kSamples = 256;
 
 Idle::Idle(std::string processor, const Symbols& symbols, Memory& memory,
            std::span<const u32> watched)
-    : mSymbols(symbols), mMemory(memory), mProcessor(std::move(processor)),
-      mWatched(watched.begin(), watched.end()) {}
+    : mSymbols(symbols), mMemory(memory), mWatched(watched.begin(), watched.end()),
+      mProcessor(std::move(processor)) {}
 
 bool Idle::sample(u32 pc) {
     if (mLog.tracing()) {

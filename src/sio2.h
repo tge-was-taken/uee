@@ -24,8 +24,8 @@ public:
     std::optional<u32> read(u32 address);
     bool write(u32 address, u32 value);
 
-    // The DMA gives each queued command a block of its own, where a driver
-    // writing the FIFO a byte at a time packs them end to end.
+    // The DMA gives each queued command a block of its own; a driver writing the
+    // FIFO a byte at a time packs them end to end.
     void writeFifoIn(std::span<const u8> bytes, u32 blockBytes);
     void readFifoOut(std::span<u8> bytes, u32 blockBytes);
     bool hasAnswers() const { return !mAnswerStarts.empty(); }
