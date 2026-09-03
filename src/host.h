@@ -2,7 +2,6 @@
 
 #include "types.h"
 
-#include <optional>
 #include <span>
 
 namespace uee {
@@ -34,22 +33,13 @@ public:
     virtual void writePage(u32 page, std::span<const u8> in) = 0;
 };
 
-// Borrowed until the next picture is taken.
-struct Picture {
-    std::span<const u8> rgba;
-    u32 width = 0;
-    u32 height = 0;
-};
-
-// How a picture then sits in guest memory is the runtime's, not a decoder's.
-class VideoDecoder {
+// The compressed video the IPU was handed, once per picture the guest asks for.
+// Nothing here decodes it.
+class VideoSink {
 public:
-    virtual ~VideoDecoder() = default;
+    virtual ~VideoSink() = default;
 
-    virtual void feed(std::span<const u8> stream) = 0;
-
-    // Nothing until a whole picture has arrived.
-    virtual std::optional<Picture> takePicture() = 0;
+    virtual void write(std::span<const u8> stream) = 0;
 };
 
 class PadSource {

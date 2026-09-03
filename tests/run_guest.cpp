@@ -129,11 +129,10 @@ int main(int argc, char** argv) {
 
     // Nothing here displays a movie, so the SFD player runs its state machine
     // out on its own rather than being patched.
-    struct NoVideo : uee::VideoDecoder {
-        void feed(std::span<const u8>) override {}
-        std::optional<uee::Picture> takePicture() override { return std::nullopt; }
+    struct NoVideo : uee::VideoSink {
+        void write(std::span<const u8>) override {}
     } video;
-    uee::Movie movie{memory, kernel.mmio().ipu(), config.mpegGetPicture};
+    uee::Movie movie{kernel.mmio().ipu(), config.mpegGetPicture};
     movie.attach(&video);
     uee::Hook* hooks[] = {&movie};
 

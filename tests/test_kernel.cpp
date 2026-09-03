@@ -822,49 +822,28 @@ void checkIpuKeepsWhatTheDmaFedIt() {
     checkEqual(mmio.ipu().getStream().size(), kQuadwords * 16, "what was not read stays queued");
 }
 
-// A picture of its own coordinates, so where every pixel lands is checkable.
-struct TestVideo : uee::VideoDecoder {
-    static constexpr u32 kWidth = 64;
-    static constexpr u32 kHeight = 32;
+// Everything the IPU was fed since the last picture, which is all a host gets.
+struct TestVideo : uee::VideoSink {
+    std::vector<u8> written;
+    usize pictures = 0;
 
-    std::vector<u8> rgba = std::vector<u8>(kWidth * kHeight * 4);
-    std::vector<u8> fed;
-
-    TestVideo() {
-        for (u32 y = 0; y < kHeight; ++y) {
-            for (u32 x = 0; x < kWidth; ++x) {
-                const usize at = (static_cast<usize>(y) * kWidth + x) * 4;
-                rgba[at] = static_cast<u8>(x);
-                rgba[at + 1] = static_cast<u8>(y);
-                rgba[at + 2] = 0x5A;
-                rgba[at + 3] = 0xFF;
-            }
-        }
-    }
-
-    void feed(std::span<const u8> stream) override {
-        fed.insert(fed.end(), stream.begin(), stream.end());
-    }
-
-    std::optional<uee::Picture> takePicture() override {
-        return uee::Picture{rgba, kWidth, kHeight};
+    void write(std::span<const u8> stream) override {
+        written.insert(written.end(), stream.begin(), stream.end());
+        ++pictures;
     }
 };
 
 // The call SFMPVP_DecodeFrmSj @ 0x595390 makes, answered here.
-void checkMovieTilesThePictureTheGameExpects() {
+void checkMovieHandsTheStreamToTheHost() {
     constexpr u32 kEntry = 0x00500b18;
     constexpr u32 kReturn = 0x00595478;
-    constexpr u32 kDestination = 0x00200000;
-    constexpr u32 kBlockSide = 16;
 
-    uee::Memory memory = uee::makeMainMemory();
     uee::EeContext ee;
     uee::Ipu ipu;
     TestVideo video;
 
-    uee::Movie movie{memory, ipu, kEntry};
-    check(!movie.isHooked(kEntry), "an address with no decoder behind it is not answered");
+    uee::Movie movie{ipu, kEntry};
+    check(!movie.isHooked(kEntry), "an address with no host behind it is not answered");
     movie.attach(&video);
     check(movie.isHooked(kEntry), "the address from the game's config is");
     check(!movie.isHooked(kEntry + 4), "and nothing else is");
@@ -874,34 +853,17 @@ void checkMovieTilesThePictureTheGameExpects() {
 
     uee::R5900& cpu = ee.cpu;
     cpu.write64(31, kReturn);
-    cpu.write64(5, kDestination);
-    cpu.write64(6, TestVideo::kWidth / kBlockSide * (TestVideo::kHeight / kBlockSide));
     check(movie.enter(ee), "the guest body does not run");
     checkEqual(cpu.pc, kReturn, "and the call returns where it was made from");
+    checkEqual<u32>(static_cast<u32>(cpu.gpr[2].lo), 1u, "answering as the library does");
 
-    checkEqual(video.fed.size(), stream.size(), "the decoder is given what the IPU was fed");
+    checkEqual(video.written.size(), stream.size(), "the host is given what the IPU was fed");
     checkEqual(ipu.getStream().size(), usize{0}, "and the pipe is drained behind it");
-    checkEqual<u32>(static_cast<u32>(cpu.gpr[2].lo), 1u, "the call answers as the library does");
 
-    const u32 blockRows = TestVideo::kHeight / kBlockSide;
-    bool placed = true;
-    for (u32 y = 0; y < TestVideo::kHeight; ++y) {
-        for (u32 x = 0; x < TestVideo::kWidth; ++x) {
-            const u32 block = x / kBlockSide * blockRows + y / kBlockSide;
-            const u32 word = block * kBlockSide * kBlockSide + (y % kBlockSide) * kBlockSide +
-                             x % kBlockSide;
-            const u32 pixel = memory.read32(kDestination + word * 4);
-            placed = placed && (pixel & 0xFF) == x && ((pixel >> 8) & 0xFF) == y &&
-                     ((pixel >> 16) & 0xFF) == 0x5A;
-        }
-    }
-    check(placed, "every pixel lands in the macroblock the game reads it from");
-
-    // A decoder answering with another size is decoding another stream.
-    cpu.write64(6, 1);
-    memory.write32(kDestination, 0);
+    // One call per picture, so a host knows how many are due without parsing.
     movie.enter(ee);
-    checkEqual(memory.read32(kDestination), 0u, "a picture of the wrong size is not written");
+    checkEqual(video.pictures, usize{2}, "every call asks for a picture of its own");
+    checkEqual(video.written.size(), stream.size(), "with nothing fed twice");
 }
 
 // The register offsets LIBSD addresses, from its table at 0x4ca0.
@@ -1089,7 +1051,7 @@ int main() {
     checkStatusIsWriteOneToClear();
     checkDmacMaskLivesInTheUpperHalf();
     checkIpuKeepsWhatTheDmaFedIt();
-    checkMovieTilesThePictureTheGameExpects();
+    checkMovieHandsTheStreamToTheHost();
     checkHandlerChainOrder();
     checkSbusIsReservedForTheKernel();
     checkNegativeSyscallSelectsTheSameSlot();
