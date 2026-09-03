@@ -375,6 +375,9 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
         }
     }
 
+    if (machine.stopRequest != nullptr && machine.stopRequest->isStopRequested()) {
+        return Stop{StopReason::Stopped, cpu.pc, {}};
+    }
     return Stop{StopReason::TimedOut, cpu.pc, {}};
 }
 
@@ -463,8 +466,11 @@ bool stopAt(Machine& machine, u32 blockStart) {
 
 bool service(Machine& machine, u32 instructions) {
     Kernel& kernel = machine.kernel;
+    // Emitted code reaches this and the interpreter does not, so without the
+    // stop request here a translated run never notices the host asking.
     if (machine.budget.executed >= machine.budget.limit ||
-        (machine.deadline != nullptr && machine.deadline->passed())) {
+        (machine.deadline != nullptr && machine.deadline->passed()) ||
+        (machine.stopRequest != nullptr && machine.stopRequest->isStopRequested())) {
         machine.budget.stopped = true;
         return false;
     }
