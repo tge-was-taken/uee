@@ -6,4 +6,4 @@ if [ $# -lt 2 ]; then
     exit 2
 fi
 cmake --build build --target translate_elf -j"$(nproc)" >/dev/null
-exec ./build/translate_elf "$@"
+exec ./build/bin/translate_elf "$@"

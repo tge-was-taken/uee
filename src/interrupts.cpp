@@ -1,11 +1,11 @@
 #include "interrupts.h"
 
+#include <bit>
+
 #include <cstddef>
 
 namespace uee {
 namespace {
-
-constexpr u32 kDmacMaskShift = 16;
 
 }  // namespace
 
@@ -67,26 +67,6 @@ void Interrupts::raiseIntc(u32 cause) {
 
 void Interrupts::raiseDmac(u32 channel) {
     mDStat |= 1u << channel;
-}
-
-std::optional<u32> Interrupts::pendingIntc() const {
-    const u32 active = mIntcStat & mIntcMask;
-    for (u32 cause = 0; cause < kIntcCauses; ++cause) {
-        if ((active & (1u << cause)) != 0) {
-            return cause;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<u32> Interrupts::pendingDmac() const {
-    const u32 active = (mDStat & 0xFFFFu) & (mDStat >> kDmacMaskShift);
-    for (u32 channel = 0; channel < kDmacChannels; ++channel) {
-        if ((active & (1u << channel)) != 0) {
-            return channel;
-        }
-    }
-    return std::nullopt;
 }
 
 void Interrupts::acknowledgeIntc(u32 cause) {

@@ -8,6 +8,7 @@
 #include <minicoro.h>
 
 #include <format>
+#include <set>
 #include <optional>
 #include <vector>
 
@@ -19,7 +20,8 @@ LoggerChannel log("ioprun");
 constexpr u64 kCallLimit = 1'000'000'000;
 
 // A guest call becomes a host call, so every thread needs its own host stack.
-constexpr usize kThreadStackSize = 1024 * 1024;
+// Bounded by kIopStackSize the same way the EE's is by its guest stack.
+constexpr usize kThreadStackSize = 512 * 1024;
 
 struct Step {
     std::optional<Stop> stop;
@@ -41,7 +43,7 @@ Step stepOnce(IopMachine& machine, u32 pc) {
                             std::format("fetch from {:08x}", *address)});
     }
 
-    if (opOf(insn) == Op::syscall) {
+    if (getOp(insn) == Op::syscall) {
         commitLoad(cpu);
         const u32 index = importIndex(insn.word);
         if (!hostCall(machine, index, pc)) {
@@ -78,10 +80,23 @@ Step runDelaySlot(IopMachine& machine, u32 pc) {
 
 constexpr u64 kIdleInterval = 0xFFFF;
 
+void reportUntranslated(IopMachine& machine, u32 pc) {
+    static std::set<u32> reported;
+    if (machine.modules.empty() || !reported.insert(pc).second) {
+        return;
+    }
+    for (const TranslatedIrx* module : machine.modules) {
+        if (pc - module->base < module->end - module->base) {
+            log.warn("no translation for {:08x}, inside {}", pc, module->name);
+            return;
+        }
+    }
+    log.warn("no translation for {:08x}, outside every translated module", pc);
+}
+
 Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instructionLimit,
               Idle* idle = nullptr) {
     R3000A& cpu = machine.iop().cpu;
-
     while (executed < instructionLimit) {
         // A nested run halts on its own address; this one is not code either.
         if (cpu.pc == haltPc || cpu.pc == kIopModuleReturn) {
@@ -102,6 +117,7 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instruc
         }
 
         const u32 pc = cpu.pc;
+        reportUntranslated(machine, pc);
         if (idle != nullptr && (executed & kIdleInterval) == 0) {
             idle->sample(cpu.pc);
         }
@@ -142,10 +158,13 @@ Stop IopScheduler::run(u64 budget, Skipping skipping) {
     mStopped = false;
     for (;;) {
         if (mMachine.kernel.isIdle()) {
+            if (skipping == Skipping::Blocked) {
+                return Stop{StopReason::Deadlocked, mMachine.iop().cpu.pc, {}};
+            }
             // Nothing else wakes a delayed thread, so the clock moves to the
             // first deadline rather than the run ending on it.
             const std::optional<u64> wake = mMachine.kernel.nextDelay();
-            if (!wake || skipping == Skipping::Blocked) {
+            if (!wake) {
                 return Stop{StopReason::Deadlocked, mMachine.iop().cpu.pc, {}};
             }
             mMachine.kernel.advanceTimeTo(*wake);
@@ -168,20 +187,18 @@ void IopScheduler::enter(mco_coro* coroutine) {
     static_cast<IopScheduler*>(mco_get_user_data(coroutine))->runThread();
 }
 
+// Returning here would end the coroutine; yielding keeps it alive to reuse.
 void IopScheduler::runThread() {
-    mStop = runUntil(mMachine, kIopModuleReturn, mExecuted, mDeadline, &mIdle);
-    mStopped = true;
+    for (;;) {
+        mStop = runUntil(mMachine, kIopModuleReturn, mExecuted, mDeadline, &mIdle);
+        mStopped = true;
+        mco_yield(mco_running());
+    }
 }
 
 mco_coro* IopScheduler::coroutineFor(usize thread) {
     if (thread >= mCoroutines.size()) {
         mCoroutines.resize(thread + 1, nullptr);
-    }
-    // Only a thread parked part way through a call keeps its stack. One that
-    // ran to the end starts the next run from a fresh one.
-    if (mCoroutines[thread] != nullptr && mco_status(mCoroutines[thread]) == MCO_DEAD) {
-        mco_destroy(mCoroutines[thread]);
-        mCoroutines[thread] = nullptr;
     }
     if (mCoroutines[thread] == nullptr) {
         mco_desc description = mco_desc_init(enter, kThreadStackSize);
@@ -196,16 +213,13 @@ void enterModule(IopContext& iop, const IrxModule& module) {
     iop.cpu.gpr[reg::gp] = module.gp;
     iop.cpu.gpr[reg::sp] = kIopStackTop;
     iop.cpu.gpr[reg::ra] = kIopModuleReturn;
-    // A module entry takes (argc, argv), and a negative argc unloads rather than
-    // starts it: CRI_ADXI.IRX md5 df850012de771767b5cd88b6263a25c1 branches on
-    // exactly that in module_start @ 0x57c.
+    // A negative argc unloads rather than starts.
+    // CRI_ADXI.IRX md5 df850012de771767b5cd88b6263a25c1: module_start @ 0x57c
     iop.cpu.gpr[reg::a0] = 0;
     iop.cpu.gpr[reg::a1] = 0;
 }
 
-// The caller commits the load delay, so $ra is still the value from before a
-// load in the call's own delay slot. Every thread operation reaches here, and
-// emitted code calls it without passing through the run loop.
+// The caller commits the load delay, so $ra predates a load in the call's slot.
 bool hostCall(IopMachine& machine, u32 index, u32 pc) {
     R3000A& cpu = machine.iop().cpu;
     const usize self = machine.kernel.currentThread();
@@ -220,12 +234,34 @@ bool hostCall(IopMachine& machine, u32 index, u32 pc) {
     return true;
 }
 
-void stepDelaySlot(IopMachine& machine, u32 pc) {
+// The same as hostCall, except the service was resolved when the code was
+// written out, so nothing here searches for it.
+bool hostService(IopMachine& machine, u32 service, u32 pc) {
+    R3000A& cpu = machine.iop().cpu;
+    const usize self = machine.kernel.currentThread();
+    cpu.pc = cpu.gpr[reg::ra];
+    machine.kernel.callService(service);
+    while (!machine.kernel.isCurrent(self)) {
+        mco_yield(mco_running());
+    }
+    (void)pc;
+    return true;
+}
+
+void interpreterFallbackDelaySlot(IopMachine& machine, u32 pc) {
     runDelaySlot(machine, pc);
 }
 
-// One span each, so the module is found before it searches.
 bool runTranslated(IopMachine& machine, u32 pc) {
+    // Modules are packed without regard to pages, so two can share one and the
+    // hint is only a hint. The walk below is what answers when it misses.
+    const u32 page = (pc - kIopModuleBase) / kModulePageBytes;
+    if (page < machine.modulePages.size()) {
+        TranslatedIrx* const module = machine.modulePages[page];
+        if (module != nullptr && pc - module->base < module->end - module->base) {
+            return module->run(machine, pc);
+        }
+    }
     for (const TranslatedIrx* module : machine.modules) {
         if (pc - module->base < module->end - module->base) {
             return module->run(machine, pc);
@@ -234,7 +270,7 @@ bool runTranslated(IopMachine& machine, u32 pc) {
     return false;
 }
 
-void step(IopMachine& machine, u32 pc) {
+void interpreterFallback(IopMachine& machine, u32 pc) {
     machine.iop().cpu.pc = pc;
     // Dispatching here would run a whole call tree where one instruction was asked for.
     IopMachine interpretOnly{machine.interpreter, machine.memory, machine.kernel, {}};
@@ -245,6 +281,7 @@ void step(IopMachine& machine, u32 pc) {
 bool call(IopMachine& machine, u32 target, u32 returnTo) {
     machine.iop().cpu.pc = target;
     if (!runTranslated(machine, target)) {
+        reportUntranslated(machine, target);
         // Dispatching inside the subtree would put host frames at a depth the
         // guest stack does not have.
         IopMachine interpretOnly{machine.interpreter, machine.memory, machine.kernel, {}};
@@ -252,6 +289,11 @@ bool call(IopMachine& machine, u32 target, u32 returnTo) {
         runUntil(interpretOnly, returnTo, executed, kCallLimit);
     }
     return machine.iop().cpu.pc == returnTo;
+}
+
+bool stopAtIop(IopMachine& machine, u32 blockStart) {
+    machine.iop().cpu.pc = blockStart;
+    return true;
 }
 
 }  // namespace uee

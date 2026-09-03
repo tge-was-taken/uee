@@ -119,4 +119,16 @@ struct R5900 {
     }
 };
 
+// One instruction per cycle; any other event stays still rather than reporting
+// a number this runtime cannot know.
+//
+// Only the question is inline: the answer costs seventy bytes a block.
+void addPerformanceEvents(R5900& cpu, u32 instructions);
+
+inline void countPerformanceEvents(R5900& cpu, u32 instructions) {
+    if (cpu.performanceControl != 0) {
+        addPerformanceEvents(cpu, instructions);
+    }
+}
+
 }  // namespace uee

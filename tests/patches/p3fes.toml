@@ -1,11 +1,11 @@
+# Set once by the entry code and never changed.
+[ee]
+gp = 0x007d2cf0
+
 [iop]
 preload = []
-# IOPRP310.IMG on the disc carries every module named here, so each is a choice
-# not to run the game's own copy: cdvdman, cdvdfsv, fileio, ioman, loadfile,
-# romdrv and stdio reach the drive, filesystem or console; threadman and
-# loadcore are this runtime's coroutines and its loader; sysmem hands out the
-# memory that loader uses; sifcmd and sifman wait on Sif carrying the wire
-# protocol. Anything absent runs from the image.
+# IOPRP310.IMG carries all of these, so each is a choice not to run the game's
+# own copy. Anything absent runs from the image.
 host = [
     "cdvdman", "cdvdfsv", "fileio", "ioman", "loadfile", "romdrv", "stdio",
     "threadman", "loadcore", "sysmem",
@@ -13,8 +13,8 @@ host = [
 ]
 
 # SLUS_216.21 md5 9074ba25f5a100940ed233c9f8f675ab: H_Dbprt_FmtLog @ 0x1052b0
-# reaches scePrintf @ 0x505e48. The newline goes first because printing after
-# the message would move the stack scePrintf reads its fifth argument from.
+# The newline goes first: printing after the message would move the stack
+# scePrintf reads its fifth argument from.
 [[patch]]
 address = 0x1052b0
 words = [
@@ -37,11 +37,9 @@ words = [
     0x0000000A,  # "\n" at 0x1052f0
 ]
 
-# SLUS_216.21: H_SfdPlay_UpdateTask @ 0x10a860 switches on the movie player's
-# state at work+0x1e4, where 2 plays and 6 counts a frame down before releasing
-# the movie. This enters the finish state in place of playing, which is what the
-# PC port's movie_skip does. Nothing here decodes MPEG, so a movie left to play
-# scans for a start code the IPU never delivers.
+# SLUS_216.21: H_SfdPlay_UpdateTask @ 0x10a860
+# State 2 plays and 6 finishes, at work+0x1e4. Nothing here decodes MPEG, so a
+# movie left playing scans for a start code the IPU never delivers.
 [[patch]]
 address = 0x0010a910
 words = [

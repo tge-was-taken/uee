@@ -33,9 +33,8 @@ Status Interpreter::execute(Instruction insn) {
         mDelaySlot = taken;
         mBranchTaken = taken;
     };
-    // Found in a delay slot, a coprocessor branch hands its target on to the
-    // slot after it rather than committing there and then, so a run of them
-    // ends on the last. The integer branches commit where they are.
+    // In a delay slot a coprocessor branch defers to the next slot, so a run of
+    // them ends on the last. Integer branches commit where they are.
     const auto coprocessorBranchIf = [&](bool taken) {
         branchIf(taken);
         mBranchYields = taken;

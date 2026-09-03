@@ -6,4 +6,4 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 cmake --build build --target run_guest -j"$(nproc)" >/dev/null
-exec ./build/run_guest "$@"
+exec ./build/bin/run_guest "$@"

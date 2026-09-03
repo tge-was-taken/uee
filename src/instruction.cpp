@@ -29,7 +29,7 @@ const Slot& decode(Instruction insn) {
     return kUndecodable;
 }
 
-ControlFlow controlFlow(Op op, Instruction insn, u32 pc) {
+ControlFlow getControlFlow(Op op, Instruction insn, u32 pc) {
     switch (op) {
         case Op::beq: case Op::bne: case Op::blez: case Op::bgtz:
         case Op::bltz: case Op::bgez:
@@ -140,7 +140,7 @@ std::string disassemble(Instruction insn, u32 pc) {
                                   gprName(insn.rs()));
     }
 
-    const ControlFlow cf = controlFlow(s.op, insn, pc);
+    const ControlFlow cf = getControlFlow(s.op, insn, pc);
     for (s32 i = 0; i < 3 && s.args[i] != Field::None; ++i) {
         text += (i == 0) ? " " : ", ";
         if (s.args[i] == Field::target) {

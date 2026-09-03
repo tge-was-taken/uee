@@ -1,6 +1,5 @@
-// A `FILEIO:` tag names the routine reimplemented below. A `(310)` one names
-// the build in IOPRP310.IMG instead, which is the one a game that reboots the
-// IOP with it runs:
+// A `FILEIO:` tag names the routine reimplemented below; `(310)` names the
+// IOPRP310.IMG build:
 //   FILEIO       md5 edf4a7d5624cb54db0cfa518d74c9559
 //   FILEIO (310) md5 d84a3fa1f02e29217fac56ac1319ad64
 

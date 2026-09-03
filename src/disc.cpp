@@ -7,23 +7,44 @@
 namespace uee {
 namespace {
 
-// ISO 9660.
+// ECMA-119: the primary volume descriptor, and its root record at 156.
 constexpr u32 kVolumeDescriptorSector = 16;
+constexpr u32 kRootRecordOffset = 156;
 
 // Larger than a disc, so a request past this is malformed rather than big.
 constexpr u32 kSectorLimit = 0x400000;
-constexpr u32 kRootRecordOffset = 156;
 
-constexpr u32 kRecordLength = 0;
-constexpr u32 kRecordSector = 2;
-constexpr u32 kRecordSize = 10;
-constexpr u32 kRecordNameLength = 32;
-constexpr u32 kRecordName = 33;
+// ECMA-119 directory record. The name follows the fixed part, so the two
+// big-endian copies are read and ignored rather than skipped over.
+#pragma pack(push, 1)
+struct DirectoryRecord {
+    u8 length;
+    u8 extendedAttributeLength;
+    u32 extent;
+    u32 extentBigEndian;
+    u32 dataLength;
+    u32 dataLengthBigEndian;
+    u8 recordedAt[7];
+    u8 fileFlags;
+    u8 fileUnitSize;
+    u8 interleaveGap;
+    u16 volumeSequence;
+    u16 volumeSequenceBigEndian;
+    u8 nameLength;
+};
+#pragma pack(pop)
+static_assert(sizeof(DirectoryRecord) == 33);
 
-u32 readLittle32(const u8* p) {
-    u32 value = 0;
-    std::memcpy(&value, p, sizeof(value));
-    return value;
+constexpr u8 kDirectoryFlag = 0x02;
+
+DirectoryRecord readRecord(const u8* bytes) {
+    DirectoryRecord record;
+    std::memcpy(&record, bytes, sizeof(record));
+    return record;
+}
+
+const char* nameOf(const u8* bytes) {
+    return reinterpret_cast<const char*>(bytes + sizeof(DirectoryRecord));
 }
 
 // The guest asks with a device prefix and version suffix the disc does not have.
@@ -74,8 +95,7 @@ bool namesMatch(const std::string& wanted, const u8* name, u32 length) {
 
 }  // namespace
 
-// Opening a directory succeeds and every read of it then fails, which looks
-// like a disc with nothing on it rather than no disc.
+// Reads fail after the open succeeds, which looks like an empty disc.
 Disc::Disc(const std::string& path)
     : mFile(std::filesystem::is_regular_file(path) ? std::fopen(path.c_str(), "rb") : nullptr) {}
 
@@ -96,13 +116,53 @@ bool Disc::read(u32 sector, u32 count, std::vector<u8>& out) {
     return std::fread(out.data(), 1, out.size(), mFile) == out.size();
 }
 
-std::optional<DiscFile> Disc::find(const std::string& path) {
+std::optional<DiscFile> Disc::getRoot() {
     std::vector<u8> sector;
     if (!read(kVolumeDescriptorSector, 1, sector)) {
         return std::nullopt;
     }
     const u8* root = sector.data() + kRootRecordOffset;
-    DiscFile current{readLittle32(root + kRecordSector), readLittle32(root + kRecordSize), ""};
+    const DirectoryRecord record = readRecord(root);
+    return DiscFile{record.extent, record.dataLength, ""};
+}
+
+std::vector<u8> Disc::readDirectory(const DiscFile& directory) {
+    const u32 sectors = (directory.size + kSectorBytes - 1) / kSectorBytes;
+    std::vector<u8> data;
+    if (sectors == 0 || !read(directory.sector, sectors, data)) {
+        return {};
+    }
+    return data;
+}
+
+// The first two records are "." and "..", which a walk would never leave.
+std::vector<DiscFile> Disc::list(const DiscFile& directory) {
+    const std::vector<u8> data = readDirectory(directory);
+    std::vector<DiscFile> entries;
+    usize offset = 0;
+    while (offset + sizeof(DirectoryRecord) < data.size()) {
+        const DirectoryRecord record = readRecord(data.data() + offset);
+        if (record.length == 0) {
+            offset = (offset / kSectorBytes + 1) * kSectorBytes;
+            continue;
+        }
+        const char* found = nameOf(data.data() + offset);
+        if (record.nameLength > 1 || (found[0] != 0 && found[0] != 1)) {
+            entries.push_back(DiscFile{record.extent, record.dataLength,
+                                       std::string(found, record.nameLength),
+                                       (record.fileFlags & kDirectoryFlag) != 0});
+        }
+        offset += record.length;
+    }
+    return entries;
+}
+
+std::optional<DiscFile> Disc::find(const std::string& path) {
+    const std::optional<DiscFile> root = getRoot();
+    if (!root) {
+        return std::nullopt;
+    }
+    DiscFile current = *root;
 
     for (const std::string& part : splitPath(path)) {
         const std::optional<DiscFile> next = findInDirectory(current, part);
@@ -123,21 +183,20 @@ std::optional<DiscFile> Disc::findInDirectory(const DiscFile& directory,
     }
 
     usize offset = 0;
-    while (offset + kRecordName < data.size()) {
-        const u8 length = data[offset + kRecordLength];
-        if (length == 0) {
+    while (offset + sizeof(DirectoryRecord) < data.size()) {
+        const DirectoryRecord record = readRecord(data.data() + offset);
+        if (record.length == 0) {
             // Records never straddle a sector, so this one is padding to its end.
             offset = (offset / kSectorBytes + 1) * kSectorBytes;
             continue;
         }
-        const u8 nameLength = data[offset + kRecordNameLength];
-        if (namesMatch(name, data.data() + offset + kRecordName, nameLength)) {
-            const char* found = reinterpret_cast<const char*>(data.data() + offset + kRecordName);
-            return DiscFile{readLittle32(data.data() + offset + kRecordSector),
-                            readLittle32(data.data() + offset + kRecordSize),
-                            std::string(found, nameLength)};
+        const char* found = nameOf(data.data() + offset);
+        if (namesMatch(name, data.data() + offset + sizeof(DirectoryRecord),
+                       record.nameLength)) {
+            return DiscFile{record.extent, record.dataLength,
+                            std::string(found, record.nameLength)};
         }
-        offset += length;
+        offset += record.length;
     }
     return std::nullopt;
 }

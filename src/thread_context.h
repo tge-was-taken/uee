@@ -7,9 +7,9 @@
 
 namespace uee {
 
-// KERNEL: EEContext, 640 bytes. COP0 is not in it, so Status stays with the
-// processor and belongs to the exception return, and neither is the program
-// counter: that lives in EEThreadCB.resume_pc.
+// KERNEL: EEContext, 640 bytes
+// No COP0, so Status belongs to the exception return, and no pc: that lives in
+// EEThreadCB.resume_pc.
 struct ThreadContext {
     Reg128 gpr[32]{};
     Reg128 hi{};

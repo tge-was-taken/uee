@@ -58,7 +58,7 @@ static_assert(sizeof(Instruction) == sizeof(u32));
 // Op::Invalid.
 const Slot& decode(Instruction insn);
 
-inline Op opOf(Instruction insn) {
+inline Op getOp(Instruction insn) {
     return decode(insn).op;
 }
 
@@ -87,7 +87,12 @@ struct ControlFlow {
     u32 link = 0;
 };
 
-ControlFlow controlFlow(Op op, Instruction insn, u32 pc);
+ControlFlow getControlFlow(Op op, Instruction insn, u32 pc);
+
+// beq against itself is how a compiler spells an unconditional branch.
+constexpr bool alwaysBranches(Op op, Instruction insn) {
+    return (op == Op::beq || op == Op::beql) && insn.rs() == insn.rt();
+}
 
 std::string disassemble(Instruction insn);
 std::string disassemble(Instruction insn, u32 pc);

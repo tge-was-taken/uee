@@ -32,6 +32,8 @@ public:
     virtual bool writeHalf(u32, u16) { return false; }
     virtual std::optional<u8> readByte(u32) const { return std::nullopt; }
     virtual bool writeByte(u32, u8) { return false; }
+    virtual std::optional<u64> readDouble(u32) const { return std::nullopt; }
+    virtual bool writeDouble(u32, u64) { return false; }
 };
 
 }  // namespace uee

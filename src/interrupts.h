@@ -4,6 +4,7 @@
 #include "types.h"
 
 #include <array>
+#include <bit>
 #include <optional>
 #include <vector>
 
@@ -18,6 +19,12 @@ constexpr u32 kDCtrl = kDmacBase + 0x00;
 constexpr u32 kDStat = kDmacBase + 0x10;
 constexpr u32 kDPcr = kDmacBase + 0x20;
 
+// The lowest cause raised, which is the one the guest is dispatched for.
+inline std::optional<u32> lowestSet(u32 active) {
+    return active == 0 ? std::nullopt : std::optional(std::countr_zero(active));
+}
+
+constexpr u32 kDmacMaskShift = 16;
 constexpr usize kIntcCauses = 15;
 constexpr usize kDmacChannels = 16;
 constexpr usize kIntrHandlers = 129;
@@ -45,7 +52,7 @@ constexpr s32 kFree = 3;
 struct IntrHandler {
     Link link;
     u32 func = 0;
-    u32 globalPointer = 0;
+    u32 gp = 0;
     u32 argument = 0;
     s32 state = handler_state::kFree;
 };
@@ -69,8 +76,13 @@ public:
     u32 readDStat() const { return mDStat; }
 
     // The lowest pending cause that is not masked, if any.
-    std::optional<u32> pendingIntc() const;
-    std::optional<u32> pendingDmac() const;
+    // Asked every service interval, so they answer where they are called from.
+    std::optional<u32> pendingIntc() const {
+        return lowestSet(mIntcStat & mIntcMask & ((1u << kIntcCauses) - 1));
+    }
+    std::optional<u32> pendingDmac() const {
+        return lowestSet((mDStat & 0xFFFFu) & (mDStat >> kDmacMaskShift));
+    }
     void acknowledgeIntc(u32 cause);
     void acknowledgeDmac(u32 channel);
 

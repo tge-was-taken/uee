@@ -82,9 +82,8 @@ std::optional<u16> IopMmio::readHalf(u32 address) const {
     return static_cast<u16>((address & 2) != 0 ? *word >> 16 : *word);
 }
 
-// SIO2MAN moves the FIFOs a byte at a time: Sio2TransferSubmit @ 0x1c4 stores
-// each command byte with sb, and Sio2TransferCollectResults @ 0x310 reads the
-// answer back with lbu.
+// SIO2MAN: Sio2TransferSubmit @ 0x1c4, Sio2TransferCollectResults @ 0x310
+// Both move the FIFOs a byte at a time.
 std::optional<u8> IopMmio::readByte(u32 address) const {
     if (address - kSio2Base >= kSio2Size) {
         return std::nullopt;

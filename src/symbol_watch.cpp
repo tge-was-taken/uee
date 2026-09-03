@@ -1,4 +1,4 @@
-#include "hooks.h"
+#include "symbol_watch.h"
 
 #include "memory.h"
 
@@ -45,7 +45,7 @@ std::optional<u32> wordAt(const Memory& memory, u32 address) {
 
 }  // namespace
 
-void Hooks::watch(const Symbols& symbols, std::string_view names) {
+void SymbolWatch::watch(const Symbols& symbols, std::string_view names) {
     while (!names.empty()) {
         const usize end = names.find(',');
         const std::string_view name = names.substr(0, end);
@@ -65,7 +65,7 @@ void Hooks::watch(const Symbols& symbols, std::string_view names) {
               [](const Entry& left, const Entry& right) { return left.address < right.address; });
 }
 
-void Hooks::enter(const Memory& memory, u32 pc, u32 a0, u32 a1, u32 a2, u32 a3) {
+void SymbolWatch::enter(const Memory& memory, u32 pc, u32 a0, u32 a1, u32 a2, u32 a3) {
     const auto found = std::lower_bound(
         mEntries.begin(), mEntries.end(), pc,
         [](const Entry& entry, u32 value) { return entry.address < value; });
@@ -88,7 +88,7 @@ void Hooks::enter(const Memory& memory, u32 pc, u32 a0, u32 a1, u32 a2, u32 a3) 
     mLog.info("{}({})", found->name, shown);
 }
 
-u64 Hooks::getHits(std::string_view name) const {
+u64 SymbolWatch::getHits(std::string_view name) const {
     for (const Entry& entry : mEntries) {
         if (entry.name == name) {
             return entry.hits;

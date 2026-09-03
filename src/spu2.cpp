@@ -1,5 +1,4 @@
-// A `<MODULE>: <name> @ <address>` tag names the routine that attests what the
-// hardware does with a register, in the modules the game loads:
+// A `<MODULE>: <name> @ <address>` tag attests what a register does:
 //   LIBSD   md5 7e79d40b99f8d87a5084188956550cd5
 //   MODHSYN md5 cf55a824ff89c067f43f766d6ca78549
 
@@ -15,10 +14,9 @@ namespace {
 
 LoggerChannel log("spu2");
 
-// LIBSD keeps the register addresses in a table at 0x4ca0 and reaches them with
-// sceSdSetParam @ 0x39a0 and sceSdSetAddr @ 0x3acc: a core every 0x400, a
-// voice's parameters every 0x10 and its addresses every 0xc, with the volumes
-// in a block of their own every 0x28.
+// LIBSD: sceSdSetParam @ 0x39a0, sceSdSetAddr @ 0x3acc, table at 0x4ca0
+// A core every 0x400, voice parameters every 0x10, addresses every 0xc,
+// volumes every 0x28.
 constexpr u32 kCoreStride = 0x400;
 constexpr u32 kVoiceStride = 0x10;
 constexpr u32 kAddressStride = 0xC;
@@ -329,9 +327,8 @@ void Spu2::decodeBlock(Voice& voice) {
                              : voice.blockAddress + kAdpcmBlockBytes / 2;
 }
 
-// MODHSYN: HSynVoiceVolumeCommit @ 0x4c80 writes a volume as a fifteen bit
-// value it negates for the opposite phase. The modes that walk one over time
-// follow the envelope's rates; no module here uses one.
+// MODHSYN: HSynVoiceVolumeCommit @ 0x4c80
+// Fifteen bits, negated for the opposite phase. No module here walks one.
 s32 Spu2::applyVolume(s32 sample, u16 volume, Sweep& sweep) {
     if ((volume & 0x8000) == 0) {
         sweep.level = static_cast<s16>(volume << 1);
@@ -348,10 +345,9 @@ s32 Spu2::applyVolume(s32 sample, u16 volume, Sweep& sweep) {
     return (sample * sweep.level) >> 15;
 }
 
-// MODHSYN: HSynBuildAdsr1 @ 0x40ac patches seven bits at bit 8, four at bit 4
-// and four at bit 0, HSynBuildAdsr2 @ 0x4150 seven at bit 6 and five at bit 0,
-// and HSynLfoApply @ 0x7834 writes 0xc021 to release a voice, which puts the
-// curve in the top three bits and the release curve at bit 5.
+// MODHSYN: HSynBuildAdsr1 @ 0x40ac, HSynBuildAdsr2 @ 0x4150, HSynLfoApply @ 0x7834
+// Adsr1 patches 7 bits at 8, 4 at 4, 4 at 0; Adsr2 7 at 6 and 5 at 0. A
+// release writes 0xc021: curve in the top three bits, release curve at bit 5.
 void Spu2::stepEnvelope(Voice& voice) {
     if (voice.phase == Phase::Off) {
         return;

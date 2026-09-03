@@ -18,11 +18,10 @@ namespace uee {
 // Modules live from here up to the heap sysmem hands out.
 constexpr u32 kIopHeapBase = 0x00100000;
 
-// The IOP as the EE drives it: modules load into its RAM and its code runs
-// while a call from the EE is outstanding, not on a clock of its own.
 // Whether this runtime answers for a module or the game's own copy runs.
 enum class ModuleSource { Host, Guest };
 
+// Driven by the EE: code runs while a call is outstanding, not on its own clock.
 class Iop {
 public:
     // Translated modules keep their bases; everything else loads above.
@@ -66,6 +65,7 @@ private:
     IopMmio mMmio;
     IopInterpreter mInterpreter{mMemory};
     std::vector<Import> mImports;
+
     IopKernel mKernel;
     Symbols mSymbols;
     std::vector<u32> mWatched;
@@ -74,6 +74,9 @@ private:
     std::vector<std::string> mHostModules;
     // Loaded, so dispatch may run them.
     std::vector<TranslatedIrx*> mActive;
+    void indexModulePages();
+
+    std::vector<TranslatedIrx*> mModulePages;
     u32 mNextBase = kIopModuleBase;
     IopMachine mMachine{mInterpreter, mMemory, mKernel, mActive};
     IopScheduler mScheduler{mMachine, mSymbols, mWatched};

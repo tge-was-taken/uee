@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 include(FetchContent)
@@ -29,15 +35,27 @@ FetchContent_MakeAvailable(minicoro)
 add_library(minicoro STATIC src/minicoro.cpp)
 target_include_directories(minicoro PUBLIC ${minicoro_SOURCE_DIR})
 
-add_library(uee
+set(XXHASH_BUILD_XXHSUM OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(xxhash
+    GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
+    GIT_TAG v0.8.3
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR cmake_unofficial)
+FetchContent_MakeAvailable(xxhash)
+
+add_library(uee SHARED
     src/opcodes.cpp
     src/instruction.cpp
-    src/translate.cpp
+    src/block_values.cpp
+    src/code_map.cpp
+    src/translator.cpp
+    src/ee_translate.cpp
     src/interpreter.cpp
     src/vu.cpp
     src/vu0_interpreter.cpp
     src/fpu_interpreter.cpp
     src/memory.cpp
+    src/guest_replacement.cpp
     src/elf.cpp
     src/kernel.cpp
     src/thread.cpp
@@ -63,7 +81,7 @@ add_library(uee
     src/iop.cpp
     src/log.cpp
     src/symbols.cpp
-    src/hooks.cpp
+    src/symbol_watch.cpp
     src/idle.cpp
     src/iop_rpc.cpp
     src/adpcm.cpp
@@ -78,7 +96,16 @@ add_library(uee
     src/iop_run.cpp
     src/run.cpp)
 target_include_directories(uee PUBLIC src)
-target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus spdlog::spdlog)
+target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus spdlog::spdlog
+                              xxHash::xxhash)
+
+# Needs AVX2 for the per-lane shift and FMA for the VU accumulate, and puts the
+# host into a rounding mode the whole process then runs in.
+option(UEE_HOST_FPU "Use the host float unit where it matches the PS2 unit" OFF)
+if(UEE_HOST_FPU)
+    target_compile_definitions(uee PUBLIC UEE_HOST_FPU)
+    target_compile_options(uee PUBLIC -mavx2 -mfma)
+endif()
 
 enable_testing()
 
@@ -114,13 +141,14 @@ target_link_libraries(translate_irx PRIVATE uee spdlog::spdlog)
 add_executable(test_boot tests/test_boot.cpp)
 target_link_libraries(test_boot PRIVATE uee spdlog::spdlog)
 
+add_executable(test_replacements tests/test_replacements.cpp)
+target_link_libraries(test_replacements PRIVATE uee spdlog::spdlog)
+
 # 3dpinball-ps2 md5 da8a5733aa90bd23d15ee3222d1548ca, built from
-# https://github.com/headshot2017/3dpinball-ps2. A whole game exercises paths no
-# autotest reaches, and pb::frame is the update loop, so entering it repeatedly
-# is the only sign the game is running rather than stuck in a splash screen.
+# https://github.com/headshot2017/3dpinball-ps2. pb::frame is the update loop,
+# so entering it repeatedly is what says the game is running.
 set(PINBALL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/homebrew/3dpinball-ps2)
-# The game reads its own data off the mount, so without it it waits on files it
-# cannot open. The tree is not in the repository, so the test needs it present.
+# Not in the repository, and without it the game waits on files it cannot open.
 set(PINBALL_DATA ${CMAKE_CURRENT_SOURCE_DIR}/scratch/homebrew/3dpinball-ps2/data)
 if(EXISTS ${PINBALL_DATA})
     add_test(NAME homebrew.3dpinball
@@ -130,11 +158,22 @@ else()
     message(STATUS "3dpinball data not found; its boot test is skipped")
 endif()
 
-# A whole game needs the translation split over many units: one unit per function
-# costs about thirty times the CPU and four times the machine code, because a
-# compiler can only fold identical functions inside a single unit. Two is enough
-# here to keep the cross-unit path under test.
+# One unit per function costs about thirty times the CPU and four times the
+# machine code, since a compiler folds identical functions only within a unit.
+# Two keeps the cross-unit path under test.
 set(TRANSLATED_UNITS 2 CACHE STRING "Source files each translated program is split into")
+
+if(NOT PS2SDK AND EXISTS "$ENV{PS2SDK}/iop/startup/linkfile")
+    set(PS2SDK "$ENV{PS2SDK}" CACHE PATH "ps2sdk the guest tests build against")
+endif()
+find_program(EE_GCC mips64r5900el-ps2-elf-gcc
+             HINTS $ENV{PS2DEV}/ee/bin /usr/local/ps2dev/ee/bin)
+
+get_filename_component(EE_BIN ${EE_GCC} DIRECTORY)
+set(EE_NM ${EE_BIN}/mips64r5900el-ps2-elf-nm)
+
+set(TRANSLATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/translated)
+set(GUEST_DIR ${CMAKE_CURRENT_BINARY_DIR}/guest)
 
 function(translated_unit_names out stem count)
     set(names)
@@ -145,9 +184,146 @@ function(translated_unit_names out stem count)
     set(${out} ${names} PARENT_SCOPE)
 endfunction()
 
+option(UEE_BENCH "Build the translated benchmarks" OFF)
+if(UEE_BENCH)
+    set(BENCH_UNITS 16)
+    # The patches go in because the translator has to read the code that runs.
+    function(add_bench name elf)
+        set(stem ${TRANSLATED_DIR}/${name})
+        set(patches ${CMAKE_CURRENT_SOURCE_DIR}/tests/patches/${name}.toml)
+        if(NOT EXISTS ${patches})
+            set(patches)
+        endif()
+        # A frontend reimplements some of the game's functions, and the ones it
+        # may take over have to be known here: the check costs a branch, so only
+        # these get one. Read from the frontend's own file, not a copy.
+        set(addresses ${ARGV2})
+        if(addresses AND NOT patches)
+            message(FATAL_ERROR "add_bench(${name}): addresses need patches before them")
+        endif()
+        translated_unit_names(generated ${stem} ${BENCH_UNITS})
+        add_custom_command(OUTPUT ${generated} ${stem}.decls.h
+                           COMMAND ${CMAKE_COMMAND} -E make_directory ${TRANSLATED_DIR}
+                           COMMAND translate_elf ${elf} ${stem} ${BENCH_UNITS} ${patches}
+                                   ${addresses}
+                           DEPENDS translate_elf ${elf} ${patches} ${addresses}
+                           COMMENT "Translating ${name}")
+        add_executable(translated_${name} tests/bench_translated.cpp ${generated})
+        target_include_directories(translated_${name} PRIVATE ${TRANSLATED_DIR})
+        target_link_libraries(translated_${name} PRIVATE uee spdlog::spdlog)
+    endfunction()
+
+    function(add_bench_guest name)
+        set(elf ${GUEST_DIR}/${name}.elf)
+        add_custom_command(OUTPUT ${elf}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${GUEST_DIR}
+            COMMAND ${EE_GCC} -D_EE -O2 -G0 -Wall
+                    -I${PS2SDK}/ee/include -I${PS2SDK}/common/include
+                    -L${PS2SDK}/ee/lib -T${PS2SDK}/ee/startup/linkfile
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/${name}.c
+                    -o ${elf} -lkernel -lc -lkernel
+            COMMAND ${CMAKE_COMMAND} -DNM=${EE_NM} -DELF=${elf} -DOUT=${elf}.map
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/WriteSymbolMap.cmake
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/${name}.c
+            COMMENT "Building guest benchmark ${name}")
+        add_custom_target(${name}_elf ALL DEPENDS ${elf})
+        add_bench(${name} ${elf})
+        add_dependencies(translated_${name} ${name}_elf)
+    endfunction()
+
+    add_bench(pinball ${PINBALL_DIR}/3dpinball-ps2.elf)
+
+    # The IOP modules a program loads are known before it runs, so they are
+    # translated too. Each is translated at the address the loader puts it at,
+    # which Iop checks against the image when it loads.
+    function(add_bench_iop_module target name irx base loadname)
+        set(stem ${TRANSLATED_DIR}/iop.${name})
+        translated_unit_names(generated ${stem} 2)
+        add_custom_command(OUTPUT ${generated} ${stem}.decls.h
+                           COMMAND ${CMAKE_COMMAND} -E make_directory ${TRANSLATED_DIR}
+                           COMMAND translate_irx ${irx} ${stem} ${name} 2 ${base} ${loadname}
+                           DEPENDS translate_irx ${irx}
+                           COMMENT "Translating IOP module ${name}")
+        target_sources(${target} PRIVATE ${generated})
+    endfunction()
+
+    # Every IOP module on the disc, each owning a fixed slot so the translated
+    # code needs no relocation. Anything loaded that is not in here lands above
+    # the whole range, which is why translating all of them is safer than
+    # picking a few. Regenerate with the p3fes_modules target when the disc or
+    # the host list changes.
+    function(add_disc_iop_modules target iso config manifest)
+        if(NOT EXISTS ${manifest})
+            message(STATUS "no IOP module manifest at ${manifest}")
+            return()
+        endif()
+        add_custom_target(${target}_modules
+                          COMMAND translate_irx --list ${iso} ${config} > ${manifest}
+                          DEPENDS translate_irx
+                          COMMENT "Listing IOP modules on the disc")
+
+        set(declarations)
+        set(list)
+        set(sources)
+        file(STRINGS ${manifest} lines)
+        foreach(line ${lines})
+            if(NOT line MATCHES "^([^ ]+) 0x[0-9a-f]+ 0x[0-9a-f]+$")
+                continue()
+            endif()
+            set(module ${CMAKE_MATCH_1})
+            string(REGEX REPLACE "\\..*$" "" symbol ${module})
+            set(stem ${TRANSLATED_DIR}/iop.${symbol})
+            translated_unit_names(generated ${stem} 2)
+            add_custom_command(OUTPUT ${generated} ${stem}.decls.h
+                               COMMAND ${CMAKE_COMMAND} -E make_directory ${TRANSLATED_DIR}
+                               COMMAND translate_irx --module ${module} ${iso} ${config}
+                                       ${stem} 2
+                               DEPENDS translate_irx ${iso} ${config} ${manifest}
+                               COMMENT "Translating IOP module ${module}")
+            target_sources(${target} PRIVATE ${generated})
+            list(APPEND sources ${generated})
+            string(APPEND declarations "extern TranslatedIrx ${symbol}Module\; ")
+            list(APPEND list "&uee::${symbol}Module")
+        endforeach()
+        list(JOIN list ", " list)
+        target_compile_definitions(${target} PRIVATE
+            UEE_IOP_MODULES
+            "UEE_IOP_MODULE_DECLARATIONS=${declarations}"
+            "UEE_IOP_MODULE_LIST=${list}")
+        # The translation is generated once; any other target that runs the same
+        # game links the same files rather than translating them again.
+        set_property(GLOBAL PROPERTY UEE_IOP_MODULE_SOURCES "${sources}")
+        set_property(GLOBAL PROPERTY UEE_IOP_MODULE_DECLARATIONS "${declarations}")
+        set_property(GLOBAL PROPERTY UEE_IOP_MODULE_LIST "${list}")
+    endfunction()
+
+    # A stripped retail executable, where discovery has only the code to go on.
+    set(P3FES_ELF ${CMAKE_CURRENT_SOURCE_DIR}/scratch/games/p3fes/SLUS_216.21)
+    if(EXISTS ${P3FES_ELF})
+        add_test(NAME replacements.p3fes COMMAND test_replacements ${P3FES_ELF})
+        if(DEFINED ENV{SKY2HOOK_DIR})
+            set(P3FES_ADDRESSES "$ENV{SKY2HOOK_DIR}/config/SLUS-21621.toml")
+        endif()
+        if(NOT EXISTS "${P3FES_ADDRESSES}")
+            set(P3FES_ADDRESSES)
+        endif()
+        add_bench(p3fes ${P3FES_ELF} ${P3FES_ADDRESSES})
+        add_disc_iop_modules(translated_p3fes
+                             ${CMAKE_CURRENT_SOURCE_DIR}/scratch/games/p3fes/p3fes.iso
+                             ${CMAKE_CURRENT_SOURCE_DIR}/tests/patches/p3fes.toml
+                             ${CMAKE_CURRENT_SOURCE_DIR}/scratch/games/p3fes/modules.txt)
+    endif()
+
+    if(EE_GCC AND EXISTS "${PS2SDK}/ee/startup/linkfile")
+        add_bench_guest(arithmetic)
+        add_bench_guest(shapes)
+        target_compile_options(translated_shapes PRIVATE -g)
+    endif()
+
+endif()
+
 set(AUTOTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps2autotests/tests)
-# Every vendored ELF that comes with recorded output, so a test category cannot
-# be left unrun by forgetting to name it here.
+# Every vendored ELF with recorded output, so none is left unrun by omission.
 file(GLOB_RECURSE AUTOTEST_CANDIDATES ${AUTOTEST_DIR}/*.elf)
 set(AUTOTEST_ELFS)
 foreach(elf ${AUTOTEST_CANDIDATES})
@@ -163,30 +339,28 @@ foreach(elf ${AUTOTEST_ELFS})
     add_test(NAME ${name} COMMAND test_autotest ${elf} ${AUTOTEST_DIR}/${relative}.expected)
 endforeach()
 
-# Each ELF is translated to C++, compiled against the same handlers the
-# interpreter uses, and run through the same driver.
+
 foreach(elf ${AUTOTEST_ELFS})
     file(RELATIVE_PATH relative ${AUTOTEST_DIR} ${elf})
     string(REGEX REPLACE "\\.elf$" "" relative ${relative})
     string(REPLACE "/" "." name ${relative})
-    set(stem ${CMAKE_CURRENT_BINARY_DIR}/translated/${name})
+    set(stem ${TRANSLATED_DIR}/${name})
     translated_unit_names(generated ${stem} ${TRANSLATED_UNITS})
     add_custom_command(OUTPUT ${generated} ${stem}.decls.h
                        COMMAND ${CMAKE_COMMAND} -E make_directory
-                               ${CMAKE_CURRENT_BINARY_DIR}/translated
+                               ${TRANSLATED_DIR}
                        COMMAND translate_elf ${elf} ${stem} ${TRANSLATED_UNITS}
                        DEPENDS translate_elf ${elf}
                        COMMENT "Translating ${name}")
     add_executable(translated_${name} tests/test_translated.cpp ${generated})
     target_include_directories(translated_${name} PRIVATE
-                               ${CMAKE_CURRENT_BINARY_DIR}/translated)
+                               ${TRANSLATED_DIR})
     target_link_libraries(translated_${name} PRIVATE uee spdlog::spdlog)
     add_test(NAME translated.${name}
              COMMAND translated_${name} ${elf} ${AUTOTEST_DIR}/${relative}.expected)
 endforeach()
 
-# Failures someone is already working on. They still run, and a fixed one turns
-# the suite red until it is taken off this list.
+# Known failures. They still run, and a fixed one turns the suite red.
 set(KNOWN_FAILURES vu.lower.efu)
 foreach(name ${KNOWN_FAILURES})
     set_tests_properties(${name} translated.${name} PROPERTIES WILL_FAIL TRUE)
@@ -202,34 +376,26 @@ foreach(irx ${IOP_AUTOTEST_IRXS})
     # The module is named after itself in the generated source, so the name has
     # to be spellable as a C++ identifier.
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" TRANSLATED_MODULE ${name})
-    set(stem ${CMAKE_CURRENT_BINARY_DIR}/translated/${name})
+    set(stem ${TRANSLATED_DIR}/${name})
     translated_unit_names(generated ${stem} ${TRANSLATED_UNITS})
     add_custom_command(OUTPUT ${generated} ${stem}.decls.h
                        COMMAND ${CMAKE_COMMAND} -E make_directory
-                               ${CMAKE_CURRENT_BINARY_DIR}/translated
+                               ${TRANSLATED_DIR}
                        COMMAND translate_irx ${irx} ${stem} ${TRANSLATED_MODULE}
                                ${TRANSLATED_UNITS}
                        DEPENDS translate_irx ${irx}
                        COMMENT "Translating ${name}")
-    set(driver ${CMAKE_CURRENT_BINARY_DIR}/translated/${name}.main.cpp)
+    set(driver ${TRANSLATED_DIR}/${name}.main.cpp)
     configure_file(tests/test_iop_translated.cpp.in ${driver} @ONLY)
     add_executable(translated_${name} ${driver} ${generated})
     target_include_directories(translated_${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
-                               ${CMAKE_CURRENT_BINARY_DIR}/translated)
+                               ${TRANSLATED_DIR})
     target_link_libraries(translated_${name} PRIVATE uee spdlog::spdlog)
     add_test(NAME translated.${name}
              COMMAND translated_${name} ${irx} ${AUTOTEST_DIR}/${relative}.expected)
 endforeach()
 
-# IOP guest tests are IRX modules built with the IOP toolchain and run through
-# the same driver as the vendored IOP autotests. Their expected output is
-# derived from the resident IOP services recorded in the module IDBs.
-find_program(IOP_GCC mipsel-none-elf-gcc HINTS $ENV{PS2DEV}/iop/bin)
-# Cached on the configure that finds it, so a later one without PS2SDK in the
-# environment keeps the guest tests rather than quietly dropping them.
-if(NOT PS2SDK AND EXISTS "$ENV{PS2SDK}/iop/startup/linkfile")
-    set(PS2SDK "$ENV{PS2SDK}" CACHE PATH "ps2sdk the guest tests build against")
-endif()
+# Expected output derived from the resident IOP services in the module IDBs.
 if(IOP_GCC AND EXISTS "${PS2SDK}/iop/startup/linkfile")
     set(IOP_GUEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/iop_guest)
     set(IOP_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/iop_guest)
@@ -260,17 +426,14 @@ else()
     message(STATUS "IOP guest tests skipped: IOP_GCC=${IOP_GCC} PS2SDK=${PS2SDK}")
 endif()
 
-# Guest tests are ps2sdk programs built with the PS2 toolchain and run through
-# the same driver as the vendored autotests. Their expected output is derived
-# from the kernel behaviour recorded in the IDBs, not captured from hardware.
-find_program(EE_GCC mips64r5900el-ps2-elf-gcc
-             HINTS $ENV{PS2DEV}/ee/bin /usr/local/ps2dev/ee/bin)
+# Expected output derived from the kernel behaviour in the IDBs, not hardware.
 if(EE_GCC AND EXISTS "${PS2SDK}/ee/startup/linkfile")
     foreach(guest alarm thread_sema coverage degrade
-                  delay priority thread_state sema intc sif_regs syscall_hook machine)
-        set(elf ${CMAKE_CURRENT_BINARY_DIR}/guest/${guest}.elf)
+                  delay priority thread_state sema intc sif_regs syscall_hook machine resume
+                  recursion)
+        set(elf ${GUEST_DIR}/${guest}.elf)
         add_custom_command(OUTPUT ${elf}
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/guest
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${GUEST_DIR}
             COMMAND ${EE_GCC} -D_EE -O2 -G0 -Wall
                     -I${PS2SDK}/ee/include -I${PS2SDK}/common/include
                     -L${PS2SDK}/ee/lib -T${PS2SDK}/ee/startup/linkfile
@@ -282,6 +445,23 @@ if(EE_GCC AND EXISTS "${PS2SDK}/ee/startup/linkfile")
         add_custom_target(guest_${guest} ALL DEPENDS ${elf})
         add_test(NAME guest.${guest}
                  COMMAND test_autotest ${elf}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/${guest}.expected)
+
+        # The same program through the translator. A guest test blocks and
+        # switches threads where the vendored autotests do not, which is the
+        # only way the translated path is asked what a resumed function is.
+        set(stem ${TRANSLATED_DIR}/guest.${guest})
+        translated_unit_names(generated ${stem} ${TRANSLATED_UNITS})
+        add_custom_command(OUTPUT ${generated} ${stem}.decls.h
+                           COMMAND ${CMAKE_COMMAND} -E make_directory ${TRANSLATED_DIR}
+                           COMMAND translate_elf ${elf} ${stem} ${TRANSLATED_UNITS}
+                           DEPENDS translate_elf ${elf}
+                           COMMENT "Translating guest ${guest}")
+        add_executable(translated_guest_${guest} tests/test_translated.cpp ${generated})
+        target_include_directories(translated_guest_${guest} PRIVATE ${TRANSLATED_DIR})
+        target_link_libraries(translated_guest_${guest} PRIVATE uee spdlog::spdlog)
+        add_test(NAME translated.guest.${guest}
+                 COMMAND translated_guest_${guest} ${elf}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/guest/${guest}.expected)
     endforeach()
 else()

@@ -1,5 +1,6 @@
 #include "irx.h"
 
+#include <cstring>
 #include <format>
 #include <optional>
 #include <stdexcept>
@@ -8,15 +9,7 @@ namespace uee {
 namespace {
 
 constexpr u16 kIrxType = 0xFF80;
-constexpr u16 kMachineMips = 8;
 constexpr u32 kIopModSection = 0x70000080;
-constexpr u32 kRelocationSection = 9;
-constexpr u32 kLoadableSegment = 1;
-
-constexpr u32 kRelocate32 = 2;
-constexpr u32 kRelocateJump = 4;
-constexpr u32 kRelocateUpper = 5;
-constexpr u32 kRelocateLower = 6;
 
 constexpr u32 kImportMagic = 0x41E00000;
 constexpr u32 kExportMagic = 0x41C00000;
@@ -28,65 +21,19 @@ constexpr u32 kImportNameSize = 8;
 constexpr u32 kImportEntryOffset = 20;
 constexpr u32 kImportEntrySize = 8;
 
-struct Section {
-    u32 type = 0;
-    u32 flags = 0;
-    u32 address = 0;
-    u32 offset = 0;
-    u32 size = 0;
-    u32 target = 0;
-};
-
-constexpr u32 kAllocated = 2;
-
-u32 readU32(std::span<const u8> image, usize offset) {
-    if (offset + 4 > image.size()) {
-        throw std::runtime_error(std::format("IRX ends before offset {}", offset));
-    }
-    return static_cast<u32>(image[offset]) | (static_cast<u32>(image[offset + 1]) << 8) |
-           (static_cast<u32>(image[offset + 2]) << 16) |
-           (static_cast<u32>(image[offset + 3]) << 24);
-}
-
-u16 readU16(std::span<const u8> image, usize offset) {
-    if (offset + 2 > image.size()) {
-        throw std::runtime_error(std::format("IRX ends before offset {}", offset));
-    }
-    return static_cast<u16>(image[offset] | (image[offset + 1] << 8));
-}
-
-void requireHeader(std::span<const u8> image) {
-    if (image.size() < 52) {
-        throw std::runtime_error(
-            std::format("IRX is {} bytes, too short for a header", image.size()));
-    }
-    if (image[0] != 0x7F || image[1] != 'E' || image[2] != 'L' || image[3] != 'F') {
-        throw std::runtime_error("IRX magic missing");
-    }
-    if (image[4] != 1 || image[5] != 1) {
-        throw std::runtime_error("IRX is not a 32-bit little-endian ELF");
-    }
-    const u16 type = readU16(image, 16);
+void requireHeader(const ElfImage& image) {
+    requireElf32(image);
+    const u16 type = image.getHeader().e_type;
     if (type != kIrxType) {
         throw std::runtime_error(std::format("ELF type {:04x} is not an IRX module", type));
     }
-    const u16 machine = readU16(image, 18);
-    if (machine != kMachineMips) {
-        throw std::runtime_error(std::format("IRX machine {} is not MIPS", machine));
-    }
 }
 
-std::vector<Section> readSections(std::span<const u8> image) {
-    const u32 table = readU32(image, 32);
-    const u16 entrySize = readU16(image, 46);
-    const u16 count = readU16(image, 48);
-
-    std::vector<Section> sections;
-    for (u16 i = 0; i < count; ++i) {
-        const usize header = table + static_cast<usize>(i) * entrySize;
-        sections.push_back({readU32(image, header + 4), readU32(image, header + 8),
-                            readU32(image, header + 12), readU32(image, header + 16),
-                            readU32(image, header + 20), readU32(image, header + 28)});
+std::vector<Elf32_Shdr> readSections(const ElfImage& image) {
+    const Elf32_Ehdr header = image.getHeader();
+    std::vector<Elf32_Shdr> sections;
+    for (u16 i = 0; i < header.e_shnum; ++i) {
+        sections.push_back(image.getSection(header, i));
     }
     return sections;
 }
@@ -99,97 +46,96 @@ struct ModuleHeader {
     u32 bssSize = 0;
 };
 
-ModuleHeader readModuleHeader(std::span<const u8> image, const std::vector<Section>& sections) {
-    for (const Section& section : sections) {
-        if (section.type != kIopModSection) {
+ModuleHeader readModuleHeader(const ElfImage& image, const std::vector<Elf32_Shdr>& sections) {
+    for (const Elf32_Shdr& section : sections) {
+        if (section.sh_type != kIopModSection) {
             continue;
         }
-        return {readU32(image, section.offset + 4), readU32(image, section.offset + 8),
-                readU32(image, section.offset + 12), readU32(image, section.offset + 16),
-                readU32(image, section.offset + 20)};
+        return {image.read<u32>(section.sh_offset + 4), image.read<u32>(section.sh_offset + 8),
+                image.read<u32>(section.sh_offset + 12), image.read<u32>(section.sh_offset + 16),
+                image.read<u32>(section.sh_offset + 20)};
     }
     throw std::runtime_error("IRX carries no .iopmod section");
 }
 
-void copySegments(std::span<const u8> image, Memory& memory, u32 base) {
-    const u32 table = readU32(image, 28);
-    const u16 entrySize = readU16(image, 42);
-    const u16 count = readU16(image, 44);
-
-    for (u16 i = 0; i < count; ++i) {
-        const usize header = table + static_cast<usize>(i) * entrySize;
-        if (readU32(image, header) != kLoadableSegment) {
+void copySegments(const ElfImage& image, Memory& memory, u32 base) {
+    const Elf32_Ehdr header = image.getHeader();
+    for (u16 i = 0; i < header.e_phnum; ++i) {
+        const Elf32_Phdr segment = image.getSegment(header, i);
+        if (segment.p_type != PT_LOAD) {
             continue;
         }
-        const u32 fileOffset = readU32(image, header + 4);
-        const u32 address = base + readU32(image, header + 8);
-        const u32 fileSize = readU32(image, header + 16);
-        const u32 memorySize = readU32(image, header + 20);
-        if (fileOffset + fileSize > image.size()) {
+        const u32 address = base + segment.p_vaddr;
+        if (segment.p_offset + segment.p_filesz > image.size()) {
             throw std::runtime_error(std::format(
                 "segment at {:08x} reads {} bytes from offset {}, past the end of a {} byte IRX",
-                address, fileSize, fileOffset, image.size()));
+                address, segment.p_filesz, segment.p_offset, image.size()));
         }
-        for (u32 j = 0; j < fileSize; ++j) {
-            memory.write8(address + j, image[fileOffset + j]);
+        for (u32 j = 0; j < segment.p_filesz; ++j) {
+            memory.write8(address + j, image.bytes()[segment.p_offset + j]);
         }
-        for (u32 j = fileSize; j < memorySize; ++j) {
+        for (u32 j = segment.p_filesz; j < segment.p_memsz; ++j) {
             memory.write8(address + j, 0);
         }
     }
 }
 
 // The addend already holds the address the linker gave the symbol.
-void relocate(Memory& memory, u32 base, const std::vector<Section>& sections,
-              std::span<const u8> image) {
-    for (const Section& section : sections) {
-        if (section.type != kRelocationSection) {
+void relocate(Memory& memory, u32 base, const std::vector<Elf32_Shdr>& sections,
+              const ElfImage& image) {
+    for (const Elf32_Shdr& section : sections) {
+        if (section.sh_type != SHT_REL) {
             continue;
         }
         // Debug relocations carry offsets that are only meaningful inside
         // their own section.
-        if (section.target >= sections.size() ||
-            (sections[section.target].flags & kAllocated) == 0) {
+        if (section.sh_info >= sections.size() ||
+            (sections[section.sh_info].sh_flags & SHF_ALLOC) == 0) {
             continue;
         }
-        for (u32 i = 0; i + 8 <= section.size; i += 8) {
-            const u32 where = base + readU32(image, section.offset + i);
-            const u32 info = readU32(image, section.offset + i + 4);
+        constexpr u32 kEntry = sizeof(Elf32_Rel);
+        for (u32 i = 0; i + kEntry <= section.sh_size; i += kEntry) {
+            const Elf32_Rel entry = image.read<Elf32_Rel>(section.sh_offset + i);
+            const u32 where = base + entry.r_offset;
             const u32 word = memory.read32(where);
-            switch (info & 0xFFu) {
-                case kRelocate32:
+            switch (ELF32_R_TYPE(entry.r_info)) {
+                case R_MIPS_32:
                     memory.write32(where, word + base);
                     break;
-                case kRelocateJump: {
+                case R_MIPS_26: {
                     const u32 target = ((word & 0x03FFFFFFu) << 2) + base;
                     memory.write32(where, (word & ~0x03FFFFFFu) | ((target >> 2) & 0x03FFFFFFu));
                     break;
                 }
-                case kRelocateUpper: {
+                case R_MIPS_HI16: {
                     // gas emits the pair adjacent; a shared high half is not handled.
-                    if (i + 16 > section.size ||
-                        (readU32(image, section.offset + i + 12) & 0xFFu) != kRelocateLower) {
+                    const Elf32_Rel next =
+                        i + 2 * kEntry <= section.sh_size
+                            ? image.read<Elf32_Rel>(section.sh_offset + i + kEntry)
+                            : Elf32_Rel{};
+                    if (i + 2 * kEntry > section.sh_size ||
+                        ELF32_R_TYPE(next.r_info) != R_MIPS_LO16) {
                         throw std::runtime_error(std::format(
                             "the high half relocation at {:08x} is not followed by its low half",
                             where));
                     }
-                    const u32 lowWhere = base + readU32(image, section.offset + i + 8);
+                    const u32 lowWhere = base + next.r_offset;
                     const u32 lowWord = memory.read32(lowWhere);
                     const u32 value = ((word & 0xFFFFu) << 16) +
                                       static_cast<u32>(static_cast<s16>(lowWord & 0xFFFFu)) + base;
                     const u32 upper = (value >> 16) + ((value & 0x8000u) != 0 ? 1u : 0u);
                     memory.write32(where, (word & 0xFFFF0000u) | (upper & 0xFFFFu));
                     memory.write32(lowWhere, (lowWord & 0xFFFF0000u) | (value & 0xFFFFu));
-                    i += 8;
+                    i += kEntry;
                     break;
                 }
-                case kRelocateLower:
+                case R_MIPS_LO16:
                     throw std::runtime_error(
                         std::format("the low half relocation at {:08x} has no high half", where));
                 default:
                     throw std::runtime_error(std::format("relocation type {} at {:08x} is not one "
                                                          "an IRX module is built with",
-                                                         info & 0xFFu, where));
+                                                         ELF32_R_TYPE(entry.r_info), where));
             }
         }
     }
@@ -269,10 +215,42 @@ void linkImports(Memory& memory, u32 textStart, u32 textEnd,
 
 }  // namespace
 
-IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base,
+std::vector<RomdirEntry> listRomdir(std::span<const u8> image) {
+    constexpr usize kEntryBytes = 16;
+    constexpr usize kNameBytes = 10;
+    constexpr usize kExtInfoSize = 10;
+    constexpr usize kSize = 12;
+    if (image.size() < kEntryBytes || std::memcmp(image.data(), "RESET", 5) != 0) {
+        return {};
+    }
+
+    std::vector<RomdirEntry> entries;
+    u32 offset = 0;
+    for (usize at = 0; at + kEntryBytes <= image.size(); at += kEntryBytes) {
+        const char* name = reinterpret_cast<const char*>(image.data() + at);
+        if (name[0] == '\0') {
+            break;
+        }
+        u32 size = 0;
+        std::memcpy(&size, image.data() + at + kSize, sizeof(size));
+        entries.push_back(RomdirEntry{std::string(name, ::strnlen(name, kNameBytes)), offset, size});
+        offset += (size + 15) & ~15u;
+        (void)kExtInfoSize;
+    }
+
+    // The directory itself is the first member, so every offset is past it.
+    const u32 dataStart = entries.empty() ? 0 : entries.front().size;
+    for (RomdirEntry& entry : entries) {
+        entry.offset += (dataStart + 15) & ~15u;
+    }
+    return entries;
+}
+
+IrxModule loadIrx(std::span<const u8> bytes, Memory& memory, u32 base,
                   const std::vector<IrxModule>& resident, std::vector<Import>& hostImports) {
+    const ElfImage image{bytes, "IRX"};
     requireHeader(image);
-    const std::vector<Section> sections = readSections(image);
+    const std::vector<Elf32_Shdr> sections = readSections(image);
     const ModuleHeader header = readModuleHeader(image, sections);
 
     copySegments(image, memory, base);

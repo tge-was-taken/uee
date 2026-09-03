@@ -1,12 +1,11 @@
-// Every `KERNEL: <Name> @ <address>` tag in this runtime names the routine the
-// code below reimplements, in these images:
+// A `KERNEL: <Name> @ <address>` tag names the routine reimplemented below:
 //
 //   KERNEL.elf  94088 bytes  md5 d3365049f363abad59102ec4d4e2b0af
 //               .text 0x80000000..0x80016e28
 //   EELOAD.elf  62192 bytes  md5 54ccf6ebf95a042d3560b843c7e5dc85
 //               .text 0x00082000..0x00091190
 //
-// Neither image carries a version string; the closest internal marker is
+// Neither carries a version string; the closest marker is
 // "EE DECI2 Manager version 0.06" at 0x800164e0 in KERNEL.elf.
 
 #include "log.h"
@@ -34,8 +33,7 @@ constexpr u32 kFirstArgument = 4;
 constexpr u32 kReturnRegister = 2;
 constexpr u32 kSyscallRegister = 3;
 
-// Status.IM2 gates INTC and Status.IM3 gates the DMAC. The R5900 also has a
-// master enable at bit 16 that the ei and di instructions drive.
+// Status.IM2 gates INTC, IM3 the DMAC, bit 16 the master enable ei/di drive.
 constexpr u32 kStatusIntc = 1u << 12;
 constexpr u32 kStatusDmac = 1u << 13;
 constexpr u32 kStatusMasterEnable = 1u << 16;
@@ -78,12 +76,10 @@ constexpr u32 kRestOfMemory = 0xFFFFFFFFu;
 
 
 
-// The IOP address the fileio server would hand back at bind time. Nothing
-// dereferences it here, but the guest refuses to call an unbound server.
+// Nothing dereferences it; the guest refuses to call an unbound server.
 
 
-// SifSetReg / SifGetReg reach the SBUS registers by these ids and everything
-// else through a 32 slot file in kernel memory.
+// SifSetReg/SifGetReg reach SBUS by these ids, everything else by a 32 slot file.
 constexpr u32 kMainToSubCommand = 1;
 constexpr u32 kSubToMainCommand = 2;
 constexpr u32 kMainToSubFlag = 3;
@@ -93,22 +89,25 @@ constexpr u32 kSoftwareRegisters = 0x20;
 
 }  // namespace
 
-Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config)
+Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config,
+               std::span<TranslatedIrx* const> iopModules)
     : mContext(ctx), mMemory(memory), mWatched(config.watch),
-      mIop(memory, mOutput, {}, config.hostModules, mWatched) {
+      mIopBudgetPerHsync(config.iopClockScale == 0
+                             ? ~u64{0} / 2
+                             : kIopInstructionsPerHsync * config.iopClockScale),
+      mIop(memory, mOutput, iopModules, config.hostModules, mWatched) {
     mMemory.attach(&mMmio);
     mMmio.attach(mMemory, mContext.cpu);
     installSyscallTable(mMemory);
 
-    // The guest starts with the processor as the ROM's boot leaves it: taking
-    // INTC and DMAC interrupts. Nothing else here would ever set this up.
+    // As the ROM's boot leaves it: taking INTC and DMAC interrupts.
     mContext.cpu.cop0[cop0::kStatus] =
         cop0::kInterruptEnable | kStatusIntc | kStatusDmac | kStatusMasterEnable;
     mContext.cpu.cop0[cop0::kProcessorId] = cop0::kR5900Id;
 
-    // KERNEL: InitThreads @ 0x80004ec0 ends with CreateRomModuleThread("EENULL"),
-    // which takes the first control block. Ids a guest sees therefore start at 1,
-    // and pthreads-embedded reads a zero thread id as no thread at all.
+    // KERNEL: InitThreads @ 0x80004ec0
+    // Its CreateRomModuleThread("EENULL") takes the first block, so guest ids
+    // start at 1, and pthreads-embedded reads zero as no thread at all.
     mThreads.at(static_cast<usize>(mThreads.allocate())).status = status::kDormant;
 
     const s32 main = mThreads.allocate();
@@ -136,17 +135,14 @@ SyscallResult Kernel::callSyscall(s32 number) {
 
 SyscallResult Kernel::handleSyscall() {
     const s32 raw = static_cast<s32>(static_cast<u32>(mContext.cpu.gpr[kSyscallRegister].lo));
-    // The sign selects interrupt context, where there is no saved context to
-    // switch away from, so those variants must not reschedule.
+    // The sign selects interrupt context, which must not reschedule.
     const s32 number = raw < 0 ? -raw : raw;
     const bool interruptContext = raw < 0 || isInterruptSyscall(number);
 
-    // SyscallHandler jumps to the DECI2 manager on a positive 124 without ever
-    // indexing the table.
+    // A positive 124 jumps to the DECI2 manager without indexing the table.
     if (!interruptContext && number == kDeci2Call) {
         const s32 requested = static_cast<s32>(readArgument(0));
-        // A negative function number skips the debug context save, and takes
-        // its argument block from the third register rather than the second.
+        // A negative number skips the debug save and takes its block from $a2.
         returnValue(static_cast<u32>(
             requested < 0 ? deci2Call(static_cast<u32>(-requested), readArgument(2))
                           : deci2Call(static_cast<u32>(requested), readArgument(1))));
@@ -164,8 +160,7 @@ SyscallResult Kernel::handleSyscall() {
         if (handler == 0) {
             return SyscallResult::Unknown;
         }
-        // A SetSyscall handler returns with jr $ra, so call it rather than
-        // entering it as an exception, spilling $ra the way SyscallHandler does.
+        // It returns with jr $ra, so call it rather than enter it as an exception.
         mSyscallReturn = SyscallReturn{static_cast<u32>(mContext.cpu.gpr[kReturnAddress].lo),
                                        mContext.cpu.pc};
         mContext.cpu.write64(kReturnAddress, kSyscallHandlerReturn);
@@ -415,8 +410,7 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             returnValue(static_cast<u32>(mMmio.interrupts().handlerCount()));
             return SyscallResult::Handled;
 
-        // The dispatcher's own return path; the run loop has already restored
-        // the interrupted context by the time a handler issues it.
+        // The run loop already restored the interrupted context.
         case Syscall::ResumeIntrDispatch:
             returnValue(0);
             return SyscallResult::Handled;
@@ -437,14 +431,12 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             returnValue(kSifDChainResult);
             return SyscallResult::Handled;
 
-        // Every transfer this kernel accepts has already finished by the time
-        // the guest can ask about it.
+        // Every transfer has finished by the time the guest can ask.
         case Syscall::SifDmaStat:
             returnValue(0xFFFFFFFFu);
             return SyscallResult::Handled;
 
-        // The ROM's shared stub for every slot it does not populate. It says so
-        // and carries on rather than ending the run.
+        // The ROM's shared stub: say so and carry on rather than end the run.
         case Syscall::Undefined:
             printUndefinedSyscall();
             return SyscallResult::Handled;
@@ -463,8 +455,7 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             returnValue(0);
             return SyscallResult::Handled;
 
-        // No cache is modelled, so the index walks these do have nothing to
-        // act on and only their return value is observable.
+        // No cache is modelled, so only the return value is observable.
         case Syscall::EnableCache:
         case Syscall::DisableCache:
         case Syscall::Rfu105:
@@ -538,8 +529,7 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             returnValue(mGsVParam | 0x80u);
             return SyscallResult::Handled;
 
-        // The GS revision this runtime reports is below the one that carries an
-        // offset, so every mode reads back zero.
+        // The reported GS revision predates the offset, so every mode reads zero.
         case Syscall::GetGsDxDyOffset:
             for (u32 i = 1; i < 5; ++i) {
                 if (arg(i) != 0) {
@@ -621,7 +611,7 @@ u32 Kernel::setupThread(u32 gp, u32 stack, u32 stackSize, u32 root) {
     mRootThread = root;
 
     ThreadControlBlock& self = mThreads.at(mThreads.current());
-    self.globalPointer = gp;
+    self.gp = gp;
     self.stack = mStackBottom;
     self.stackSize = static_cast<s32>(stackSize);
     self.rootFunction = root;
@@ -661,7 +651,7 @@ s32 Kernel::createThread(u32 param) {
     thread.resumePc = entry;
     thread.stack = stack;
     thread.stackSize = static_cast<s32>(stackSize);
-    thread.globalPointer = gp;
+    thread.gp = gp;
     thread.context = stack + stackSize - kContextReserve;
     thread.initialPriority = priority;
     thread.currentPriority = priority;
@@ -711,7 +701,7 @@ void Kernel::resetToDormant(usize id) {
 
     EeContext fresh{};
     fresh.cpu.write64(kStackPointer, top - kStackReserve);
-    fresh.cpu.write64(kGlobalPointer, thread.globalPointer);
+    fresh.cpu.write64(kGlobalPointer, thread.gp);
     fresh.cpu.write64(kReturnAddress, thread.rootFunction);
     thread.saved.saveFrom(fresh);
 }
@@ -791,6 +781,12 @@ s32 Kernel::changeThreadPriority(s32 id, s32 priority, bool) {
     return previous;
 }
 
+void Kernel::yieldCurrentThread() {
+    const ThreadControlBlock& thread = mThreads.at(mThreads.current());
+    mThreads.rotateReadyQueue(thread.currentPriority);
+    mThreads.requestReschedule();
+}
+
 // KERNEL: iRotateThreadReadyQueue @ 0x80004380
 s32 Kernel::rotateReadyQueue(s32 priority, bool) {
     if (priority < 0 || priority >= kUserPriorities) {
@@ -838,7 +834,7 @@ s32 Kernel::referThreadStatus(s32 id, u32 info) {
     mMemory.write32(info + 0x04, thread.resumePc);
     mMemory.write32(info + 0x08, thread.stack);
     mMemory.write32(info + 0x0C, static_cast<u32>(thread.stackSize));
-    mMemory.write32(info + 0x10, thread.globalPointer);
+    mMemory.write32(info + 0x10, thread.gp);
     mMemory.write32(info + 0x14, static_cast<u32>(thread.initialPriority));
     mMemory.write32(info + 0x18, static_cast<u32>(thread.currentPriority));
     mMemory.write32(info + 0x1C, thread.attr);
@@ -1113,8 +1109,8 @@ s32 Kernel::addDmacHandler(u32 channel, u32 func, s32 next, u32 argument) {
                                                  handler_state::kUser);
 }
 
-// EnableIntc and friends report whether they changed the mask, and the mask
-// registers are write-one-to-toggle, so a bit is only written when it differs.
+// The mask registers are write-one-to-toggle, so a bit is written only when it
+// differs.
 // KERNEL: ResetEE @ 0x8000d9b8
 void Kernel::resetEE(u32 mask) {
     if ((mask & 0x01) != 0) {
@@ -1269,8 +1265,9 @@ s32 Kernel::enableDmac(u32 channel, bool enable) {
 }
 
 // KERNEL: DispatchIntcHandlers @ 0x80001630
-// KERNEL: InterruptHandler @ 0x80000554 clears the flag before it runs the
-// chain, so only what the chain itself raises reaches the check on the way out.
+// KERNEL: InterruptHandler @ 0x80000554
+// It clears the flag before running the chain, so only what the chain raises
+// reaches the check on the way out.
 void Kernel::queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32 cause) {
     mThreads.clearReschedule();
     const usize before = mPendingCalls.size();
@@ -1285,8 +1282,6 @@ void Kernel::queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32
     }
 }
 
-// An interrupt is only taken when the processor would take one: interrupts
-// enabled, not already inside an exception, and the matching mask bit set.
 // KERNEL: InterruptHandler @ 0x800004c0
 void Kernel::deliverInterrupts() {
     if (!mPendingCalls.empty()) {
@@ -1336,18 +1331,17 @@ s32 Kernel::releaseAlarm(s32 id) {
 }
 
 void Kernel::advanceClock() {
-    if (!mMmio.timers().advanceTo(mExecuted)) {
+    if (!mMmio.timers().advanceTo(mBudget.executed)) {
         return;
     }
     // A reply lands on a later tick, so a guest that starts a transfer and then
     // waits on its semaphore blocks first, as it would against real hardware.
     mMmio.gs().advanceScanline();
-    mIop.advance(kIopInstructionsPerHsync);
+    mIop.advance(mIopBudgetPerHsync);
     if (mSif.advance()) {
         log.trace("sif0 reply delivered");
         mMmio.interrupts().raiseDmac(dmac::kSif0);
     }
-    publishTimers();
     raiseFieldInterrupts();
 
     if (!mPendingCalls.empty()) {
@@ -1378,6 +1372,7 @@ void Kernel::raiseFieldInterrupts() {
     mInVblank = blanking;
     if (blanking) {
         mMmio.gs().startVblank();
+        mSpeed.countField();
     }
     log.trace("{} at scanline {}", blanking ? "vblank start" : "vblank end", line);
     mMmio.interrupts().raiseIntc(blanking ? intc::kVblankStart : intc::kVblankEnd);
@@ -1399,20 +1394,8 @@ void Kernel::raiseFieldInterrupts() {
     }
 }
 
-// Guest reads of the timer registers see the clock. Guest writes to them land
-// in the hardware window and are not fed back, so only the syscall interface
-// can currently reprogram a timer.
-void Kernel::publishTimers() {
-    for (usize i = 0; i < kTimerCount; ++i) {
-        const Timer& timer = mMmio.timers().at(i);
-        const u32 base = kTimerBase + static_cast<u32>(i) * kTimerStride;
-        mMemory.write32(base + 0x00, timer.count);
-        mMemory.write32(base + 0x10, timer.mode);
-        mMemory.write32(base + 0x20, timer.comp);
-        mMemory.write32(base + 0x30, timer.hold);
-    }
-}
-
+// Guest writes to the timer registers are not fed back, so only the syscall
+// interface can reprogram a timer.
 // KERNEL: MakeThreadReady @ 0x80005a58
 void Kernel::makeReadyAndPreempt(usize id) {
     mThreads.makeReady(id);
@@ -1435,9 +1418,9 @@ void Kernel::reportNoActiveThreads() {
     mOutput += "# <Thread> No active threads\n";
 }
 
-// KERNEL: InterruptHandler @ 0x800005a0 dispatches on the way out whenever the
-// chain it ran raised the flag, so a handler that readies a thread sharper than
-// the running one preempts it rather than waiting for a syscall.
+// KERNEL: InterruptHandler @ 0x800005a0
+// It dispatches on the way out when the chain raised the flag, so readying a
+// sharper thread preempts rather than waiting for a syscall.
 void Kernel::dispatchAfterInterrupt() {
     if (mIdle) {
         dispatchNext();
@@ -1450,9 +1433,8 @@ void Kernel::dispatchAfterInterrupt() {
 SyscallResult Kernel::dispatchNext() {
     const s32 next = mThreads.chooseNext();
     if (next < 0) {
-        // The ROM calls KExit here. This runtime takes interrupts outside any
-        // thread, so one can still make a thread ready, and the message is left
-        // to whoever gives up waiting for that.
+        // The ROM calls KExit here, but an interrupt taken outside any thread
+        // can still make one ready.
         mIdle = true;
         return SyscallResult::Handled;
     }
@@ -1466,9 +1448,9 @@ SyscallResult Kernel::rescheduleIfWanted(bool interruptContext) {
     if (!mThreads.rescheduleWanted()) {
         return SyscallResult::Handled;
     }
-    // KERNEL: the i variants at iTerminateThread @ 0x80003e5c and
-    // iChangeThreadPriority @ 0x80004338 only raise the flag. Clearing it here
-    // would take the dispatch away from whoever does look at it.
+    // KERNEL: iTerminateThread @ 0x80003e5c
+    // KERNEL: iChangeThreadPriority @ 0x80004338
+    // Both only raise the flag, so clearing it here would lose the dispatch.
     if (interruptContext || mThreads.dispatchDisabled()) {
         return SyscallResult::Handled;
     }
@@ -1494,7 +1476,7 @@ void Kernel::loadThread(usize id) {
     incoming.saved.loadInto(mContext);
     // CPCOND0 is driven by the DMAC, not owned by the thread whose registers
     // just came back, so it is restated rather than restored.
-    mMmio.refreshCondition();
+    mMmio.refreshCop0Condition();
     mContext.cpu.pc = incoming.resumePc;
 }
 

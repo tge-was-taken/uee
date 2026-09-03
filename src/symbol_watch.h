@@ -12,7 +12,7 @@ namespace uee {
 
 class Memory;
 
-class Hooks {
+class SymbolWatch {
 public:
     void watch(const Symbols& symbols, std::string_view names);
 

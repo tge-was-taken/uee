@@ -7,11 +7,9 @@
 
 namespace uee::single {
 
-// The single-precision format both R5900 coprocessors compute in. Every 32-bit
-// pattern is an ordinary number: exponent 255 is a real exponent rather than an
-// infinity or a NaN, denormals read as zero, and out-of-range results saturate.
-// Values are kept as bit patterns because a host float cannot hold the top
-// exponent without turning into something the format has no room for.
+// Every pattern is an ordinary number: exponent 255 is a real exponent, not an
+// infinity or NaN, denormals read as zero, and results saturate. Kept as bit
+// patterns because a host float cannot hold the top exponent.
 
 constexpr u32 kSignMask = 0x80000000u;
 constexpr u32 kMagnitudeMask = 0x7FFFFFFFu;
@@ -27,14 +25,30 @@ inline u32 flushDenormal(u32 bits) {
     return denormal ? (bits & kSignMask) : bits;
 }
 
+// ldexp and frexp do not inline, and this is the path every result takes.
+inline f64 twoTo(s32 exponent) {
+    return std::bit_cast<f64>(static_cast<u64>(exponent + 1023) << 52);
+}
+
+// Everything rounded here is small enough for the conversion alone.
+inline f64 roundDown(f64 value) {
+    const f64 truncated = static_cast<f64>(static_cast<s64>(value));
+    return truncated > value ? truncated - 1.0 : truncated;
+}
+
+// What frexp reports: the magnitude is its mantissa in [0.5, 1) times this.
+inline s32 binaryExponent(f64 magnitude) {
+    return static_cast<s32>((std::bit_cast<u64>(magnitude) >> 52) & 0x7FFu) - 1022;
+}
+
 inline f64 widen(u32 bits) {
     const u32 exponent = (bits >> 23) & 0xFFu;
     const f64 sign = (bits & kSignMask) ? -1.0 : 1.0;
     if (exponent == 0) {
         return sign * 0.0;
     }
-    return sign * std::ldexp(static_cast<f64>(0x800000u | (bits & 0x7FFFFFu)),
-                             static_cast<s32>(exponent) - 150);
+    return sign * static_cast<f64>(0x800000u | (bits & 0x7FFFFFu)) *
+           twoTo(static_cast<s32>(exponent) - 150);
 }
 
 // Nothing here is unordered, so once denormals flush the patterns are a total
@@ -94,7 +108,10 @@ inline Rounded join(u32 sign, s32 exponent, u32 significand) {
     return {sign | (static_cast<u32>(exponent) << 23) | (significand & 0x7FFFFFu), false, false};
 }
 
-inline Rounded pack(Wide exact, Rounding rounding) {
+// The rounding is fixed at every call, so each one gets the arithmetic it
+// needs rather than a branch between two.
+template <Rounding rounding>
+inline Rounded pack(Wide exact) {
     const bool negative = std::signbit(exact.high);
     const u32 sign = negative ? kSignMask : 0u;
     const f64 magnitude = std::fabs(exact.high);
@@ -102,14 +119,18 @@ inline Rounded pack(Wide exact, Rounding rounding) {
         return {sign, false, false};
     }
 
-    s32 exponent = 0;
-    const f64 scaled = std::ldexp(std::frexp(magnitude, &exponent), 24);
-    f64 significand = std::floor(scaled);
+    s32 exponent = binaryExponent(magnitude);
+    const f64 scale = twoTo(24 - exponent);
+    const f64 scaled = magnitude * scale;
+    f64 significand = roundDown(scaled);
     const f64 residual = negative ? -exact.low : exact.low;
-    const f64 leftover = (scaled - significand) + std::ldexp(residual, 24 - exponent);
+    const f64 leftover = (scaled - significand) + residual * scale;
 
-    significand += std::floor((rounding == Rounding::Nearest) ? leftover + 0.5
-                                                              : std::min(leftover, 0.0));
+    if constexpr (rounding == Rounding::Nearest) {
+        significand += roundDown(leftover + 0.5);
+    } else {
+        significand += roundDown(std::min(leftover, 0.0));
+    }
     if (significand >= 16777216.0) {
         significand = 8388608.0;
         exponent += 1;
@@ -122,11 +143,11 @@ inline Rounded pack(Wide exact, Rounding rounding) {
 }
 
 inline Rounded truncate(Wide exact) {
-    return pack(exact, Rounding::Truncate);
+    return pack<Rounding::Truncate>(exact);
 }
 
 inline Rounded truncate(f64 exact) {
-    return pack(Wide{exact, 0}, Rounding::Truncate);
+    return pack<Rounding::Truncate>(Wide{exact, 0});
 }
 
 struct Parts {
@@ -142,9 +163,7 @@ inline Parts split(u32 bits) {
             exponent == 0 ? 0u : (0x800000u | (clean & 0x7FFFFFu))};
 }
 
-// The adder holds no bits below the significand: whatever alignment shifts out
-// of the smaller operand is gone before the add, which is why adding one to a
-// huge value leaves it alone instead of nudging it down an ulp.
+// The adder holds no bits below the significand, so alignment discards them.
 inline Rounded addParts(Parts a, Parts b) {
     if (a.significand == 0 && b.significand == 0) {
         return {a.sign & b.sign, false, false};
@@ -185,20 +204,17 @@ inline Rounded addParts(Parts a, Parts b) {
     if (sum == 0) {
         return {};
     }
-    while ((sum & 0x800000u) == 0) {
-        sum <<= 1;
-        --exponent;
-    }
-    return join(sign, exponent, sum);
+    // Renormalising: the sum is at most 24 bits, so where its top bit sits says
+    // how far it has to travel in one go.
+    const s32 normalise = std::countl_zero(sum) - 8;
+    return join(sign, exponent - normalise, sum << normalise);
 }
 
-// Two 24-bit significands make 48 bits, which the unit truncates back to 24.
-// The exponent is left unbounded so a caller can accumulate against the product
-// before the range check, which is what madd.s does.
+// The unit truncates 48 bits back to 24. The exponent is left unbounded so a
+// caller can accumulate before the range check, which is what madd.s does.
 //
-// The multiply is not commutative: a second operand of all ones costs the
-// product its low bit when nothing carried, where the same pair with the
-// operands the other way round keeps it.
+// Not commutative: an all-ones second operand costs the product its low bit
+// when nothing carried.
 inline Parts mulParts(Parts a, Parts b) {
     if (a.significand == 0 || b.significand == 0) {
         return {a.sign ^ b.sign, 0, 0};
@@ -237,9 +253,8 @@ inline Rounded multiplyAdd(u32 acc, u32 a, u32 b, bool subtract) {
     return addParts(split(acc), product);
 }
 
-// The divider rounds to nearest where the adder truncates, and reports a zero
-// denominator as the largest pattern the format holds whatever the numerator
-// was. It raises neither range flag: a divide-by-zero has its own.
+// The divider rounds to nearest where the adder truncates, and answers a zero
+// denominator with the largest pattern. Divide-by-zero has its own flag.
 inline Rounded div(u32 a, u32 b) {
     const f64 denominator = widen(b);
     if (denominator == 0.0) {
@@ -248,7 +263,7 @@ inline Rounded div(u32 a, u32 b) {
     const f64 numerator = widen(a);
     const f64 quotient = numerator / denominator;
     const f64 residual = std::fma(-quotient, denominator, numerator);
-    return {pack(Wide{quotient, residual / denominator}, Rounding::Nearest).bits, false, false};
+    return {pack<Rounding::Nearest>(Wide{quotient, residual / denominator}).bits, false, false};
 }
 
 // The unit takes the root of the magnitude; the format has no NaN to return.
@@ -259,7 +274,7 @@ inline Rounded sqrt(u32 a) {
     }
     const f64 root = std::sqrt(radicand);
     const f64 residual = std::fma(-root, root, radicand);
-    return pack(Wide{root, residual / (2.0 * root)}, Rounding::Nearest);
+    return pack<Rounding::Nearest>(Wide{root, residual / (2.0 * root)});
 }
 
 // The sign comes from the numerator alone, because the root took a magnitude.
@@ -271,12 +286,12 @@ inline Rounded rsqrt(u32 a, u32 b) {
     }
     const f64 reciprocal = 1.0 / root;
     const f64 reciprocalResidual = std::fma(-reciprocal, root, 1.0);
-    const u32 scale = pack(Wide{reciprocal, reciprocalResidual / root}, Rounding::Nearest).bits;
+    const u32 scale = pack<Rounding::Nearest>(Wide{reciprocal, reciprocalResidual / root}).bits;
     const f64 factor = widen(scale);
     const f64 numerator = std::fabs(widen(a));
     const f64 product = numerator * factor;
     const f64 residual = std::fma(numerator, factor, -product);
-    Rounded result = pack(Wide{product, residual}, Rounding::Truncate);
+    Rounded result = pack<Rounding::Truncate>(Wide{product, residual});
     result.bits |= sign;
     return result;
 }

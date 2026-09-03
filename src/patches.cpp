@@ -41,6 +41,37 @@ GameConfig loadGameConfig(const std::string& path) {
     }
 
     GameConfig config;
+    if (const toml::node_view<toml::node> pointer = file["ee"]["gp"]) {
+        const std::optional<s64> value = pointer.value<s64>();
+        if (!value || *value < 0 || *value > 0xFFFFFFFF) {
+            throw std::runtime_error(std::format("{}: ee.gp is not a 32 bit address", path));
+        }
+        config.gp = static_cast<u32>(*value);
+    }
+    if (const toml::node_view<toml::node> scale = file["iop"]["clock_scale"]) {
+        const std::optional<s64> value = scale.value<s64>();
+        if (!value || *value < 0 || *value > 0xFFFF) {
+            throw std::runtime_error(
+                std::format("{}: iop.clock_scale is not a scale between 0 and 65535", path));
+        }
+        config.iopClockScale = static_cast<u32>(*value);
+    }
+    if (const toml::array* ranges = file["ee"]["readonly"].as_array()) {
+        for (const toml::node& entry : *ranges) {
+            const toml::array* pair = entry.as_array();
+            if (pair == nullptr || pair->size() != 2) {
+                throw std::runtime_error(
+                    std::format("{}: ee.readonly holds [start, end] pairs", path));
+            }
+            const std::optional<s64> from = (*pair)[0].value<s64>();
+            const std::optional<s64> to = (*pair)[1].value<s64>();
+            if (!from || !to || *from < 0 || *to > 0xFFFFFFFF || *from >= *to) {
+                throw std::runtime_error(
+                    std::format("{}: ee.readonly range is not an ascending address pair", path));
+            }
+            config.readOnlySegments.emplace_back(static_cast<u32>(*from), static_cast<u32>(*to));
+        }
+    }
     if (const toml::array* hosted = file["iop"]["host"].as_array()) {
         for (const toml::node& name : *hosted) {
             const std::optional<std::string> module = name.value<std::string>();

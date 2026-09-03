@@ -11,9 +11,8 @@ constexpr s32 kSyscallSlots = 131;
 constexpr u32 kKernelTextBase = 0x80000000;
 constexpr u32 kKernelTextEnd = 0x80016e28;
 
-// Every slot of the retail EE kernel's table, by the address the ROM holds
-// there. Dispatch matches on the address, so a guest that saves a slot and
-// restores it later gets the built-in implementation back.
+// Keyed by the ROM address, so a guest that saves and restores a slot gets the
+// built-in implementation back.
 enum class Syscall : u32 {
     Undefined = 0x80001564,
     ResetEE = 0x8000d9b8,
@@ -123,6 +122,9 @@ enum class Syscall : u32 {
 // guest can read it back.
 void installSyscallTable(Memory& memory);
 u32 readSyscallHandler(Memory& memory, s32 number);
+// What the BIOS puts in the slot, which is what runs unless the game
+// replaces it with SetSyscall.
+u32 getDefaultSyscallHandler(s32 number);
 void writeSyscallHandler(Memory& memory, s32 number, u32 handler);
 constexpr bool isKernelHandler(u32 handler) {
     return (handler >= kKernelTextBase && handler < kKernelTextEnd) ||
@@ -130,5 +132,78 @@ constexpr bool isKernelHandler(u32 handler) {
 }
 std::string_view nameOfSyscall(s32 number);
 bool isInterruptSyscall(s32 number);
+
+// One missing from this list is assumed to, so a new one is safe by default.
+constexpr bool canYield(Syscall syscall) {
+    switch (syscall) {
+        case Syscall::GetThreadId:
+        case Syscall::ReferThreadStatus:
+        case Syscall::GetThreadCount:
+        case Syscall::GetSemaCount:
+        case Syscall::GetAlarmCount:
+        case Syscall::GetIntrHandlerCount:
+        case Syscall::ReferSemaStatus:
+        case Syscall::PollSema:
+        case Syscall::GetOsdConfigParam:
+        case Syscall::GetOsdConfigParam2:
+        case Syscall::SetOsdConfigParam:
+        case Syscall::SetOsdConfigParam2:
+        case Syscall::GetGsHParam:
+        case Syscall::GetGsVParam:
+        case Syscall::SetGsHParam:
+        case Syscall::SetGsVParam:
+        case Syscall::GetGsDxDyOffset:
+        case Syscall::GsGetIMR:
+        case Syscall::GsPutIMR:
+        case Syscall::SetGsCrt:
+        case Syscall::SetVSyncFlag:
+        case Syscall::GetCop0:
+        case Syscall::FlushCache:
+        case Syscall::KSeg0:
+        case Syscall::EnableCache:
+        case Syscall::DisableCache:
+        case Syscall::CpuConfig:
+        case Syscall::GetMemorySize:
+        case Syscall::MachineType:
+        case Syscall::PSMode:
+        case Syscall::SetupHeap:
+        case Syscall::EndOfHeap:
+        case Syscall::InitTlb:
+        case Syscall::SetVTlbRefillHandler:
+        case Syscall::SetVCommonHandler:
+        case Syscall::SetVInterruptHandler:
+        case Syscall::AddIntcHandler:
+        case Syscall::RemoveIntcHandler:
+        case Syscall::AddDmacHandler:
+        case Syscall::RemoveDmacHandler:
+        case Syscall::AddSbusIntcHandler:
+        case Syscall::RemoveSbusIntcHandler:
+        case Syscall::EnableIntc:
+        case Syscall::DisableIntc:
+        case Syscall::EnableDmac:
+        case Syscall::DisableDmac:
+        case Syscall::EnableIntcHandler:
+        case Syscall::DisableIntcHandler:
+        case Syscall::EnableDmacHandler:
+        case Syscall::DisableDmacHandler:
+        case Syscall::SetCpuTimerHandler:
+        case Syscall::SetCpuTimer:
+        case Syscall::SetPgifHandler:
+        case Syscall::SetAlarm:
+        case Syscall::ReleaseAlarm:
+        case Syscall::SifStopDma:
+        case Syscall::SifDmaStat:
+        case Syscall::SifSetDma:
+        case Syscall::SifSetDChain:
+        case Syscall::SifSetReg:
+        case Syscall::SifGetReg:
+        case Syscall::CreateThread:
+        case Syscall::CreateSema:
+        case Syscall::Print:
+            return false;
+        default:
+            return true;
+    }
+}
 
 }  // namespace uee

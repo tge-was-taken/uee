@@ -2,6 +2,7 @@
 
 #include "fpu_interpreter.h"
 #include "instruction.h"
+#include "host_float.h"
 #include "memory.h"
 #include "ee_context.h"
 #include "stop.h"
@@ -11,7 +12,9 @@ namespace uee {
 
 class Interpreter {
 public:
-    explicit Interpreter(Memory& memory) : mMemory(memory) {}
+    // Nothing runs a guest float without one of these, so this is where the
+    // host unit is put into the mode host_float.h needs.
+    explicit Interpreter(Memory& memory) : mMemory(memory) { host::configureHostFloat(); }
 
     Status execute(Instruction insn);
 

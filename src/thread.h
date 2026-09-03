@@ -37,7 +37,7 @@ struct ThreadControlBlock {
     s32 status = 0;
     u32 resumePc = 0;
     u32 context = 0;
-    u32 globalPointer = 0;
+    u32 gp = 0;
     s16 initialPriority = 0;
     s16 currentPriority = 0;
     s32 waitType = 0;

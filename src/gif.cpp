@@ -1,5 +1,6 @@
 #include "gif.h"
 
+
 #include "memory.h"
 
 namespace uee {
@@ -10,10 +11,10 @@ constexpr u32 kModeRegister = 0x10003010;
 constexpr u32 kStatusRegister = 0x10003020;
 constexpr u32 kPath3Masked = 1u << 1;
 
-// GIF_STAT's count of the quadwords queued in the FIFO. This GIF takes one as
-// it arrives and nothing ever queues, so the count is reported as one to let a
-// poll for data having reached the GIF finish.
 constexpr u32 kFifoCountShift = 24;
+constexpr u32 kActivePathShift = 10;
+// Nothing ever queues here, so a truthful zero leaves rwDMAHandler waiting for
+// a transfer it has already been given.
 constexpr u32 kFifoCount = 1;
 
 constexpr u32 kSignalLabelId = 0x12001080;
@@ -48,7 +49,9 @@ std::optional<u32> Gif::read(u32 address) const {
     switch (address) {
         case kControlRegister: return mControl;
         case kModeRegister: return mMode;
-        case kStatusRegister: return mStatus | (kFifoCount << kFifoCountShift);
+        case kStatusRegister:
+            return mStatus | (mActivePath << kActivePathShift) |
+                   (kFifoCount << kFifoCountShift);
         default: return std::nullopt;
     }
 }
@@ -59,6 +62,16 @@ bool Gif::write(u32 address, u32 value) {
         case kModeRegister: mMode = value; return true;
         default: return false;
     }
+}
+
+void Gif::beginPath(u32 path) {
+    mActivePath = path;
+    mQueued = 0;
+}
+
+void Gif::endPath() {
+    mActivePath = 0;
+    mQueued = 0;
 }
 
 void Gif::maskPath3(bool masked) {
@@ -100,6 +113,7 @@ void Gif::writeRegister(u32 address, u64 value) {
 }
 
 void Gif::writeQuadword(u64 low, u64 high) {
+    ++mQueued;
     if (mRemaining == 0) {
         readTag(low, high);
         return;

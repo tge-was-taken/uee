@@ -14,7 +14,7 @@ namespace {
 
 LoggerChannel log("dmac");
 
-// SLUS-216.21: sceGsSyncPath @ 0x4f9ccc names these.
+
 constexpr u32 kChannelBase[dmac::kChannels] = {
     0x10008000,  // VIF0
     0x10009000,  // VIF1
@@ -56,6 +56,7 @@ constexpr u32 kQuadwordBytes = 16;
 constexpr usize kVif0 = 0;
 constexpr usize kVif1 = 1;
 constexpr usize kGif = 2;
+constexpr u32 kPath3 = 3;
 
 // CHCR: the channel sends each tag's codes to the unit ahead of the data.
 constexpr u32 kTagTransfer = 1u << 6;
@@ -74,8 +75,7 @@ constexpr u32 kIdShift = 28;
 constexpr u32 kIdMask = 0x7;
 constexpr u32 kIrq = 0x80000000;
 
-// Each id names a site that builds it. Nothing builds a refs, so it walks as
-// ref and reports that.
+// Nothing builds a refs, so it walks as ref and reports that.
 //   0 refe, 3 ref   KERNEL: SifDmaWriteTag @ 0x80006410
 //   1 cnt, 2 next, 5 call, 7 end   SLUS-216.21: _rwDMAOpenGIFPkt @ 0x4d54e0
 //   6 ret   SLUS-216.21: DMADataFillTags @ 0x49dc70
@@ -195,8 +195,7 @@ void Dmac::start(usize index) {
     if ((mEnable & dmac::kSuspended) != 0) {
         return;
     }
-    // SIF belongs to the Sif side. SIF0 stays armed, which is what the guest
-    // tests before arming it again.
+    // SIF0 stays armed, which the guest tests before arming it again.
     if (index >= kSif0 && index <= kSif2) {
         if (index != kSif0) {
             mChannels[index].control &= ~kStart;
@@ -222,8 +221,7 @@ void Dmac::start(usize index) {
     mInterrupts->raiseDmac(static_cast<u32>(index));
 }
 
-// A run of quadwords then a gap, which is how the scratchpad channels move a
-// rectangle out of a larger image. The channel's own address stays put.
+// A run then a gap, moving a rectangle out of a larger image.
 void Dmac::interleave(usize index) {
     Channel& channel = mChannels[index];
     const u32 run = (mSkipQuadword >> 16) & 0xFFu;
@@ -255,6 +253,9 @@ void Dmac::sendTagCodes(usize index, u32 tagAddress) {
 
 void Dmac::transfer(usize index, u32 address, u32 quadwords) {
     if (index == kVif0 || index == kVif1 || index == kGif) {
+        if (index == kGif) {
+            mGif->beginPath(kPath3);
+        }
         u32 source = resolve(address);
         for (u32 moved = 0; moved < quadwords; ++moved, source += kQuadwordBytes) {
             const u64 low = mMemory->read64(source);
@@ -264,6 +265,9 @@ void Dmac::transfer(usize index, u32 address, u32 quadwords) {
             } else {
                 mVif[index]->writeQuadword(low, high);
             }
+        }
+        if (index == kGif) {
+            mGif->endPath();
         }
         return;
     }
@@ -286,8 +290,7 @@ void Dmac::transfer(usize index, u32 address, u32 quadwords) {
     }
 }
 
-// The tag lands in the upper half of the control register, where the guest
-// reads back what the transfer finished on.
+// The tag lands in the upper half of the control register.
 void Dmac::followChain(usize index) {
     Channel& channel = mChannels[index];
     for (u32 step = 0; step < 0x10000; ++step) {
@@ -310,8 +313,7 @@ void Dmac::followChain(usize index) {
                 channel.address = follow + tag.quadwords * kQuadwordBytes;
                 channel.tagAddress = channel.address;
                 break;
-            // Unlike the other terminators, end leaves TADR on itself rather
-            // than past it.
+            // end leaves TADR on itself, unlike the other terminators.
             case kEnd:
                 transfer(index, follow, tag.quadwords);
                 channel.address = follow + tag.quadwords * kQuadwordBytes;

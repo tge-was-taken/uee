@@ -38,6 +38,16 @@ constexpr u32 importIndex(u32 word) {
 
 // Imports resolve against `resident` first, as the IOP's own linker does. The
 // rest are appended to `hostImports`, which modules loaded later share.
+struct RomdirEntry {
+    std::string name;
+    u32 offset = 0;
+    u32 size = 0;
+};
+
+// A ROMDIR archive: 16-byte entries from RESET to an empty name, then the data,
+// each member padded to 16 bytes.
+std::vector<RomdirEntry> listRomdir(std::span<const u8> image);
+
 IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base,
                   const std::vector<IrxModule>& resident, std::vector<Import>& hostImports);
 

@@ -32,11 +32,34 @@ struct Vu {
         return (dest & (8u >> lane)) != 0;
     }
 
-    // VF00 reads as (0, 0, 0, 1) and ignores writes
-    Reg128 readVf(u32 index) const;
-    void writeVf(u32 index, u32 dest, const u32 result[4]);
-    void writeAcc(u32 dest, const u32 result[4]);
+    // VF00 reads as (0, 0, 0, 1) and ignores writes.
+    Reg128 readVf(u32 index) const {
+        return (index == 0) ? Reg128{0, 0x3F800000ull << 32} : vf[index];
+    }
 
+    void writeVf(u32 index, u32 dest, const u32 result[4]) {
+        if (index != 0) {
+            merge(vf[index], dest, result);
+        }
+    }
+
+    void writeAcc(u32 dest, const u32 result[4]) { merge(acc, dest, result); }
+
+private:
+    // Writing every lane leaves nothing of the old value to keep.
+    static void merge(Reg128& target, u32 dest, const u32 result[4]) {
+        if (dest == 0xFu) {
+            target = lanes(result[0], result[1], result[2], result[3]);
+            return;
+        }
+        for (s32 i = 0; i < 4; ++i) {
+            if (writes(dest, i)) {
+                target.setWord(i, result[i]);
+            }
+        }
+    }
+
+public:
     // VI00 reads as zero and ignores writes; only the control registers are
     // wider than 16 bits
     u32 readVi(u32 index) const;

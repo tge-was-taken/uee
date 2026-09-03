@@ -10,7 +10,7 @@
 
 namespace uee {
 
-// One per file that logs, named for the subsystem a UEE_LOG level selects.
+// Named for the subsystem a UEE_LOG level selects.
 class LoggerChannel {
 public:
     explicit LoggerChannel(std::string name);

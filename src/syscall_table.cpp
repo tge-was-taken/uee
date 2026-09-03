@@ -291,9 +291,8 @@ void writeSyscallHandler(Memory& memory, s32 number, u32 handler) {
     memory.write32(kSyscallTableBase + static_cast<u32>(number) * 4, handler);
 }
 
-// THREADMAN names the interrupt-safe entries with an i prefix. They run inside
-// a handler, where there is no saved context to switch away from, so they must
-// leave the dispatch to the return from the interrupt.
+// The i entries run inside a handler, with no saved context to switch away
+// from, so they leave the dispatch to the interrupt return.
 std::string_view nameOfSyscall(s32 number) {
     const s32 slot = number < 0 ? -number : number;
     return slot < kSyscallSlots ? kNames[slot] : std::string_view{};
@@ -303,6 +302,11 @@ bool isInterruptSyscall(s32 number) {
     const std::string_view name = nameOfSyscall(number);
     // TODO: use a lookup table instead
     return name.size() > 1 && name[0] == 'i' && name[1] >= 'A' && name[1] <= 'Z';
+}
+
+u32 getDefaultSyscallHandler(s32 number) {
+    const s32 slot = number < 0 ? -number : number;
+    return slot < kSyscallSlots ? kRomTable[slot] : 0;
 }
 
 }  // namespace uee

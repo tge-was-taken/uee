@@ -1,11 +1,12 @@
 #include "log.h"
 #include "run.h"
 
+#include <set>
 
 #include "instruction.h"
 #include "timers.h"
 #include "handlers.h"
-#include "translate.h"
+#include "ee_translate.h"
 #include "idle.h"
 
 #include <minicoro.h>
@@ -16,6 +17,32 @@
 #include <vector>
 
 namespace uee {
+
+// Wall clock: an instruction count measures this interpreter, not the guest.
+class Deadline {
+public:
+    explicit Deadline(std::optional<std::chrono::milliseconds> limit)
+        : mAt(limit ? std::chrono::steady_clock::now() + *limit
+                    : std::chrono::steady_clock::time_point::max()) {}
+
+    bool passed() {
+        if (++mSteps < kStride) {
+            return mPassed;
+        }
+        mSteps = 0;
+        mPassed = std::chrono::steady_clock::now() >= mAt;
+        return mPassed;
+    }
+
+private:
+    // Asking the clock costs more than the step it bounds.
+    static constexpr u32 kStride = 1024;
+
+    std::chrono::steady_clock::time_point mAt;
+    u32 mSteps = 0;
+    bool mPassed = false;
+};
+
 namespace {
 
 LoggerChannel log("ee");
@@ -28,17 +55,16 @@ constexpr u32 kCallbackReturn = 0xF0000000;
 // The guest program counter is always aligned, so an odd address never matches.
 constexpr u32 kNoHalt = 1;
 
-// Guest calls become host calls, so this carries the guest's own call depth.
-constexpr usize kThreadStackSize = 8 * 1024 * 1024;
+// A host frame per guest call, so this is bounded by the guest stack. Filling
+// a 128 KiB guest stack with the smallest frame reaches 15,359 calls, 256 KiB.
+constexpr usize kThreadStackSize = 1024 * 1024;
 
-// A syscall the guest is inside cannot outlast the run that made it, so this
-// only has to be long enough that a real one never trips it.
+// Only long enough that a real syscall never trips it.
 constexpr std::chrono::seconds kCallLimit{30};
 
 constexpr u64 kIdleStep = kInstructionsPerHsync;
 
-// A guest waiting on the display is idle for a field or two, so longer than this
-// is nothing coming rather than a run that ended mid wait.
+// A display wait is a field or two, so longer is nothing coming.
 constexpr u64 kIdleFieldsStuck = 60;
 
 struct Step {
@@ -62,7 +88,7 @@ Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) 
                             std::format("fetch from {:08x}", *address)});
     }
 
-    if (opOf(insn) == Op::syscall) {
+    if (getOp(insn) == Op::syscall) {
         cpu.pc = pc + 4;
         switch (kernel.handleSyscall()) {
             case SyscallResult::Handled: return {};
@@ -90,45 +116,28 @@ Step stepOnce(Interpreter& interpreter, Memory& memory, Kernel& kernel, u32 pc) 
             interpreter.branchYieldsDelaySlot()};
 }
 
-// Nothing can make a thread ready until a handler on the stack returns, so the
-// run loop keeps stepping rather than idling under one.
+// Nothing readies a thread until a handler returns, so do not idle under one.
 enum class Idling { Allowed, Blocked };
+
+// A nested run puts its own limit in front of the one outside it.
+class DeadlineScope {
+public:
+    DeadlineScope(Machine& machine, Deadline& deadline)
+        : mMachine(machine), mPrevious(std::exchange(machine.deadline, &deadline)) {}
+    ~DeadlineScope() { mMachine.deadline = mPrevious; }
+
+private:
+    Machine& mMachine;
+    Deadline* mPrevious;
+};
 
 // Only the outermost run watches: a callback is bounded by returning.
 constexpr u64 kIdleInterval = 0xFFFF;
 
-// A resume that runs nothing means the thread the kernel points at cannot make
-// progress on the stack it is parked on.
+// The thread cannot progress on the stack it is parked on.
 constexpr u64 kIdleResumesReported = 100000;
 
-// Wall clock, because how far a guest gets in a given instruction count says
-// more about this interpreter's speed than about the guest.
-class Deadline {
-public:
-    explicit Deadline(std::optional<std::chrono::milliseconds> limit)
-        : mAt(limit ? std::chrono::steady_clock::now() + *limit
-                    : std::chrono::steady_clock::time_point::max()) {}
-
-    bool passed() {
-        if (++mSteps < kStride) {
-            return mPassed;
-        }
-        mSteps = 0;
-        mPassed = std::chrono::steady_clock::now() >= mAt;
-        return mPassed;
-    }
-
-private:
-    // Asking the clock costs more than the step it bounds.
-    static constexpr u32 kStride = 1024;
-
-    std::chrono::steady_clock::time_point mAt;
-    u32 mSteps = 0;
-    bool mPassed = false;
-};
-
-// How fast the guest is actually running. A run that slows to a crawl reads as a
-// hang without this, since everything downstream simply stops happening.
+// Without this a run that slows to a crawl reads as a hang.
 class Progress {
 public:
     void sample(u64 executed) {
@@ -157,8 +166,7 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling,
               Progress* progress = nullptr, usize owner = kRunningThread);
 std::optional<Stop> runIdle(Machine& machine, Deadline& deadline);
 
-// A thread that gives up the processor part way through a call tree has to
-// resume there, which needs its host stack kept intact.
+// A thread parked mid call tree resumes there, so its host stack is kept.
 class Scheduler {
 public:
     Scheduler(Machine& machine, std::optional<std::chrono::milliseconds> limit)
@@ -233,8 +241,7 @@ private:
     usize mResuming = 0;
 };
 
-// A slot that transfers control replaces the pending transfer: the R5900 lets
-// the second win rather than queueing both.
+// The R5900 lets the second transfer win rather than queueing both.
 Step runDelaySlot(Machine& machine, u32 pc) {
     R5900& cpu = machine.ee().cpu;
     u32 pending = cpu.pc;
@@ -261,7 +268,9 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
     Kernel& kernel = machine.kernel;
     R5900& cpu = interpreter.ee.cpu;
 
-    while (!deadline.passed()) {
+    const DeadlineScope limit(machine, deadline);
+
+    while (!deadline.passed() && !machine.budget.stopped) {
         if (cpu.pc == kSyscallHandlerReturn && kernel.resumeFromSyscallHandler()) {
             continue;
         }
@@ -278,8 +287,7 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
             continue;
         }
 
-        // One instruction at a time is cheap enough to keep the clock exact here.
-        // The interval only spares emitted code, which reports a whole block.
+        // Exact here; the interval only spares emitted code, which reports a block.
         kernel.countExecuted(1);
         kernel.advanceClock();
         kernel.deliverInterrupts();
@@ -302,12 +310,12 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
         }
 
         const u32 pc = cpu.pc;
-        if (machine.calls != nullptr && machine.calls->isHooked(pc) &&
-            machine.calls->enter(interpreter.ee)) {
+        if (machine.hooks != nullptr && machine.hooks->isHooked(pc) &&
+            machine.hooks->enter(interpreter.ee)) {
             continue;
         }
-        if (!kernel.hooks().empty()) {
-            kernel.hooks().enter(memory, pc, static_cast<u32>(cpu.gpr[4].lo),
+        if (!kernel.symbolWatch().empty()) {
+            kernel.symbolWatch().enter(memory, pc, static_cast<u32>(cpu.gpr[4].lo),
                                  static_cast<u32>(cpu.gpr[5].lo), static_cast<u32>(cpu.gpr[6].lo),
                                  static_cast<u32>(cpu.gpr[7].lo));
         }
@@ -329,8 +337,7 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
             kernel.countExecuted(1);
         }
 
-        // A nested run must not start a queued call of its own: chaining them
-        // that way would finish a handler chain in the reverse of its order.
+        // Chaining nested calls would finish a handler chain in reverse order.
         if (idling == Idling::Allowed) if (auto call = kernel.takePendingCall()) {
             log.trace("callback {:08x} for {}", call->function, call->argument);
             const EeContext caller = interpreter.ee;
@@ -348,11 +355,9 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
                 return stop;
             }
             interpreter.ee = caller;
-            // The handler can have readied the thread that gave up the
-            // processor to run it, and nothing else will pick that thread up.
+            // Nothing else picks up a thread the handler readied.
             kernel.dispatchAfterInterrupt();
-            // That can hand the processor to a thread with a host stack of its
-            // own, and this one must not carry on running instructions for it.
+            // A thread with its own host stack must not be run from here.
             while (kernel.currentThread() != self) {
                 mco_yield(mco_running());
             }
@@ -362,8 +367,7 @@ Stop runUntil(Machine& machine, u32 haltPc, Deadline& deadline, Idling idling, I
     return Stop{StopReason::TimedOut, cpu.pc, {}};
 }
 
-// A stop here is the callback's own, not a deadlock; returning nothing means
-// the processor has work again.
+// A stop here is the callback's own, not a deadlock.
 std::optional<Stop> runIdle(Machine& machine, Deadline& deadline) {
     Kernel& kernel = machine.kernel;
     R5900& cpu = machine.ee().cpu;
@@ -429,14 +433,38 @@ std::string describe(const Stop& stop) {
     return std::format("{} at {:08x}: {}", nameOf(stop.reason), stop.pc, stop.detail);
 }
 
-// Emitted code holds the host thread, so the clock only moves from in here.
-void countExecuted(Machine& machine, u32 instructions) {
-    Kernel& kernel = machine.kernel;
-    countPerformanceEvents(machine.ee().cpu, instructions);
-    if (!kernel.countExecuted(instructions) || kernel.inHandler()) {
-        return;
+// Out of line: the callback it may run needs a frame every block would pay for.
+void addPerformanceEvents(R5900& cpu, u32 instructions) {
+    for (u32 i = 0; i < 2; ++i) {
+        const u32 shift = 10u * i;
+        const bool counting = ((cpu.performanceControl >> (1 + shift)) & 0xFu) != 0;
+        const u32 event = (cpu.performanceControl >> (5 + shift)) & 0x1Fu;
+        if (counting && event == cop0::kProcessorCycleEvent) {
+            cpu.performance[i] += instructions;
+        }
     }
+}
 
+bool stopAt(Machine& machine, u32 blockStart) {
+    machine.ee().cpu.pc = blockStart;
+    return false;
+}
+
+bool service(Machine& machine, u32 instructions) {
+    Kernel& kernel = machine.kernel;
+    if (machine.budget.executed >= machine.budget.limit ||
+        (machine.deadline != nullptr && machine.deadline->passed())) {
+        machine.budget.stopped = true;
+        return false;
+    }
+    countPerformanceEvents(machine.ee().cpu,
+                           static_cast<u32>(machine.budget.executed - machine.budget.counted));
+    machine.budget.counted = machine.budget.executed;
+    (void)instructions;
+    machine.budget.nextService = machine.budget.executed + Budget::kServiceInterval;
+    if (kernel.inHandler()) {
+        return true;
+    }
     const usize self = kernel.currentThread();
     kernel.advanceClock();
     kernel.deliverInterrupts();
@@ -469,11 +497,10 @@ void countExecuted(Machine& machine, u32 instructions) {
     while (kernel.currentThread() != self) {
         mco_yield(mco_running());
     }
+    return true;
 }
 
-// False once the guest is not to carry on: the pc is left on the syscall so the
-// driver re-runs it and reports the stop, rather than emitted code running past
-// an exit into whatever follows it.
+// The pc is left on the syscall so the driver re-runs it and reports the stop.
 bool syscall(Machine& machine, s32 number, u32 resumePc) {
     Kernel& kernel = machine.kernel;
     const usize self = kernel.currentThread();
@@ -484,9 +511,8 @@ bool syscall(Machine& machine, s32 number, u32 resumePc) {
         return false;
     }
 
-    // A handler runs on the context of the thread it interrupted, so every
-    // thread looks blocked for as long as it is on the stack. Idling there would
-    // report a processor with nothing to run and unwind the handler.
+    // Every thread looks blocked while a handler is on the stack, and idling
+    // there would unwind it.
     const Idling idling = kernel.inHandler() ? Idling::Blocked : Idling::Allowed;
     Deadline deadline{kCallLimit};
     while (kernel.isIdle() && idling == Idling::Allowed) {
@@ -503,26 +529,46 @@ bool syscall(Machine& machine, s32 number, u32 resumePc) {
     return true;
 }
 
-void stepDelaySlot(Machine& machine, u32 pc) {
+void interpreterFallbackDelaySlot(Machine& machine, u32 pc) {
     runDelaySlot(machine, pc);
 }
 
-void step(Machine& machine, u32 pc) {
+void interpreterFallback(Machine& machine, u32 pc) {
     machine.ee().cpu.pc = pc;
     // Without this the pc could land on a function entry and re-enter translated
     // code, running a whole call tree, while only one instruction was asked for.
-    Machine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
+    Machine interpretOnly{machine.interpreter, machine.memory, machine.mmio, machine.kernel,
+                          machine.budget, nullptr};
     Deadline deadline{kCallLimit};
     runUntil(interpretOnly, pc + 4, deadline,
              machine.kernel.inHandler() ? Idling::Blocked : Idling::Allowed);
 }
 
+bool askFrontend(Machine& machine, u32 pc) {
+    machine.ee().cpu.pc = pc;
+    return machine.hooks->enter(machine.ee());
+}
+
+// The whole subtree below it runs a hundred times slower, so say so once.
+void reportUntranslated(Machine& machine, u32 target) {
+    static std::set<u32> reported;
+    if (!reported.insert(target).second) {
+        return;
+    }
+    log.warn("no translation for {}, interpreting it and everything it calls",
+             machine.kernel.symbols().describe(target));
+}
+
 bool call(Machine& machine, u32 target, u32 returnTo) {
     machine.ee().cpu.pc = target;
     if (machine.functions == nullptr || !machine.functions(machine, target)) {
+        if (machine.functions != nullptr) {
+            reportUntranslated(machine, target);
+        }
         // Dispatching inside the subtree would put host frames at a depth
         // the guest stack does not have.
-        Machine interpretOnly{machine.interpreter, machine.memory, machine.kernel, nullptr};
+        Machine interpretOnly{machine.interpreter, machine.memory, machine.mmio, machine.kernel,
+                          machine.budget, nullptr};
         Deadline deadline{kCallLimit};
         runUntil(interpretOnly, returnTo, deadline,
                  machine.kernel.inHandler() ? Idling::Blocked : Idling::Allowed);

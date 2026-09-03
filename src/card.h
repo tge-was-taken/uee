@@ -7,8 +7,7 @@
 
 namespace uee {
 
-// The memory card side of the SIO2 protocol. MC2_S1 identifies a card before
-// it reads one, and a slot that misses any step of that is reported empty.
+// A slot that misses any step of MC2_S1's identification is reported empty.
 class MemoryCard {
 public:
     explicit MemoryCard(CardStorage* storage) : mStorage(storage) {}

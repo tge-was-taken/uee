@@ -24,7 +24,7 @@ bool AlarmTable::isActive(s32 id) const {
 }
 
 // KERNEL: _SetAlarm @ 0x800022d8
-s32 AlarmTable::set(u16 ticks, u32 callback, u32 argument, u32 globalPointer, u16 now) {
+s32 AlarmTable::set(u16 ticks, u32 callback, u32 argument, u32 gp, u16 now) {
     const s32 id = allocate();
     if (id < 0) {
         return -1;
@@ -34,12 +34,11 @@ s32 AlarmTable::set(u16 ticks, u32 callback, u32 argument, u32 globalPointer, u1
     Alarm& alarm = mAlarms[static_cast<usize>(id)];
     alarm.callback = callback;
     alarm.argument = argument;
-    alarm.globalPointer = globalPointer;
+    alarm.gp = gp;
     alarm.start = now;
     alarm.target = target;
 
-    // A target at or below now has wrapped past 0xFFFF, so it sorts after every
-    // alarm that has not wrapped. Within each group the order is by target.
+    // A target at or below now has wrapped, so it sorts after those that have not.
     usize at = 0;
     if (now >= target) {
         while (at < mActive.size() && mAlarms[mActive[at]].target >= now) {

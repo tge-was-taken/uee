@@ -1,5 +1,5 @@
-// A `Sio2*` tag names the routine that settles a detail, and a `Pad*` or `Mc2*`
-// one a routine in the module that drives the device on the other end:
+// A `Sio2*` tag names the routine that settles a detail; `Pad*` and `Mc2*` name
+// one in the module driving the device:
 //   SIO2MAN md5 ea22447abe3a4b56a26f3149316370a3
 //   PADMAN  md5 0fa9dbfe8794e172733189ed945aff45
 //   MC2_S1  md5 c493ecb797ddd06b4ebd7eee6aff1959
@@ -37,18 +37,16 @@ constexpr u32 kResetOut = 1u << 3;
 // SIO2MAN's start @ 0x3c4 registers its handler on this line.
 constexpr u32 kSio2Interrupt = 17;
 
-// Mc2Sio2QueueCommand @ 0x7c4 packs an entry: the port, then the length of the
-// command, then the length of the answer. The transfer clocks the longer one,
-// and a zero entry ends the queue.
+// Mc2Sio2QueueCommand @ 0x7c4
+// Port, command length, answer length. The transfer clocks the longer, and a
+// zero entry ends the queue.
 constexpr u32 kPortMask = 0x3;
 constexpr u32 kLengthMask = 0x1FF;
 constexpr u32 kSendShift = 8;
 constexpr u32 kReceiveShift = 18;
 
-// What a finished queue leaves in RECV1, with one bit per entry that found no
-// device at 16 and again at 8. Mc2Sio2RunTransfer @ 0x8b8 reads the first two,
-// PadStateSlotGet @ 0x4950 the bit at 16, over the place in the queue that
-// PadSlotResultFetch @ 0x4b30 gave the entry.
+// One bit per entry that found no device, at 16 and again at 8.
+// Mc2Sio2RunTransfer @ 0x8b8, PadStateSlotGet @ 0x4950, PadSlotResultFetch @ 0x4b30
 constexpr u32 kQueueFinished = 0x1000;
 constexpr u32 kQueueIncomplete = 0xC000;
 constexpr u32 kMissingShift = 16;

@@ -17,6 +17,7 @@ struct mco_coro;
 namespace uee {
 
 constexpr u32 kIopModuleBase = 0x00010000;
+constexpr u32 kModulePageBytes = 0x1000;
 constexpr u32 kIopStackTop = 0x001F0000;
 constexpr u32 kIopStackSize = 0x00010000;
 constexpr u32 kIopModuleReturn = 0x0FFFFFF0;
@@ -34,9 +35,8 @@ public:
     IopScheduler(const IopScheduler&) = delete;
     IopScheduler& operator=(const IopScheduler&) = delete;
 
-    // Whether an idle processor may skip to whatever the clock will release.
-    // A module entry may, because the EE waits on it; a slice the EE granted
-    // may not, or the IOP runs ahead of the machine around it.
+    // A module entry may skip ahead because the EE waits on it; a granted
+    // slice may not, or the IOP runs ahead of the machine around it.
     enum class Skipping { Allowed, Blocked };
 
     Stop run(u64 budget, Skipping skipping = Skipping::Allowed);

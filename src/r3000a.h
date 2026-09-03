@@ -6,6 +6,16 @@ namespace uee {
 
 namespace r3000 {
 constexpr u32 kStatus = 12;
+constexpr u32 kCause = 13;
+constexpr u32 kEpc = 14;
+constexpr u32 kCauseCodeShift = 2;
+constexpr u32 kCauseCodeMask = 0x1Fu << kCauseCodeShift;
+constexpr u32 kBreakpoint = 9;
+// The R3000A has no separate vector for a breakpoint; everything but a reset
+// arrives here, or at the boot copy while the status says so.
+constexpr u32 kExceptionVector = 0x80000080;
+constexpr u32 kBootExceptionVector = 0xBFC00180;
+constexpr u32 kBootExceptionVectors = 1u << 22;
 }  // namespace r3000
 
 struct DelayedLoad {

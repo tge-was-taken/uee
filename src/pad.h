@@ -7,9 +7,8 @@
 
 namespace uee {
 
-// The controller side of the SIO2 protocol. PADMAN walks a pad into config
-// mode to read what it is and to turn its analog mode on, so a pad that only
-// answered a poll would never leave its probe.
+// PADMAN walks a pad into config mode, so one that only answered a poll would
+// never leave its probe.
 class DualShock {
 public:
     explicit DualShock(PadSource* buttons) : mButtons(buttons) {}

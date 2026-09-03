@@ -3,6 +3,8 @@
 #include "fpu.h"
 #include "fpu_handlers.h"
 #include "instruction.h"
+#include "ee_mmio.h"
+#include "guest_replacement.h"
 #include "memory.h"
 #include "r5900.h"
 #include "types.h"
@@ -121,7 +123,11 @@ inline void divideUnsigned(R5900& cpu, u32 a, u32 b, bool pipeline1) {
     setDivideResult(cpu, result.quotient, result.remainder, pipeline1);
 }
 
-inline u32 effectiveAddress(const R5900& cpu, u32 base, s32 offset) {
+constexpr u32 resolveEa(const R5900&, FixedAddress base, s32 offset) {
+    return base.address + static_cast<u32>(offset);
+}
+
+inline u32 resolveEa(const R5900& cpu, u32 base, s32 offset) {
     return low(cpu.gpr[base]) + static_cast<u32>(offset);
 }
 
@@ -186,6 +192,14 @@ inline void daddu(R5900& cpu, u32 rd, u32 rs, u32 rt) {
 inline void dsubu(R5900& cpu, u32 rd, u32 rs, u32 rt) {
     cpu.write64(rd, cpu.gpr[rs].lo - cpu.gpr[rt].lo);
 }
+// A move has no encoding, so a compiler spells it against register zero.
+inline void move(R5900& cpu, u32 rd, u32 rs) {
+    cpu.write64(rd, cpu.gpr[rs].lo);
+}
+inline void moveWord(R5900& cpu, u32 rd, u32 rs) {
+    cpu.write32(rd, low(cpu.gpr[rs]));
+}
+
 inline void and_(R5900& cpu, u32 rd, u32 rs, u32 rt) {
     cpu.write64(rd, cpu.gpr[rs].lo & cpu.gpr[rt].lo);
 }
@@ -700,9 +714,7 @@ inline void pmsubh(R5900& cpu, u32 rd, u32 rs, u32 rt) {
     spreadHalfProducts(cpu, rd, products);
 }
 
-// HI and LO keep each sum alongside the upper product it came from. The
-// subtracting form stores that product as it enters the adder, in one's
-// complement.
+// The subtracting form stores the product in one's complement.
 inline void horizontalHalfMultiply(R5900& cpu, u32 rd, u32 rs, u32 rt, bool subtract) {
     const Reg128 a = cpu.gpr[rs], b = cpu.gpr[rt];
     u32 sums[4];
@@ -927,10 +939,8 @@ inline void mtsah(R5900& cpu, u32 rs, u32 imm) {
     cpu.sa = ((low(cpu.gpr[rs]) ^ imm) & 0x7u) * 2u;
 }
 
-// COP0 register 25 is a window onto the performance registers rather than a
-// register of its own. The low bit of the instruction picks a counter over the
-// control register, and the bit above it picks which of the two counters; every
-// wider specifier folds back onto the same pair.
+// COP0 25 windows the performance registers: low bit counter over control,
+// next which counter.
 inline u32 readPerformance(const R5900& cpu, u32 selector) {
     return (selector & 1u) ? cpu.performance[(selector >> 1) & 1u] : cpu.performanceControl;
 }
@@ -940,21 +950,6 @@ inline void writePerformance(R5900& cpu, u32 selector, u32 value) {
         cpu.performance[(selector >> 1) & 1u] = value;
     } else if (selector == 0) {
         cpu.performanceControl = value & cop0::kPerformanceControlMask;
-    }
-}
-
-// One instruction stands in for one processor cycle. A counter asked for any
-// other event stays still rather than reporting a number this runtime has no
-// way to know. Translated code passes a whole block at once, so both backends
-// reach the same total.
-inline void countPerformanceEvents(R5900& cpu, u32 instructions) {
-    for (u32 i = 0; i < 2; ++i) {
-        const u32 shift = 10u * i;
-        const bool counting = ((cpu.performanceControl >> (1 + shift)) & 0xFu) != 0;
-        const u32 event = (cpu.performanceControl >> (5 + shift)) & 0x1Fu;
-        if (counting && event == cop0::kProcessorCycleEvent) {
-            cpu.performance[i] += instructions;
-        }
     }
 }
 
@@ -975,10 +970,6 @@ inline void ei(R5900& cpu) {
     cpu.cop0[cop0::kStatus] |= (1u << 16);
 }
 
-// EPC keeps the address of the first exception, so a fault inside a handler
-// does not lose where the handler was entered from.
-// The trap family. A taken trap is an exception this runtime has no handler
-// for, so the caller reports it rather than inventing a recovery.
 inline bool teqTaken(const R5900& cpu, u32 rs, u32 rt) {
     return cpu.gpr[rs].lo == cpu.gpr[rt].lo;
 }
@@ -1026,6 +1017,7 @@ inline bool tltiTaken(const R5900& cpu, u32 rs, s32 imm) {
 inline bool tltiuTaken(const R5900& cpu, u32 rs, s32 imm) {
     return cpu.gpr[rs].lo < static_cast<u64>(static_cast<s64>(imm));
 }
+// EPC keeps the first exception's address, so a nested fault does not lose it.
 inline void raiseException(R5900& cpu, u32 pc, u32 code) {
     u32& status = cpu.cop0[cop0::kStatus];
     u32& cause = cpu.cop0[cop0::kCause];
@@ -1076,69 +1068,151 @@ inline void ctc2(R5900& cpu, EeContext& ee, Vu& vu1, Memory& memory, u32 rt, u32
     }
 }
 
-inline void lb(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
+// The translator resolved these, so nothing is left to work out at run time.
+inline void lbRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    cpu.write32(rt, static_cast<u32>(static_cast<s8>(memory.readRam8(address))));
+}
+inline void lbuRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    cpu.write32(rt, memory.readRam8(address));
+}
+inline void lhRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    cpu.write32(rt, static_cast<u32>(static_cast<s16>(memory.readRam16(address))));
+}
+inline void lhuRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    cpu.write32(rt, memory.readRam16(address));
+}
+inline void lwRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    cpu.write32(rt, memory.readRam32(address));
+}
+inline void lwuRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    cpu.write64(rt, memory.readRam32(address));
+}
+inline void ldRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    cpu.write64(rt, memory.readRam64(address));
+}
+inline void sbRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    memory.writeRam8(address, static_cast<u8>(low(cpu.gpr[rt])));
+}
+inline void shRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    memory.writeRam16(address, static_cast<u16>(low(cpu.gpr[rt])));
+}
+inline void swRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    memory.writeRam32(address, low(cpu.gpr[rt]));
+}
+inline void sdRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    memory.writeRam64(address, cpu.gpr[rt].lo);
+}
+
+inline void lqRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    const u32 aligned = address & ~15u;
+    cpu.write128(rt, Reg128{memory.readRam64(aligned), memory.readRam64(aligned + 8)});
+}
+inline void sqRam(R5900& cpu, Memory& memory, u32 rt, u32 address) {
+    const u32 aligned = address & ~15u;
+    memory.writeRam64(aligned, cpu.gpr[rt].lo);
+    memory.writeRam64(aligned + 8, cpu.gpr[rt].hi);
+}
+
+// A register window, which only a word reaches whole. The block is named by
+// the caller, so no search stands between the guest and the device.
+template <EeMmioBlock block>
+inline void lwMmio(R5900& cpu, EeMmio& mmio, Memory& memory, u32 rt, u32 folded) {
+    cpu.write32(rt, readMmio32<block>(mmio, memory, folded));
+}
+template <EeMmioBlock block>
+inline void swMmio(R5900& cpu, EeMmio& mmio, Memory& memory, u32 rt, u32 folded) {
+    writeMmio32<block>(mmio, memory, folded, low(cpu.gpr[rt]));
+}
+template <EeMmioBlock block>
+inline void ldMmio(R5900& cpu, EeMmio& mmio, Memory& memory, u32 rt, u32 folded) {
+    cpu.write64(rt, readMmio64<block>(mmio, memory, folded));
+}
+template <EeMmioBlock block>
+inline void sdMmio(R5900& cpu, EeMmio& mmio, Memory& memory, u32 rt, u32 folded) {
+    writeMmio64<block>(mmio, memory, folded, cpu.gpr[rt].lo);
+}
+
+template <typename Base>
+inline void lb(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
     cpu.write32(rt, static_cast<u32>(static_cast<s8>(
-                        memory.read8(effectiveAddress(cpu, base, offset)))));
+                        memory.read8(resolveEa(cpu, base, offset)))));
 }
-inline void lbu(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.write32(rt, memory.read8(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void lbu(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.write32(rt, memory.read8(resolveEa(cpu, base, offset)));
 }
-inline void lh(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
+template <typename Base>
+inline void lh(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
     cpu.write32(rt, static_cast<u32>(static_cast<s16>(
-                        memory.read16(effectiveAddress(cpu, base, offset)))));
+                        memory.read16(resolveEa(cpu, base, offset)))));
 }
-inline void lhu(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.write32(rt, memory.read16(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void lhu(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.write32(rt, memory.read16(resolveEa(cpu, base, offset)));
 }
-inline void lw(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.write32(rt, memory.read32(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void lw(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.write32(rt, memory.read32(resolveEa(cpu, base, offset)));
 }
-inline void lwu(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.write64(rt, memory.read32(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void lwu(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.write64(rt, memory.read32(resolveEa(cpu, base, offset)));
 }
-inline void ld(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.write64(rt, memory.read64(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void ld(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.write64(rt, memory.read64(resolveEa(cpu, base, offset)));
 }
-inline void lq(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 aligned = effectiveAddress(cpu, base, offset) & ~15u;
+template <typename Base>
+inline void lq(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 aligned = resolveEa(cpu, base, offset) & ~15u;
     cpu.write128(rt, Reg128{memory.read64(aligned), memory.read64(aligned + 8)});
 }
-inline void lwc1(R5900& cpu, Fpu& fpu, Memory& memory, u32 ft, u32 base, s32 offset) {
-    fpu.fpr[ft] = memory.read32(effectiveAddress(cpu, base, offset));
+template <typename Base>
+inline void lwc1(R5900& cpu, Fpu& fpu, Memory& memory, u32 ft, Base base, s32 offset) {
+    fpu.fpr[ft] = memory.read32(resolveEa(cpu, base, offset));
 }
-inline void lqc2(R5900& cpu, Vu& vu0, Memory& memory, u32 ft, u32 base, s32 offset) {
-    const u32 aligned = effectiveAddress(cpu, base, offset) & ~15u;
+template <typename Base>
+inline void lqc2(R5900& cpu, Vu& vu0, Memory& memory, u32 ft, Base base, s32 offset) {
+    const u32 aligned = resolveEa(cpu, base, offset) & ~15u;
     vu0.vf[ft] = Reg128{memory.read64(aligned), memory.read64(aligned + 8)};
 }
 
-inline void sb(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    memory.write8(effectiveAddress(cpu, base, offset), static_cast<u8>(low(cpu.gpr[rt])));
+template <typename Base>
+inline void sb(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    memory.write8(resolveEa(cpu, base, offset), static_cast<u8>(low(cpu.gpr[rt])));
 }
-inline void sh(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    memory.write16(effectiveAddress(cpu, base, offset), static_cast<u16>(low(cpu.gpr[rt])));
+template <typename Base>
+inline void sh(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    memory.write16(resolveEa(cpu, base, offset), static_cast<u16>(low(cpu.gpr[rt])));
 }
-inline void sw(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    memory.write32(effectiveAddress(cpu, base, offset), low(cpu.gpr[rt]));
+template <typename Base>
+inline void sw(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    memory.write32(resolveEa(cpu, base, offset), low(cpu.gpr[rt]));
 }
-inline void sd(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    memory.write64(effectiveAddress(cpu, base, offset), cpu.gpr[rt].lo);
+template <typename Base>
+inline void sd(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    memory.write64(resolveEa(cpu, base, offset), cpu.gpr[rt].lo);
 }
-inline void sq(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 aligned = effectiveAddress(cpu, base, offset) & ~15u;
+template <typename Base>
+inline void sq(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 aligned = resolveEa(cpu, base, offset) & ~15u;
     memory.write64(aligned, cpu.gpr[rt].lo);
     memory.write64(aligned + 8, cpu.gpr[rt].hi);
 }
-inline void swc1(R5900& cpu, const Fpu& fpu, Memory& memory, u32 ft, u32 base, s32 offset) {
-    memory.write32(effectiveAddress(cpu, base, offset), fpu.fpr[ft]);
+template <typename Base>
+inline void swc1(R5900& cpu, const Fpu& fpu, Memory& memory, u32 ft, Base base, s32 offset) {
+    memory.write32(resolveEa(cpu, base, offset), fpu.fpr[ft]);
 }
-inline void sqc2(R5900& cpu, const Vu& vu0, Memory& memory, u32 ft, u32 base, s32 offset) {
-    const u32 aligned = effectiveAddress(cpu, base, offset) & ~15u;
+template <typename Base>
+inline void sqc2(R5900& cpu, const Vu& vu0, Memory& memory, u32 ft, Base base, s32 offset) {
+    const u32 aligned = resolveEa(cpu, base, offset) & ~15u;
     memory.write64(aligned, vu0.vf[ft].lo);
     memory.write64(aligned + 8, vu0.vf[ft].hi);
 }
 
-inline void lwl(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void lwl(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (3u - (address & 3u));
     const u32 word = memory.read32(address & ~3u);
     const u32 keep = (shift == 0) ? 0u : (low(cpu.gpr[rt]) & ((1u << shift) - 1u));
@@ -1146,8 +1220,9 @@ inline void lwl(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
 }
 // Only the aligned case loads a whole word, and only then does the result
 // sign-extend; a partial merge leaves the upper half of the register alone.
-inline void lwr(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void lwr(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (address & 3u);
     const u32 word = memory.read32(address & ~3u);
     if (shift == 0) {
@@ -1157,45 +1232,51 @@ inline void lwr(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
     const u32 merged = (word >> shift) | (low(cpu.gpr[rt]) & ~((1u << (32 - shift)) - 1u));
     cpu.write64(rt, (cpu.gpr[rt].lo & 0xFFFFFFFF00000000ull) | merged);
 }
-inline void ldl(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void ldl(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (7u - (address & 7u));
     const u64 value = memory.read64(address & ~7u);
     const u64 keep = (shift == 0) ? 0ull : (cpu.gpr[rt].lo & ((1ull << shift) - 1ull));
     cpu.write64(rt, (value << shift) | keep);
 }
-inline void ldr(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void ldr(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (address & 7u);
     const u64 value = memory.read64(address & ~7u);
     const u64 keep = (shift == 0) ? 0ull : (cpu.gpr[rt].lo & ~((1ull << (64 - shift)) - 1ull));
     cpu.write64(rt, (value >> shift) | keep);
 }
-inline void swl(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void swl(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 bytes = (address & 3u) + 1u;
     const u32 shift = 8u * (4u - bytes);
     const u32 word = memory.read32(address & ~3u);
     const u32 mask = (bytes == 4) ? 0xFFFFFFFFu : ((1u << (8 * bytes)) - 1u);
     memory.write32(address & ~3u, (word & ~mask) | ((low(cpu.gpr[rt]) >> shift) & mask));
 }
-inline void swr(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void swr(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (address & 3u);
     const u32 word = memory.read32(address & ~3u);
     const u32 mask = (shift == 0) ? 0xFFFFFFFFu : ~((1u << shift) - 1u);
     memory.write32(address & ~3u, (word & ~mask) | ((low(cpu.gpr[rt]) << shift) & mask));
 }
-inline void sdl(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void sdl(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 bytes = (address & 7u) + 1u;
     const u32 shift = 8u * (8u - bytes);
     const u64 value = memory.read64(address & ~7u);
     const u64 mask = (bytes == 8) ? ~0ull : ((1ull << (8 * bytes)) - 1ull);
     memory.write64(address & ~7u, (value & ~mask) | ((cpu.gpr[rt].lo >> shift) & mask));
 }
-inline void sdr(R5900& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void sdr(R5900& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (address & 7u);
     const u64 value = memory.read64(address & ~7u);
     const u64 mask = (shift == 0) ? ~0ull : ~((1ull << shift) - 1ull);

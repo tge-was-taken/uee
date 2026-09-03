@@ -94,6 +94,22 @@ std::string Symbols::describe(u32 address) const {
     return std::format("{:08x}", address);
 }
 
+std::optional<std::string_view> Symbols::nameAt(u32 address) const {
+    for (const Module& module : mModules) {
+        if (address < module.base || address - module.base >= module.size) {
+            continue;
+        }
+        const u32 offset = address - module.base;
+        const auto found =
+            std::lower_bound(module.entries.begin(), module.entries.end(), offset,
+                             [](const Entry& entry, u32 value) { return entry.offset < value; });
+        if (found != module.entries.end() && found->offset == offset) {
+            return std::string_view(found->name);
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<u32> Symbols::find(std::string_view name) const {
     for (const Module& module : mModules) {
         for (const Entry& entry : module.entries) {

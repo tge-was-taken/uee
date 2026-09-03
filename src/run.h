@@ -4,7 +4,7 @@
 #include "kernel.h"
 #include "memory.h"
 #include "stop.h"
-#include "translate.h"
+#include "ee_translate.h"
 #include "types.h"
 
 #include <chrono>

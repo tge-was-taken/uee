@@ -6,7 +6,7 @@
 #include "kernel.h"
 #include "memory.h"
 #include "run.h"
-#include "translate.h"
+#include "ee_translate.h"
 #include "types.h"
 
 #include <spdlog/spdlog.h>
@@ -89,7 +89,7 @@ inline int run(int argc, char** argv, FunctionRunner translated) {
 
     interpreter.ee.cpu.pc = loadElf(readFile(elfPath), memory).entry;
 
-    Machine machine{interpreter, memory, kernel, translated};
+    Machine machine{interpreter, memory, kernel.mmio(), kernel, kernel.budget(), translated};
     const Stop stop = run(machine, kTimeLimit);
     const std::string& actual = kernel.readOutput();
     const std::vector<u8> expectedBytes = readFile(argv[2]);

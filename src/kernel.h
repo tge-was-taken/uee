@@ -1,10 +1,12 @@
 #pragma once
 
 #include "alarm.h"
+#include "budget.h"
 #include "ee_mmio.h"
 #include "sif.h"
 #include "memory.h"
-#include "hooks.h"
+#include "perf.h"
+#include "symbol_watch.h"
 #include "patches.h"
 #include "semaphores.h"
 #include "symbols.h"
@@ -12,12 +14,14 @@
 #include "ee_context.h"
 #include "types.h"
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <span>
 #include <vector>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace uee {
 
@@ -28,8 +32,7 @@ enum class SyscallResult {
     Unknown,
 };
 
-// A guest syscall handler returns with jr $ra, so the dispatcher parks this
-// address in $ra and resumes the interrupted code when the pc reaches it.
+// Parked in $ra, so a handler's jr $ra lands here.
 constexpr u32 kSyscallHandlerReturn = 0xF0000004;
 
 struct GuestCall {
@@ -43,7 +46,8 @@ struct GuestCall {
 
 class Kernel {
 public:
-    Kernel(EeContext& ctx, Memory& memory, const GameConfig& config = {});
+    Kernel(EeContext& ctx, Memory& memory, const GameConfig& config = {},
+           std::span<TranslatedIrx* const> iopModules = {});
 
     SyscallResult handleSyscall();
     SyscallResult callSyscall(s32 number);
@@ -53,14 +57,10 @@ public:
     void enterHandler() { ++mHandlerDepth; }
     void leaveHandler() { --mHandlerDepth; }
 
-    // The guest callback an RPC reply or an expired alarm owes its caller, which
-    // the run loop has to execute before the guest resumes.
+    // The run loop must execute this before the guest resumes.
     std::optional<GuestCall> takePendingCall();
-    // What the guest call returned, which decides whether the rest of its chain
-    // still runs.
     void completePendingCall(u32 result);
 
-    // Runs the handler chain for any interrupt the processor is willing to take.
     void deliverInterrupts();
 
     bool isIdle() const { return mIdle; }
@@ -72,34 +72,39 @@ public:
     void attachPad(PadSource* pad) { mIop.attachPad(pad); }
     void attachCard(CardStorage* card) { mIop.attachCard(card); }
 
-    // Advances the timers and queues any alarm that has expired.
     void advanceClock();
+
+    Budget& budget() { return mBudget; }
+    void stopAfter(u64 instructions) { mBudget.limit = instructions; }
 
     // True when the clock is worth advancing. Emitted code reports its own.
     bool countExecuted(u64 instructions) {
-        mExecuted += instructions;
-        if (mExecuted < mNextService) {
+        mBudget.executed += instructions;
+        // The interpreter already updated the performance registers.
+        mBudget.counted = mBudget.executed;
+        if (mBudget.executed < mBudget.nextService) {
             return false;
         }
-        mNextService = mExecuted + kServiceInterval;
+        mBudget.nextService = mBudget.executed + Budget::kServiceInterval;
         return true;
     }
 
-    u64 executed() const { return mExecuted; }
+    u64 executed() const { return mBudget.executed; }
 
-    // Restores the register the guest handler was called through and resumes
-    // the instruction after the syscall.
+    bool reachedDeadline() const { return mBudget.stopped; }
+
     bool resumeFromSyscallHandler();
 
     usize currentThread() const { return mThreads.current(); }
+
+    // For a wait on something outside the guest.
+    void yieldCurrentThread();
     Symbols& symbols() { return mSymbols; }
-    Hooks& hooks() { return mHooks; }
+    SymbolWatch& symbolWatch() { return mSymbolWatch; }
     Symbols& iopSymbols() { return mIop.symbols(); }
-    // The port preloads the modules it knows the game replaces.
     Iop& iop() { return mIop; }
     std::span<const u32> watched() const { return mWatched; }
 
-    // Everything a stop that was not clean needs explaining.
     void reportThreads() const;
     const std::string& readOutput() const { return mOutput; }
 
@@ -161,7 +166,6 @@ private:
     u32 readSifRegister(u32 id) const;
     u32 writeSifRegister(u32 id, u32 value);
 
-    void publishTimers();
     void raiseFieldInterrupts();
     void queueHandlerChain(const std::vector<const IntrHandler*>& chain, u32 cause);
     void makeReadyAndPreempt(usize id);
@@ -180,8 +184,9 @@ private:
     EeMmio mMmio;
     std::string mOutput;
     Symbols mSymbols;
-    Hooks mHooks;
+    SymbolWatch mSymbolWatch;
     std::vector<u32> mWatched;
+    u64 mIopBudgetPerHsync;
     Iop mIop;
     Sif mSif{mMemory, mMmio.sbus(), mOutput, mIop};
 
@@ -209,12 +214,11 @@ private:
     };
     std::array<TlbEntry, 48> mTlb;
     bool mInVblank = false;
+    SpeedMeter mSpeed{120};
     // Short enough that a guest polling a timer sees it move.
-    static constexpr u64 kServiceInterval = 1024;
 
     u32 mHandlerDepth = 0;
-    u64 mExecuted = 0;
-    u64 mNextService = kServiceInterval;
+    Budget mBudget;
     u32 mMachineType = 0;
     u32 mOsdConfig = 0;
     bool mIdle = false;

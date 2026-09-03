@@ -52,11 +52,7 @@ Timers::Timers() {
     }
 }
 
-bool Timers::advanceTo(u64 executed) {
-    if (executed < mNextTick) {
-        return false;
-    }
-
+bool Timers::runTicks(u64 executed) {
     u64 next = executed + kInstructionsPerHsync;
     for (Timer& timer : mTimers) {
         // Check for stopped timer

@@ -75,7 +75,7 @@ bool EeMmio::write(u32 address, u32 value) {
         return false;
     }();
     if (handled) {
-        refreshCondition();
+        refreshCop0Condition();
     }
     return handled;
 }

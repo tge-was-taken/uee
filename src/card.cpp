@@ -33,8 +33,8 @@ constexpr u8 kAck = 0x2B;
 // Mc2PageAddressPack @ 0x193c checks an address with the same xor.
 constexpr usize kAddressBytes = 4;
 
-// Sio2dPortABuildCmd @ 0x1350 pads its probe to five bytes where the card reads
-// two, so what the card decodes is not what SIO2 clocks.
+// Sio2dPortABuildCmd @ 0x1350
+// It pads its probe to five bytes where the card reads two.
 constexpr usize kShortCommand = 2;
 constexpr usize kOneArgument = 3;
 constexpr usize kPageCommand = 7;
@@ -110,8 +110,8 @@ std::span<u8> MemoryCard::replyTo(usize commandBytes, std::span<u8> response) {
     return response.subspan(commandBytes + 1, response.size() - commandBytes - 2);
 }
 
-// Mc2GetSpecs @ 0x14cc checks the xor of these eight bytes against the one
-// after them.
+// Mc2GetSpecs @ 0x14cc
+// It checks the xor of these eight bytes against the one after.
 void MemoryCard::reportSpecs(std::span<u8> data) {
     const u8 specs[] = {static_cast<u8>(kCardPageBytes),
                         static_cast<u8>(kCardPageBytes >> 8),
@@ -129,8 +129,8 @@ void MemoryCard::reportSpecs(std::span<u8> data) {
     }
 }
 
-// Mc2GetTerminator @ 0x176c takes a card whose answer disagrees with the
-// terminator that follows it as the older kind.
+// Mc2GetTerminator @ 0x176c
+// A disagreeing answer and terminator means the older kind.
 void MemoryCard::reportTerminator(std::span<u8> data) {
     put(data, {mTerminator});
 }

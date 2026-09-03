@@ -1,6 +1,5 @@
-// Stands in for the resident IOP modules. A `<MODULE>: <name> @ <address>` tag
-// names the routine reimplemented below, in the modules split out under
-// ps2-split/work/ps2bios:
+// A `<MODULE>: <name> @ <address>` tag names the routine reimplemented below,
+// split out under ps2-split/work/ps2bios:
 //   SYSCLIB  md5 6e25fddccabe0cc00aaa52afd3149cff
 //   SYSMEM   md5 f313d3e9879b1d8886fb2353c816b9eb
 //   INTRMANI md5 2e57f684f325b787a93f9a5883930b3b
@@ -12,11 +11,9 @@
 //   LOADCORE md5 fc39f1391282c682eb9a2f03548ddf23
 //   DMACMAN  md5 a204d6809d4133c688f0144d2d165d98
 //   SECRMAN  md5 b8bac9b7c04d9931ddc50860497f3153
-// A tag reading `<MODULE> (310)` names the build in IOPRP310.IMG instead, which
-// is what a game that reboots the IOP with it links against:
+// `<MODULE> (310)` names the IOPRP310.IMG build instead:
 //   SIFMAN   md5 4ba22fd5071ea28bcbe20f5d6dddfee7
-// An ordinal no resident build exports under the name its callers use is
-// settled by one of them instead:
+// An ordinal no resident build exports is settled by a caller instead:
 //   DBCMAN   md5 f6abf28d3eaf9277a7e4d35d3d2df607
 
 #include "log.h"
@@ -105,15 +102,15 @@ constexpr s32 kModulePriority = 64;
 constexpr usize kHostThread = 0;
 
 constexpr usize kMaxThreads = 64;
-// An interrupt runs on a context of its own: the thread it interrupts is
-// usually parked in a call, and its stack has to survive the handler. It takes
-// the top slot so the ids a guest sees are the ones it would see on hardware.
+constexpr u64 kNoDeadline = ~0ull;
+// A context of its own, since the interrupted thread's stack must survive the
+// handler. Takes the top slot so guest-visible ids match hardware.
 // TODO: verify with BIOS behavior
 constexpr usize kInterruptThread = kMaxThreads - 1;
 constexpr usize kMaxSemaphores = 64;
 constexpr usize kMaxEventFlags = 64;
-// DMACMAN: the channel register table at 0x1b68 runs 0x1F801080 for the first
-// seven channels and 0x1F801500 for the rest, sixteen bytes apart.
+// DMACMAN: channel register table @ 0x1b68
+// 0x1F801080 for the first seven, 0x1F801500 for the rest, 16 bytes apart.
 constexpr u32 kDmaChannels = 13;
 constexpr u32 kUnusableDmaChannel = 6;
 constexpr u32 kDmaMadr = 0x0;
@@ -214,12 +211,13 @@ void appendFormatted(std::string& out, const std::string& spec, T value) {
 
 }  // namespace
 
-const IopKernel::Service* IopKernel::lookup(const Import& import) {
+std::span<const IopKernel::Service> IopKernel::services() {
     static constexpr Service kServices[] = {
         {"stdio", 4, "printf", &IopKernel::printf},
         {"loadcore", 4, "FlushIcache", &IopKernel::flushCache, true},
         {"loadcore", 5, "FlushDcache", &IopKernel::flushCache, true},
         {"loadcore", 6, "RegisterLibraryEntries", &IopKernel::registerLibraryEntries, true},
+        {"loadcore", 12, "QueryBootMode", &IopKernel::queryBootMode, true},
         {"dmacman", 33, "sceSetDMAPriority", &IopKernel::setDmaPriority, true},
         {"dmacman", 28, "dmacRequest", &IopKernel::requestDma},
         {"dmacman", 32, "dmacStartTransfer", &IopKernel::startDma},
@@ -345,12 +343,34 @@ const IopKernel::Service* IopKernel::lookup(const Import& import) {
         {"libsd", 26, "sceSdSetTransIntrHandler", &IopKernel::sdSetTransIntrHandler, true},
         {"libsd", 28, "sceSdGetTransIntrHandlerArgument", &IopKernel::sdGetTransIntrHandlerArgument, true},
     };
-    for (const Service& service : kServices) {
+    return kServices;
+}
+
+const IopKernel::Service* IopKernel::lookup(const Import& import) {
+    for (const Service& service : services()) {
         if (service.module == import.module && service.id == import.id) {
             return &service;
         }
     }
     return nullptr;
+}
+
+std::optional<u32> IopKernel::findService(std::string_view module, u32 id) {
+    const std::span<const Service> table = services();
+    for (u32 i = 0; i < table.size(); ++i) {
+        if (table[i].module == module && table[i].id == id) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+void IopKernel::callService(u32 index) {
+    const Service& service = services()[index];
+    if (service.isStub && mStubReported.insert(&service).second) {
+        log.stub("{}.{}", service.module, service.symbol);
+    }
+    (this->*service.run)();
 }
 
 IopKernel::IopKernel(IopContext& iop, Memory& memory, Memory& mainMemory,
@@ -988,8 +1008,7 @@ usize IopKernel::enterInterruptThread() {
     return interrupted;
 }
 
-// The handler ran on its own registers, so the thread it interrupted gets its
-// own back before anything the handler readied is allowed to take over.
+// The interrupted thread gets its registers back before anything preempts it.
 void IopKernel::leaveInterruptThread(usize interrupted) {
     mThreads[kInterruptThread].status = iopstatus::kDormant;
     mCurrent = interrupted;
@@ -1047,8 +1066,13 @@ void IopKernel::flushCache() {
     returnValue(0);
 }
 
-// LOADCORE: RegisterLibraryEntries @ 0x898. A module's exports are read off
-// its image as it loads, so registering them again adds nothing.
+// Refusing instead leaves MODLOAD asking forever.
+void IopKernel::queryBootMode() {
+    returnValue(0);
+}
+
+// LOADCORE: RegisterLibraryEntries @ 0x898
+// Exports are read off the image as it loads.
 void IopKernel::registerLibraryEntries() {
     returnValue(0);
 }
@@ -1063,8 +1087,8 @@ void IopKernel::enableDmaChannel() {
     returnValue(0);
 }
 
-// DMACMAN: dmacRequest @ 0xcc4 writes the channel's own registers, so a device
-// sees the same transfer whether a module programs it or asks dmacman to.
+// DMACMAN: dmacRequest @ 0xcc4
+// It writes the channel registers, so a device sees the same transfer either way.
 void IopKernel::requestDma() {
     const u32 channel = argument(0);
     if (channel >= kDmaChannels || channel == kUnusableDmaChannel) {
@@ -1092,15 +1116,14 @@ void IopKernel::startDma() {
     returnValue(1);
 }
 
-// LOADCORE: SetRebootTimeLibraryHandlingMode @ 0xb94. Nothing here reboots, so
-// what a library asks to survive one does not matter.
+// LOADCORE: SetRebootTimeLibraryHandlingMode @ 0xb94
+// Nothing here reboots.
 void IopKernel::setRebootTimeLibraryHandlingMode() {
     returnValue(0);
 }
 
-// SECRMAN: SecrAuthCard @ 0xa4 runs the card through a challenge the console's
-// own keys answer, which is not something a card modelled here can hold, so the
-// authentication is answered rather than run.
+// SECRMAN: SecrAuthCard @ 0xa4
+// The challenge needs the console's own keys, which no modelled card holds.
 void IopKernel::authCard() {
     returnValue(1);
 }
@@ -1110,8 +1133,8 @@ void IopKernel::setMcDevIdHandler() {
     returnValue(0);
 }
 
-// SECRMAN: SecrSetMcCommandHandler. No memory card answers, so the handler
-// would never run.
+// SECRMAN: SecrSetMcCommandHandler
+// No memory card answers, so the handler would never run.
 void IopKernel::setMcCommandHandler() {
     returnValue(0);
 }
@@ -1343,6 +1366,7 @@ void IopKernel::delayThread() {
     const u64 cycles = static_cast<u64>(argument(0)) * kTicksPerMicrosecondNumerator /
                        kTicksPerMicrosecondDenominator;
     mThreads[mCurrent].waitDeadline = mCycles + cycles;
+    setNextDeadline(mThreads[mCurrent].waitDeadline);
     blockCurrentThread(IopWait::Delay, 0);
     returnValue(0);
 }
@@ -1655,10 +1679,8 @@ void IopKernel::sifInit() {
     returnValue(0);
 }
 
-// SIFMAN (310): sifman_SifSetDma @ 0x95c takes an array of {source,
-// destination, size, attribute} and moves each one to main memory. PADMAN md5
-// 0fa9dbfe8794e172733189ed945aff45 sends the pad state to the EE this way in
-// PadSifDmaSend @ 0x360, so the game reads nothing without it.
+// SIFMAN (310): sifman_SifSetDma @ 0x95c
+// PADMAN md5 0fa9dbfe8794e172733189ed945aff45: PadSifDmaSend @ 0x360
 void IopKernel::runSifTransfers(u32 transfers, u32 count) {
     for (u32 i = 0; i < count; ++i) {
         const u32 entry = transfers + i * kSifTransferSize;
@@ -1679,8 +1701,7 @@ void IopKernel::sifSetDma() {
 }
 
 // SIFCMD: SifGetOtherData @ 0xad4
-// It asks the EE for the bytes and leaves the packet to be polled; here they
-// are in place by the time it returns.
+// The bytes are in place on return; the module leaves them to be polled.
 void IopKernel::sifGetOtherData() {
     const u32 source = argument(1);
     const u32 destination = argument(2);
@@ -1692,8 +1713,8 @@ void IopKernel::sifGetOtherData() {
     returnValue(0);
 }
 
-// DBCMAN: dbcman_e8 @ 0x31c, which imports it as sifman ordinal 32. The
-// handler falls due as soon as the bytes are moved.
+// DBCMAN: dbcman_e8 @ 0x31c, imported as sifman ordinal 32
+// The handler falls due as soon as the bytes move.
 void IopKernel::sifSetDmaIntr() {
     const u32 count = argument(1);
     runSifTransfers(argument(0), count);
@@ -1711,14 +1732,14 @@ void IopKernel::sifInitRpc() {
     returnValue(0);
 }
 
-// SIFMAN: sceSifDmaStat @ 0x740. A transfer is finished the moment it is asked
-// for, so nothing is ever still running.
+// SIFMAN: sceSifDmaStat @ 0x740
+// A transfer finishes the moment it is asked for.
 void IopKernel::sifDmaStat() {
     returnValue(kFailed);
 }
 
-// SIFCMD: sceSifBindRpc @ 0xd08 waits out the EE's reply. Nothing carries a
-// request that way yet, so waiting beats retrying the bind forever.
+// SIFCMD: sceSifBindRpc @ 0xd08
+// Nothing carries a request that way yet.
 void IopKernel::sifBindRpc() {
     returnValue(0);
     blockCurrentThread(IopWait::RpcReply, argument(0));
@@ -1735,8 +1756,8 @@ void IopKernel::sifSetRpcQueue() {
     returnValue(argument(0));
 }
 
-// SIFCMD: sceSifRegisterRpc @ 0x1130. The EE reaches the handler through
-// Sif rather than through a request packet, so only what a call needs is kept.
+// SIFCMD: sceSifRegisterRpc @ 0x1130
+// The EE reaches the handler through Sif, not a request packet.
 void IopKernel::sifRegisterRpc() {
     const u32 data = argument(0);
     const u32 id = argument(1);
@@ -1791,10 +1812,9 @@ std::vector<IopKernel::VblankHandler>& IopKernel::vblankHandlersFor(bool atEnd) 
     return atEnd ? mVblankEndHandlers : mVblankStartHandlers;
 }
 
-// VBLANK: RegisterVblankHandler @ 0x164 takes the edge first and runs a lower
-// priority earlier, and
-// VblankStartIntrHandler @ 0x374 calls each handler with the argument it was
-// registered with.
+// VBLANK: RegisterVblankHandler @ 0x164
+// VBLANK: VblankStartIntrHandler @ 0x374
+// Lower priority runs earlier.
 void IopKernel::registerVblankHandler() {
     const bool atEnd = argument(0) != 0;
     const s32 priority = static_cast<s32>(argument(1));
@@ -1827,6 +1847,31 @@ void IopKernel::releaseVblankHandler() {
 
 // What the clock alone will release: a thread whose delay expires, or a device
 // whose transfer finishes. A run with neither has nothing left to wake it.
+u64 IopKernel::findNextDeadline() const {
+    u64 next = kNoDeadline;
+    for (const IopThread& thread : mThreads) {
+        if (thread.allocated && thread.status == iopstatus::kWait &&
+            thread.wait == IopWait::Delay) {
+            next = std::min(next, thread.waitDeadline);
+        }
+    }
+    for (const auto& [deadline, line] : mDeferredInterrupts) {
+        next = std::min(next, deadline);
+    }
+    for (const IopHardTimer& timer : mHardTimers) {
+        if (timer.running && timer.handler != 0 && timer.compare != 0) {
+            next = std::min(next, timer.nextFire);
+        }
+    }
+    return next;
+}
+
+void IopKernel::setNextDeadline(u64 at) {
+    if (mNextDeadline != 0) {
+        mNextDeadline = std::min(mNextDeadline, at);
+    }
+}
+
 std::optional<u64> IopKernel::nextDelay() const {
     std::optional<u64> earliest;
     for (const IopThread& thread : mThreads) {
@@ -1847,6 +1892,9 @@ void IopKernel::advanceTimeTo(u64 cycles) {
 
 void IopKernel::advanceTime(u64 instructions) {
     mCycles += instructions;
+    if (mNextDeadline != 0 && mCycles < mNextDeadline) {
+        return;
+    }
     for (usize i = mDeferredInterrupts.size(); i > 0; --i) {
         const auto& [deadline, line] = mDeferredInterrupts[i - 1];
         if (mCycles >= deadline) {
@@ -1876,6 +1924,7 @@ void IopKernel::advanceTime(u64 instructions) {
     if (woke) {
         reschedule();
     }
+    mNextDeadline = findNextDeadline();
 }
 
 void IopKernel::queueHandlers(const std::vector<VblankHandler>& handlers) {
@@ -1953,6 +2002,7 @@ void IopKernel::startHardTimer() {
     if (timer != nullptr) {
         timer->running = true;
         timer->nextFire = mCycles + timer->compare;
+        setNextDeadline(timer->nextFire);
     }
     returnValue(0);
 }
@@ -1971,6 +2021,7 @@ void IopKernel::raiseInterrupt(u32 line) {
 // is written, and a driver that refills on the interrupt runs at that pace.
 void IopKernel::raiseInterruptAfter(u32 line, u64 cycles) {
     mDeferredInterrupts.emplace_back(mCycles + cycles, line);
+    setNextDeadline(mCycles + cycles);
 }
 
 std::vector<IopHandlerCall> IopKernel::takePendingHandlers() {

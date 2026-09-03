@@ -22,9 +22,9 @@ constexpr u32 kServerIds[] = {kLoadFile};
 constexpr u32 kLoadModule = 0;
 constexpr u32 kLoadModuleBuffer = 6;
 
-// That build answers 0 above the table, but SLUS-216.21: lf_version @ 0x50bbe8
-// refuses anything but "3100": the game replaces the IOP modules at run time
-// from cdrom0:\LIB31\IOPRP310.IMG, which carries version 3.10.
+// SLUS-216.21: lf_version @ 0x50bbe8
+// It refuses anything but "3100", the version of the IOPRP310.IMG the game
+// replaces its IOP modules from.
 constexpr u32 kVersion = 255;
 constexpr u32 kVersion3100 = 0x30303133;
 

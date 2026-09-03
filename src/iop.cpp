@@ -13,9 +13,7 @@ namespace {
 
 LoggerChannel log("iop");
 
-// A module that does not reach a blocking point in this many instructions is
-// waiting on hardware nothing here drives, and would starve every thread the
-// modules after it start.
+// Past this a module is waiting on hardware nothing here drives.
 constexpr u64 kInstructionLimit = 20'000'000;
 constexpr u32 kFirstArgumentRegister = 4;
 constexpr u32 kResultRegister = 2;
@@ -58,9 +56,7 @@ TranslatedIrx* Iop::translationOf(const std::string& name) const {
     return nullptr;
 }
 
-// A started thread only runs once the entry that started it is out of the way,
-// so every entry into the IOP is followed by letting the rest of them reach
-// their first blocking point.
+// A started thread only runs once the entry that started it is out of the way.
 bool Iop::settle(IopScheduler::Skipping skipping) {
     mKernel.exitHostThread();
     const Stop stop = mScheduler.run(kInstructionLimit, skipping);
@@ -120,6 +116,21 @@ Stop Iop::enter(IopScheduler::Skipping skipping) {
     }
 }
 
+void Iop::indexModulePages() {
+    u32 end = kIopModuleBase;
+    for (const TranslatedIrx* module : mActive) {
+        end = std::max(end, module->end);
+    }
+    mModulePages.assign((end - kIopModuleBase) / kModulePageBytes + 1, nullptr);
+    for (TranslatedIrx* module : mActive) {
+        for (u32 pc = module->base; pc < module->end; pc += kModulePageBytes) {
+            mModulePages[(pc - kIopModuleBase) / kModulePageBytes] = module;
+        }
+        mModulePages[(module->end - 1 - kIopModuleBase) / kModulePageBytes] = module;
+    }
+    mMachine.modulePages = mModulePages;
+}
+
 bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
     // Loading it would bind later imports to its exports, not to the host.
     if (sourceOf(name) == ModuleSource::Host) {
@@ -144,6 +155,8 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
     if (translated == nullptr) {
         mNextBase = (module.program.imageEnd + 0xF) & ~0xFu;
     }
+    log.info("loaded {} at {:08x}..{:08x}{}", name, base, module.program.imageEnd,
+             translated != nullptr ? " translated" : "");
     mLoaded.push_back(module);
     if (translated != nullptr) {
         translated->importBase = static_cast<u32>(mImports.size());
@@ -152,6 +165,7 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
         }
         mActive.push_back(translated);
         mMachine.modules = mActive;
+        indexModulePages();
     }
 
     const u32 sequence = mKernel.sequence();
@@ -164,6 +178,7 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
         if (translated != nullptr) {
             mActive.pop_back();
             mMachine.modules = mActive;
+            indexModulePages();
         }
         return false;
     }
@@ -178,9 +193,8 @@ void Iop::endVblank() {
     mKernel.raiseVblankEnd();
 }
 
-// The EE reaches here from the run loop it also calls into the IOP from, so a
-// tick can land while a call is still parked on a coroutine. Resuming that
-// coroutine again would run one thread twice; the IOP is running anyway.
+// A tick can land while a call is parked on a coroutine, and resuming it
+// again would run one thread twice.
 void Iop::advance(u64 instructions) {
     if (mAdvancing) {
         return;

@@ -8,8 +8,7 @@
 
 namespace uee {
 
-// A card image on the host, one file of fixed size pages. A page that was never
-// written reads as the erased card the driver expects: all ones.
+// An unwritten page reads all ones, the erased card the driver expects.
 class CardFile : public CardStorage {
 public:
     explicit CardFile(const std::string& path) : mFile(std::fopen(path.c_str(), "r+b")) {

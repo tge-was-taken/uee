@@ -98,6 +98,15 @@ private:
     };
 
     static const Service* lookup(const Import& import);
+    static std::span<const Service> services();
+
+public:
+    // Where a host-answered import sits in the service table, which the
+    // translator resolves once instead of the run resolving it every call.
+    static std::optional<u32> findService(std::string_view module, u32 id);
+    void callService(u32 index);
+
+private:
 
     u32 argument(u32 index);
     void returnValue(u32 value);
@@ -168,6 +177,7 @@ private:
     void reschedule();
 
     void flushCache();
+    void queryBootMode();
     void registerLibraryEntries();
     void setDmaPriority();
     void enableDmaChannel();
@@ -275,12 +285,18 @@ private:
 
     IopHardTimer* hardTimerFor(u32 timid);
 
+    u64 findNextDeadline() const;
+    void setNextDeadline(u64 at);
+
     IopContext& mIop;
     Memory& mMemory;
     Memory& mMainMemory;
     const std::vector<Import>& mImports;
     std::vector<const Service*> mServices;
     std::vector<Block> mBlocks;
+    // Never later than the first deadline with work behind it, so a clock short
+    // of it has nothing to do. Zero asks for the scan that makes it exact again.
+    u64 mNextDeadline = 0;
     std::vector<IopThread> mThreads;
     std::vector<IopSemaphore> mSemaphores;
     std::vector<IopEventFlag> mEventFlags;

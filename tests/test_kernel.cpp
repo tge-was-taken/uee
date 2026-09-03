@@ -11,6 +11,7 @@
 #include "sio2.h"
 #include "spu2.h"
 #include "kernel.h"
+#include "ee_translate.h"
 #include "queue.h"
 #include "syscall_table.h"
 #include "timers.h"
@@ -44,6 +45,26 @@ struct Node {
     uee::Link link;
     int value = 0;
 };
+
+// A translated function is picked up part way through when a callee blocked, and
+// there the return register is not where it was called from. Whoever dispatched
+// it cannot supply the address, so leaving has to write it.
+void checkLeavingAlwaysSaysWhereItWent() {
+    uee::EeContext ee;
+    ee.cpu.pc = 0xDEADBEEFu;
+    check(uee::leave(ee, 0x00100200u, 0x00100200u), "leaving for the caller says so");
+    checkEqual(ee.cpu.pc, 0x00100200u, "leaving for the caller still writes the address");
+
+    ee.cpu.pc = 0xDEADBEEFu;
+    check(!uee::leave(ee, 0x00100300u, 0x00100200u), "leaving elsewhere says so");
+    checkEqual(ee.cpu.pc, 0x00100300u, "leaving elsewhere writes the address");
+
+    // What a resumed entry is given, so nothing it goes on to do reads as a
+    // return to a caller.
+    ee.cpu.pc = 0xDEADBEEFu;
+    check(!uee::leave(ee, 0x00100200u, uee::kResumedNotCalled), "a resumed function reaches no caller");
+    checkEqual(ee.cpu.pc, 0x00100200u, "a resumed function still writes the address");
+}
 
 void checkQueueIsFifo() {
     uee::Link head;
@@ -994,6 +1015,7 @@ int main() {
     checkSpu2LoopsBackToItsLoopPoint();
     checkSpu2PitchSetsThePace();
     checkSpu2AttackMatchesThePublishedRate();
+    checkLeavingAlwaysSaysWhereItWent();
 
     if (gFailures != 0) {
         spdlog::error("{} checks failed", gFailures);

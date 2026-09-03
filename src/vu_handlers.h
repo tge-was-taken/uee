@@ -4,9 +4,12 @@
 #include "opcodes.h"
 #include "single.h"
 #include "types.h"
+#include "compiler.h"
+#include "host_float.h"
 #include "vu.h"
 #include "vu_micro.h"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 
@@ -45,74 +48,152 @@ inline u32 vuOperand(const Vu& vu0, VuSource source, const Reg128& vt, s32 i) {
     }
 }
 
-// The adder loses whatever shifts past its width, so an operand small enough
-// against the other leaves it unchanged.
-inline u32 vuCombine(const Vu& vu0, VuKind kind, u32 a, u32 b, s32 i) {
-    const f64 x = single::widen(a), y = single::widen(b);
-    switch (kind) {
-        case VuKind::Add: return single::clampToVu(single::add(a, b).bits);
-        case VuKind::Sub: return single::clampToVu(single::sub(a, b).bits);
-        case VuKind::Mul: return single::clampToVu(single::mul(a, b).bits);
-        case VuKind::Max: return vuRound((x > y) ? x : y);
-        case VuKind::Mini: return vuRound((x < y) ? x : y);
+// The adder loses whatever shifts past its width.
+template <VuKind kind>
+inline u32 vuCombine(const Vu& vu0, u32 a, u32 b, s32 i) {
+    if constexpr (kind == VuKind::Add) {
+        return single::clampToVu(single::add(a, b).bits);
+    } else if constexpr (kind == VuKind::Sub) {
+        return single::clampToVu(single::sub(a, b).bits);
+    } else if constexpr (kind == VuKind::Mul) {
+        return single::clampToVu(single::mul(a, b).bits);
+    } else if constexpr (kind == VuKind::Max) {
+        // An integer comparison orders singles, and picking the second on a tie
+        // is what tells the two zeros apart.
+        return single::clampToVu(single::orderKey(a) > single::orderKey(b)
+                                     ? single::flushDenormal(a)
+                                     : single::flushDenormal(b));
+    } else if constexpr (kind == VuKind::Mini) {
+        return single::clampToVu(single::orderKey(a) < single::orderKey(b)
+                                     ? single::flushDenormal(a)
+                                     : single::flushDenormal(b));
+    } else if constexpr (kind == VuKind::Madd) {
         // The accumulate keeps full precision here where the adder above does
         // not: no hardware case pins down which the accumulator does.
-        case VuKind::Madd: return vuRound(single::addExact(vuLane(vu0.acc, i), x * y));
-        case VuKind::Msub: return vuRound(single::addExact(vuLane(vu0.acc, i), -(x * y)));
+        return vuRound(vuLane(vu0.acc, i) + single::widen(a) * single::widen(b));
+    } else {
+        return vuRound(vuLane(vu0.acc, i) - single::widen(a) * single::widen(b));
     }
-    return 0;
 }
 
-inline void vectorOp(Vu& vu0, VuForm form, u32 dest, u32 vd, u32 vs, u32 vt) {
-    const Reg128 a = vu0.readVf(vs);
-    const Reg128 b = vu0.readVf(vt);
-    u32 out[4];
-    for (s32 i = 0; i < 4; ++i) {
-        out[i] = vuCombine(vu0, form.kind, a.word(i), vuOperand(vu0, form.source, b, i), i);
+// False says the host unit could not answer for all four lanes. The two that
+// pick an operand rather than compute one are not worth handing over.
+template <VuKind kind>
+inline bool combineLanes(const Vu& vu0, const Reg128& a, const Reg128& b, u32 out[4]) {
+    if constexpr (!host::kHasFloatUnit || kind == VuKind::Max || kind == VuKind::Mini) {
+        return false;
+    } else {
+        static_assert(sizeof(Reg128) == 4 * sizeof(u32),
+                      "the lanes are read straight out of the register");
+        const host::Lanes x{reinterpret_cast<const u32*>(&a)};
+        const host::Lanes y{reinterpret_cast<const u32*>(&b)};
+        if constexpr (kind == VuKind::Add) {
+            return host::addLanes(x, y, out);
+        } else if constexpr (kind == VuKind::Sub) {
+            return host::subLanes(x, y, out);
+        } else if constexpr (kind == VuKind::Mul) {
+            return host::mulLanes(x, y, out);
+        } else {
+            const host::Lanes acc{reinterpret_cast<const u32*>(&vu0.acc)};
+            return host::maddLanes(acc, x, y, out, kind == VuKind::Msub);
+        }
     }
-    if (form.toAcc) {
+}
+
+// Shared, with the lanes and broadcast settled at each call site.
+template <VuKind kind>
+UEE_NOINLINE inline void computeLanes(const Vu& vu0, const Reg128& a, const Reg128& b,
+                                      u32 out[4]) {
+    if (combineLanes<kind>(vu0, a, b, out)) {
+        return;
+    }
+    for (s32 i = 0; i < 4; ++i) {
+        out[i] = vuCombine<kind>(vu0, a.word(i), b.word(i), i);
+    }
+}
+
+// The kind is fixed per call, so four lanes run as one operation, not a switch.
+template <VuKind kind>
+inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32 vs,
+                     u32 vt) {
+    const Reg128 a = vu0.readVf(vs);
+    const Reg128 read = vu0.readVf(vt);
+    const u32 shared = vuOperand(vu0, source, read, 0);
+    const Reg128 b =
+        source == VuSource::Vt ? read : lanes(shared, shared, shared, shared);
+    u32 out[4];
+    computeLanes<kind>(vu0, a, b, out);
+    if (toAcc) {
         vu0.writeAcc(dest, out);
     } else {
         vu0.writeVf(vd, dest, out);
     }
 }
 
+// The interpreter reads the kind out of the encoding, where emitted code names
+// it outright.
+inline void vectorOp(Vu& vu0, VuForm form, u32 dest, u32 vd, u32 vs, u32 vt) {
+    switch (form.kind) {
+        case VuKind::Add:
+            vectorOp<VuKind::Add>(vu0, form.source, form.toAcc, dest, vd, vs, vt);
+            return;
+        case VuKind::Sub:
+            vectorOp<VuKind::Sub>(vu0, form.source, form.toAcc, dest, vd, vs, vt);
+            return;
+        case VuKind::Mul:
+            vectorOp<VuKind::Mul>(vu0, form.source, form.toAcc, dest, vd, vs, vt);
+            return;
+        case VuKind::Max:
+            vectorOp<VuKind::Max>(vu0, form.source, form.toAcc, dest, vd, vs, vt);
+            return;
+        case VuKind::Mini:
+            vectorOp<VuKind::Mini>(vu0, form.source, form.toAcc, dest, vd, vs, vt);
+            return;
+        case VuKind::Madd:
+            vectorOp<VuKind::Madd>(vu0, form.source, form.toAcc, dest, vd, vs, vt);
+            return;
+        case VuKind::Msub:
+            vectorOp<VuKind::Msub>(vu0, form.source, form.toAcc, dest, vd, vs, vt);
+            return;
+    }
+}
+
 inline void vadd(Vu& vu0, VuSource from, u32 dest, u32 vd, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Add, from, false}, dest, vd, vs, vt);
+    vectorOp<VuKind::Add>(vu0, from, false, dest, vd, vs, vt);
 }
 inline void vsub(Vu& vu0, VuSource from, u32 dest, u32 vd, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Sub, from, false}, dest, vd, vs, vt);
+    vectorOp<VuKind::Sub>(vu0, from, false, dest, vd, vs, vt);
 }
 inline void vmul(Vu& vu0, VuSource from, u32 dest, u32 vd, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Mul, from, false}, dest, vd, vs, vt);
+    vectorOp<VuKind::Mul>(vu0, from, false, dest, vd, vs, vt);
 }
 inline void vmax(Vu& vu0, VuSource from, u32 dest, u32 vd, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Max, from, false}, dest, vd, vs, vt);
+    vectorOp<VuKind::Max>(vu0, from, false, dest, vd, vs, vt);
 }
 inline void vmini(Vu& vu0, VuSource from, u32 dest, u32 vd, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Mini, from, false}, dest, vd, vs, vt);
+    vectorOp<VuKind::Mini>(vu0, from, false, dest, vd, vs, vt);
 }
 inline void vmadd(Vu& vu0, VuSource from, u32 dest, u32 vd, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Madd, from, false}, dest, vd, vs, vt);
+    vectorOp<VuKind::Madd>(vu0, from, false, dest, vd, vs, vt);
 }
 inline void vmsub(Vu& vu0, VuSource from, u32 dest, u32 vd, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Msub, from, false}, dest, vd, vs, vt);
+    vectorOp<VuKind::Msub>(vu0, from, false, dest, vd, vs, vt);
 }
 
 inline void vadda(Vu& vu0, VuSource from, u32 dest, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Add, from, true}, dest, 0, vs, vt);
+    vectorOp<VuKind::Add>(vu0, from, true, dest, 0, vs, vt);
 }
 inline void vsuba(Vu& vu0, VuSource from, u32 dest, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Sub, from, true}, dest, 0, vs, vt);
+    vectorOp<VuKind::Sub>(vu0, from, true, dest, 0, vs, vt);
 }
 inline void vmula(Vu& vu0, VuSource from, u32 dest, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Mul, from, true}, dest, 0, vs, vt);
+    vectorOp<VuKind::Mul>(vu0, from, true, dest, 0, vs, vt);
 }
 inline void vmadda(Vu& vu0, VuSource from, u32 dest, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Madd, from, true}, dest, 0, vs, vt);
+    vectorOp<VuKind::Madd>(vu0, from, true, dest, 0, vs, vt);
 }
 inline void vmsuba(Vu& vu0, VuSource from, u32 dest, u32 vs, u32 vt) {
-    vectorOp(vu0, {VuKind::Msub, from, true}, dest, 0, vs, vt);
+    vectorOp<VuKind::Msub>(vu0, from, true, dest, 0, vs, vt);
 }
 
 template <typename F>
@@ -242,9 +323,7 @@ inline f64 vuRootOfLane(const Reg128& vt, u32 field) {
     return std::sqrt(std::abs(vuLane(vt, static_cast<s32>(field))));
 }
 
-// The divider truncates twice, once taking the root and once taking the
-// quotient, and no single rounding reproduces it. Q is written the moment the
-// divider is issued, so nothing waits and nothing stalls.
+// The divider truncates twice, which no single rounding reproduces.
 inline void vdiv(Vu& vu0, u32 vs, u32 fsf, u32 vt, u32 ftf) {
     vu0.vi[Vu::kQ] = vuRound(vuLane(vu0.readVf(vs), static_cast<s32>(fsf)) /
                               vuLane(vu0.readVf(vt), static_cast<s32>(ftf)));
@@ -259,8 +338,6 @@ inline void vrsqrt(Vu& vu0, u32 vs, u32 fsf, u32 vt, u32 ftf) {
 }
 
 // The outer product is defined on xyz alone, whatever the encoding says.
-// Each clip shifts six more bits in: one per axis for passing above the
-// magnitude of w, and one for passing below it.
 inline void vclip(Vu& vu0, u32 vs, u32 vt) {
     const Reg128 s = vu0.readVf(vs);
     const f64 limit = std::fabs(single::widen(vu0.readVf(vt).word(3)));

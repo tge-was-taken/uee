@@ -1,6 +1,8 @@
 #pragma once
 
 #include "fpu.h"
+#include "compiler.h"
+#include "host_float.h"
 #include "single.h"
 #include "types.h"
 
@@ -29,8 +31,15 @@ inline u32 quotient(Fpu& fpu, u32 numerator, u32 denominator) {
     return flagged(fpu, result, zeroByZero ? Fpu::kInvalid : Fpu::kDivideByZero);
 }
 
-inline u32 accumulated(Fpu& fpu, u32 a, u32 b, bool subtract) {
+UEE_NOINLINE inline u32 accumulatedSoft(Fpu& fpu, u32 a, u32 b, bool subtract) {
     return rounded(fpu, single::multiplyAdd(fpu.acc, a, b, subtract));
+}
+
+inline u32 accumulated(Fpu& fpu, u32 a, u32 b, bool subtract) {
+    if (const std::optional<u32> fast = host::multiplyAdd(fpu.acc, a, b, subtract)) {
+        return *fast;
+    }
+    return accumulatedSoft(fpu, a, b, subtract);
 }
 
 inline u32 rootOf(Fpu& fpu, u32 value) {
@@ -49,45 +58,76 @@ inline u32 reciprocalRootOf(Fpu& fpu, u32 numerator, u32 radicand) {
     return rounded(fpu, result);
 }
 
-inline void add_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
-    fpu.fpr[fd] = rounded(fpu, single::add(fpu.fpr[fs], fpu.fpr[ft]));
+// The host answers only where it raises no flag, so taking its answer leaves
+// the cause register alone. It answers 98%, so the check is inlined.
+UEE_NOINLINE inline u32 addedSoft(Fpu& fpu, u32 a, u32 b) {
+    return rounded(fpu, single::add(a, b));
 }
-inline void sub_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
-    fpu.fpr[fd] = rounded(fpu, single::sub(fpu.fpr[fs], fpu.fpr[ft]));
+UEE_NOINLINE inline u32 subtractedSoft(Fpu& fpu, u32 a, u32 b) {
+    return rounded(fpu, single::sub(a, b));
 }
-inline void mul_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
-    fpu.fpr[fd] = rounded(fpu, single::mul(fpu.fpr[fs], fpu.fpr[ft]));
-}
-inline void div_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
-    fpu.fpr[fd] = quotient(fpu, fpu.fpr[fs], fpu.fpr[ft]);
-}
-inline void adda_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = rounded(fpu, single::add(fpu.fpr[fs], fpu.fpr[ft]));
-}
-inline void suba_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = rounded(fpu, single::sub(fpu.fpr[fs], fpu.fpr[ft]));
-}
-inline void mula_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = rounded(fpu, single::mul(fpu.fpr[fs], fpu.fpr[ft]));
+UEE_NOINLINE inline u32 multipliedSoft(Fpu& fpu, u32 a, u32 b) {
+    return rounded(fpu, single::mul(a, b));
 }
 
-inline void madd_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
+inline u32 added(Fpu& fpu, u32 a, u32 b) {
+    if (const std::optional<u32> fast = host::add(a, b)) {
+        return *fast;
+    }
+    return addedSoft(fpu, a, b);
+}
+inline u32 subtracted(Fpu& fpu, u32 a, u32 b) {
+    if (const std::optional<u32> fast = host::sub(a, b)) {
+        return *fast;
+    }
+    return subtractedSoft(fpu, a, b);
+}
+inline u32 multiplied(Fpu& fpu, u32 a, u32 b) {
+    if (const std::optional<u32> fast = host::mul(a, b)) {
+        return *fast;
+    }
+    return multipliedSoft(fpu, a, b);
+}
+UEE_NOINLINE inline void div_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
+    fpu.fpr[fd] = quotient(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+}
+
+inline void add_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
+    fpu.fpr[fd] = added(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+}
+inline void sub_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
+    fpu.fpr[fd] = subtracted(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+}
+inline void mul_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
+    fpu.fpr[fd] = multiplied(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+}
+UEE_NOINLINE inline void adda_s(Fpu& fpu, u32 fs, u32 ft) {
+    fpu.acc = added(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+}
+UEE_NOINLINE inline void suba_s(Fpu& fpu, u32 fs, u32 ft) {
+    fpu.acc = subtracted(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+}
+UEE_NOINLINE inline void mula_s(Fpu& fpu, u32 fs, u32 ft) {
+    fpu.acc = multiplied(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+}
+
+UEE_NOINLINE inline void madd_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
     fpu.fpr[fd] = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], false);
 }
-inline void msub_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
+UEE_NOINLINE inline void msub_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
     fpu.fpr[fd] = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], true);
 }
-inline void madda_s(Fpu& fpu, u32 fs, u32 ft) {
+UEE_NOINLINE inline void madda_s(Fpu& fpu, u32 fs, u32 ft) {
     fpu.acc = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], false);
 }
-inline void msuba_s(Fpu& fpu, u32 fs, u32 ft) {
+UEE_NOINLINE inline void msuba_s(Fpu& fpu, u32 fs, u32 ft) {
     fpu.acc = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], true);
 }
 
-inline void sqrt_s(Fpu& fpu, u32 fd, u32 ft) {
+UEE_NOINLINE inline void sqrt_s(Fpu& fpu, u32 fd, u32 ft) {
     fpu.fpr[fd] = rootOf(fpu, fpu.fpr[ft]);
 }
-inline void rsqrt_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
+UEE_NOINLINE inline void rsqrt_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
     fpu.fpr[fd] = reciprocalRootOf(fpu, fpu.fpr[fs], fpu.fpr[ft]);
 }
 
@@ -109,16 +149,14 @@ inline void min_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
     fpu.fpr[fd] = single::signedOrderKey(b) < single::signedOrderKey(a) ? b : a;
 }
 
-inline void cvt_w_s(Fpu& fpu, u32 fd, u32 fs) {
+UEE_NOINLINE inline void cvt_w_s(Fpu& fpu, u32 fd, u32 fs) {
     fpu.fpr[fd] = static_cast<u32>(single::toInt32(fpu.fpr[fs]));
 }
-inline void cvt_s_w(Fpu& fpu, u32 fd, u32 fs) {
+UEE_NOINLINE inline void cvt_s_w(Fpu& fpu, u32 fd, u32 fs) {
     fpu.fpr[fd] = single::fromInt32(static_cast<s32>(fpu.fpr[fs]));
 }
 
-// A compare touches the condition bit alone. It leaves the cause bits of the
-// last arithmetic operation standing rather than reporting that it raised
-// nothing itself.
+// Leaves the last arithmetic operation's cause bits standing.
 inline void setCompare(Fpu& fpu, bool set) {
     fpu.fcr31 = set ? (fpu.fcr31 | Fpu::kCompareBit) : (fpu.fcr31 & ~Fpu::kCompareBit);
 }

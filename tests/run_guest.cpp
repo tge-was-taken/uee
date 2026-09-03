@@ -138,12 +138,12 @@ int main(int argc, char** argv) {
     }
 
     if (const char* hooks = std::getenv("UEE_HOOKS")) {
-        kernel.hooks().watch(kernel.symbols(), hooks);
+        kernel.symbolWatch().watch(kernel.symbols(), hooks);
     }
 
     logging = &kernel;
 
-    uee::Machine machine{interpreter, memory, kernel, nullptr};
+    uee::Machine machine{interpreter, memory, kernel.mmio(), kernel, kernel.budget(), nullptr};
     std::optional<std::chrono::milliseconds> limit;
     if (const char* seconds = std::getenv("UEE_SECONDS")) {
         limit = std::chrono::seconds(std::strtoull(seconds, nullptr, 0));

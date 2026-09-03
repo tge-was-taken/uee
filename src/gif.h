@@ -18,6 +18,11 @@ public:
 
     void writeQuadword(u64 low, u64 high);
 
+    // Idle while claiming a queued quadword is a state the hardware cannot be
+    // in, and a handler waiting on either never gets its answer.
+    void beginPath(u32 path);
+    void endPath();
+
     std::optional<u32> read(u32 address) const;
     bool write(u32 address, u32 value);
 
@@ -33,6 +38,8 @@ private:
     u32 mControl = 0;
     u32 mMode = 0;
     u32 mStatus = 0;
+    u32 mActivePath = 0;
+    u32 mQueued = 0;
     u32 mRemaining = 0;
     u32 mDescriptors = 0;
     u64 mRegisters = 0;

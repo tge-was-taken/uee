@@ -32,9 +32,8 @@ struct Timer {
     u32 mode = 0;
     u32 comp = 0xFFFF;
     u32 hold = 0;
-    // Instructions already turned into ticks. Kept per timer because they do
-    // not share a rate, and as a count rather than a tick number so changing
-    // the tick rate carries the remainder of the duration over.
+    // A count rather than a tick number, so a rate change carries the
+    // remainder over.
     u64 counted = 0;
 };
 
@@ -44,8 +43,10 @@ class Timers {
 public:
     Timers();
 
-    // True when at least one H-SYNC tick elapsed, so callers can skip work.
-    bool advanceTo(u64 executed);
+    // Almost always no, so only the tick itself costs a call.
+    bool advanceTo(u64 executed) {
+        return executed >= mNextTick && runTicks(executed);
+    }
 
     u16 hsyncCount() const { return static_cast<u16>(mTimers[3].count); }
 
@@ -56,6 +57,8 @@ public:
     const Timer& at(usize index) const { return mTimers[index]; }
 
 private:
+    bool runTicks(u64 executed);
+
     std::array<Timer, kTimerCount> mTimers;
     u64 mScanlines = 0;
     u64 mNextTick = 0;

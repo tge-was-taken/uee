@@ -6,7 +6,11 @@
 
 namespace uee {
 
-inline u32 effectiveAddress(const R3000A& cpu, u32 base, s32 offset) {
+constexpr u32 resolveEa(const R3000A&, FixedAddress base, s32 offset) {
+    return base.address + static_cast<u32>(offset);
+}
+
+inline u32 resolveEa(const R3000A& cpu, u32 base, s32 offset) {
     return cpu.gpr[base] + static_cast<u32>(offset);
 }
 
@@ -39,6 +43,12 @@ inline void subu(R3000A& cpu, u32 rd, u32 rs, u32 rt) {
 inline void and_(R3000A& cpu, u32 rd, u32 rs, u32 rt) {
     cpu.write(rd, cpu.gpr[rs] & cpu.gpr[rt]);
 }
+// Moving one register to another has no encoding of its own, so a compiler
+// spells it as an operation against register zero.
+inline void move(R3000A& cpu, u32 rd, u32 rs) {
+    cpu.write(rd, cpu.gpr[rs]);
+}
+
 inline void or_(R3000A& cpu, u32 rd, u32 rs, u32 rt) {
     cpu.write(rd, cpu.gpr[rs] | cpu.gpr[rt]);
 }
@@ -123,7 +133,18 @@ inline void mfc0(R3000A& cpu, u32 rt, u32 rd) { cpu.write(rt, cpu.cop0[rd]); }
 inline void mtc0(R3000A& cpu, u32 rt, u32 rd) { cpu.cop0[rd] = cpu.gpr[rt]; }
 
 // Status stacks three (interrupt enable, user mode) pairs in its low six bits.
-// The oldest pair stays where it is.
+// Taking an exception pushes them up, and the oldest pair is lost.
+inline void raiseException(R3000A& cpu, u32 pc, u32 code) {
+    u32& status = cpu.cop0[r3000::kStatus];
+    cpu.cop0[r3000::kCause] = (cpu.cop0[r3000::kCause] & ~r3000::kCauseCodeMask) |
+                              (code << r3000::kCauseCodeShift);
+    cpu.cop0[r3000::kEpc] = pc;
+    status = (status & ~0x3Fu) | ((status << 2) & 0x3Fu);
+    cpu.pc = (status & r3000::kBootExceptionVectors) ? r3000::kBootExceptionVector
+                                                     : r3000::kExceptionVector;
+}
+
+// The matching pop. It shifts only the low four bits, so the oldest pair stays.
 inline void rfe(R3000A& cpu) {
     const u32 status = cpu.cop0[r3000::kStatus];
     cpu.cop0[r3000::kStatus] = (status & ~0x0Fu) | ((status >> 2) & 0x0Fu);
@@ -148,22 +169,27 @@ constexpr bool bgezTaken(const R3000A& cpu, u32 rs) {
     return static_cast<s32>(cpu.gpr[rs]) >= 0;
 }
 
-inline void lb(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
+template <typename Base>
+inline void lb(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
     cpu.delayLoad(rt, static_cast<u32>(static_cast<s8>(
-                          memory.read8(effectiveAddress(cpu, base, offset)))));
+                          memory.read8(resolveEa(cpu, base, offset)))));
 }
-inline void lbu(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.delayLoad(rt, memory.read8(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void lbu(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.delayLoad(rt, memory.read8(resolveEa(cpu, base, offset)));
 }
-inline void lh(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
+template <typename Base>
+inline void lh(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
     cpu.delayLoad(rt, static_cast<u32>(static_cast<s16>(
-                          memory.read16(effectiveAddress(cpu, base, offset)))));
+                          memory.read16(resolveEa(cpu, base, offset)))));
 }
-inline void lhu(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.delayLoad(rt, memory.read16(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void lhu(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.delayLoad(rt, memory.read16(resolveEa(cpu, base, offset)));
 }
-inline void lw(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    cpu.delayLoad(rt, memory.read32(effectiveAddress(cpu, base, offset)));
+template <typename Base>
+inline void lw(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    cpu.delayLoad(rt, memory.read32(resolveEa(cpu, base, offset)));
 }
 
 // Hardware forwards a load still in its delay slot, so an lwr right after an
@@ -171,40 +197,47 @@ inline void lw(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
 inline u32 mergeSource(const R3000A& cpu, u32 rt) {
     return cpu.load.reg != 0 && cpu.load.reg == rt ? cpu.load.value : cpu.gpr[rt];
 }
-inline void lwl(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void lwl(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (3u - (address & 3u));
     const u32 word = memory.read32(address & ~3u);
     const u32 keep = (shift == 0) ? 0u : (mergeSource(cpu, rt) & ((1u << shift) - 1u));
     cpu.delayLoad(rt, (word << shift) | keep);
 }
-inline void lwr(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void lwr(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (address & 3u);
     const u32 word = memory.read32(address & ~3u);
     const u32 keep = (shift == 0) ? 0u : (mergeSource(cpu, rt) & ~((1u << (32 - shift)) - 1u));
     cpu.delayLoad(rt, (word >> shift) | keep);
 }
 
-inline void sb(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    memory.write8(effectiveAddress(cpu, base, offset), static_cast<u8>(cpu.gpr[rt]));
+template <typename Base>
+inline void sb(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    memory.write8(resolveEa(cpu, base, offset), static_cast<u8>(cpu.gpr[rt]));
 }
-inline void sh(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    memory.write16(effectiveAddress(cpu, base, offset), static_cast<u16>(cpu.gpr[rt]));
+template <typename Base>
+inline void sh(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    memory.write16(resolveEa(cpu, base, offset), static_cast<u16>(cpu.gpr[rt]));
 }
-inline void sw(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    memory.write32(effectiveAddress(cpu, base, offset), cpu.gpr[rt]);
+template <typename Base>
+inline void sw(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    memory.write32(resolveEa(cpu, base, offset), cpu.gpr[rt]);
 }
-inline void swl(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void swl(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 bytes = (address & 3u) + 1u;
     const u32 shift = 8u * (4u - bytes);
     const u32 word = memory.read32(address & ~3u);
     const u32 mask = (bytes == 4) ? 0xFFFFFFFFu : ((1u << (8 * bytes)) - 1u);
     memory.write32(address & ~3u, (word & ~mask) | ((cpu.gpr[rt] >> shift) & mask));
 }
-inline void swr(R3000A& cpu, Memory& memory, u32 rt, u32 base, s32 offset) {
-    const u32 address = effectiveAddress(cpu, base, offset);
+template <typename Base>
+inline void swr(R3000A& cpu, Memory& memory, u32 rt, Base base, s32 offset) {
+    const u32 address = resolveEa(cpu, base, offset);
     const u32 shift = 8u * (address & 3u);
     const u32 word = memory.read32(address & ~3u);
     const u32 mask = (shift == 0) ? 0xFFFFFFFFu : ~((1u << shift) - 1u);

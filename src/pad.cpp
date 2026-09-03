@@ -1,5 +1,4 @@
-// A tag names the routine that settles a detail, carrying the prefix its own
-// module gives it:
+// A tag names the routine that settles a detail, prefixed by its module:
 //   PADMAN      md5 0fa9dbfe8794e172733189ed945aff45
 //   SLUS_216.21 md5 9074ba25f5a100940ed233c9f8f675ab
 
@@ -30,9 +29,8 @@ constexpr u8 kIdle = 0xFF;
 constexpr u8 kMarker = 0x5A;
 constexpr u8 kConfig = 0xF3;
 
-// The second byte of every frame. Its low half counts the data halfwords, so
-// it sizes the poll, and its high half is the id scePadInfoMode @ 0x511e80
-// reports.
+// Low half counts data halfwords and sizes the poll; high half is the id
+// scePadInfoMode @ 0x511e80 reports.
 constexpr u8 kDigital = 0x41;
 constexpr u8 kAnalog = 0x73;
 

@@ -19,6 +19,10 @@ public:
 
     std::optional<u32> find(std::string_view name) const;
 
+    // The name of whatever starts exactly here, for putting a guest function's
+    // own name on the code generated from it.
+    std::optional<std::string_view> nameAt(u32 address) const;
+
 private:
     struct Entry {
         u32 offset = 0;

@@ -91,13 +91,13 @@ std::chrono::milliseconds timeLimit() {
 // the same however fast the host is.
 class UntilCheckpoint : public uee::StopRequest {
 public:
-    UntilCheckpoint(const uee::Hooks& hooks, std::string checkpoint, u64 entries)
-        : mHooks(hooks), mCheckpoint(std::move(checkpoint)), mEntries(entries) {}
+    UntilCheckpoint(const uee::SymbolWatch& hooks, std::string checkpoint, u64 entries)
+        : mSymbolWatch(hooks), mCheckpoint(std::move(checkpoint)), mEntries(entries) {}
 
-    bool isStopRequested() override { return mHooks.getHits(mCheckpoint) >= mEntries; }
+    bool isStopRequested() override { return mSymbolWatch.getHits(mCheckpoint) >= mEntries; }
 
 private:
-    const uee::Hooks& mHooks;
+    const uee::SymbolWatch& mSymbolWatch;
     std::string mCheckpoint;
     u64 mEntries;
 };
@@ -123,18 +123,22 @@ int main(int argc, char** argv) {
     kernel.symbols().setSearchPath(options.elf.parent_path().string());
     kernel.symbols().load(options.elf.filename().string(), 0, 0xFFFFFFFFu);
     if (!options.checkpoint.empty()) {
-        kernel.hooks().watch(kernel.symbols(), options.checkpoint);
-        if (kernel.hooks().empty()) {
+        kernel.symbolWatch().watch(kernel.symbols(), options.checkpoint);
+        if (kernel.symbolWatch().empty()) {
             fail(std::format("no symbol named {} in {}", options.checkpoint,
                              options.elf.string()));
         }
     }
 
-    UntilCheckpoint until{kernel.hooks(), options.checkpoint, options.entries};
-    uee::Machine machine{interpreter, memory, kernel, nullptr, nullptr,
-                         options.checkpoint.empty() ? nullptr : &until};
+    UntilCheckpoint until{kernel.symbolWatch(), options.checkpoint, options.entries};
+    uee::Machine machine{.interpreter = interpreter,
+                         .memory = memory,
+                         .mmio = kernel.mmio(),
+                         .kernel = kernel,
+                         .budget = kernel.budget(),
+                         .stopRequest = options.checkpoint.empty() ? nullptr : &until};
     const uee::Stop stop = uee::run(machine, timeLimit());
-    const u64 reached = kernel.hooks().getHits(options.checkpoint);
+    const u64 reached = kernel.symbolWatch().getHits(options.checkpoint);
 
     if (isClean(stop.reason) && reached >= options.entries) {
         log.info("{}, {} entered {} times", uee::describe(stop), options.checkpoint, reached);

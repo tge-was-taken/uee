@@ -117,6 +117,7 @@ Status IopInterpreter::execute(Instruction insn) {
         case Op::mfc0: mfc0(cpu, rt, rd); break;
         case Op::mtc0: mtc0(cpu, rt, rd); break;
         case Op::rfe: rfe(cpu); break;
+        case Op::break_: raiseException(cpu, pc, r3000::kBreakpoint); break;
 
         default:
             return Status::Unimplemented;

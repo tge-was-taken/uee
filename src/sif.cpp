@@ -56,8 +56,6 @@ constexpr u32 kRpcInitialisedRegister = 0;
 
 // A reply the EE never collects stops every reply behind it.
 constexpr u32 kUndeliveredReported = 20000;
-// TODO: derive real values. Above IOP RAM, so a synthesized address can never
-// be taken for one a loaded module registered.
 // SIFCMD: the reset packet's argument follows its length and mode.
 constexpr u32 kResetArgumentLength = 4;
 constexpr u32 kResetArgument = 24;
@@ -102,9 +100,7 @@ Sif::Transfer Sif::readTransfer(u32 address) const {
 }
 
 // SIFMAN: sifman_SifSetDma @ 0x740
-// A transfer without the interrupt attribute carries data rather than a
-// command. It still lands in the other memory, and the command after it, if
-// there is one, names what to do with what arrived.
+// Without the interrupt attribute a transfer carries data, not a command.
 void Sif::sendToIop(const Transfer& transfer) {
     if (transfer.destination >= kIopRamSize || transfer.size == 0) {
         return;
@@ -183,9 +179,7 @@ void Sif::reset(u32 packet) {
     loadRebootImage(argument);
 }
 
-// The image is a ROMDIR archive: a directory of fixed size entries, then each
-// file in turn padded to the entry alignment. Only the modules are wanted, and
-// Iop::loadModule leaves the ones this runtime answers for alone.
+// A ROMDIR archive: fixed size entries, then each file padded to alignment.
 void Sif::loadRebootImage(const std::string& argument) {
     const usize named = argument.rfind("cdrom0:");
     if (mDisc == nullptr || named == std::string::npos) {
@@ -368,9 +362,9 @@ void Sif::report() const {
 }
 
 bool Sif::advance() {
-    // SLUS-216.21: sceSifResetIop @ 0x50c848 clears BOOTEND before it sends the
-    // reset and SIFINIT and CMDINIT on the two instructions after, so reporting
-    // the reboot any earlier loses the ones it has not cleared yet.
+    // SLUS-216.21: sceSifResetIop @ 0x50c848
+    // It clears BOOTEND, SIFINIT and CMDINIT across three instructions, so
+    // reporting the reboot earlier loses the ones not yet cleared.
     if (mRebooting && (mSbus.subToMainFlag() & kBootFlags) == 0) {
         mRebooting = false;
         mSbus.writeSubToMainCommand(kCommandBuffer);
