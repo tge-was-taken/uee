@@ -94,6 +94,14 @@ GameConfig loadGameConfig(const std::string& path) {
         }
     }
 
+    if (const std::optional<s64> address = file["movie"]["sceMpegGetPicture"].value<s64>()) {
+        if (*address < 0 || *address > 0xFFFFFFFF) {
+            throw std::runtime_error(
+                std::format("{}: movie.sceMpegGetPicture is not a 32 bit address", path));
+        }
+        config.mpegGetPicture = static_cast<u32>(*address);
+    }
+
     if (const toml::array* addresses = file["watch"].as_array()) {
         for (usize i = 0; i < addresses->size(); ++i) {
             config.watch.push_back(wordAt(*addresses->get(i), path, i));

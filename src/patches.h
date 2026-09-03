@@ -31,6 +31,8 @@ struct GameConfig {
     // How many times the IOP's share of a scanline it may spend. Zero lets it
     // run until it has nothing left to do rather than to a share of real time.
     u32 iopClockScale = 1;
+    // Zero leaves the game's own sceMpegGetPicture to run.
+    u32 mpegGetPicture = 0;
 };
 
 // Throws std::runtime_error naming the file and the fault.

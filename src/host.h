@@ -33,6 +33,15 @@ public:
     virtual void writePage(u32 page, std::span<const u8> in) = 0;
 };
 
+// The compressed video the IPU was handed, once per picture the guest asks for.
+// Nothing here decodes it.
+class VideoSink {
+public:
+    virtual ~VideoSink() = default;
+
+    virtual void write(std::span<const u8> stream) = 0;
+};
+
 class PadSource {
 public:
     virtual ~PadSource() = default;

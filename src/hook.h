@@ -6,9 +6,9 @@ namespace uee {
 
 struct EeContext;
 
-class CallHooks {
+class Hook {
 public:
-    virtual ~CallHooks() = default;
+    virtual ~Hook() = default;
 
     virtual bool isHooked(u32 pc) const = 0;
 

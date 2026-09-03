@@ -1,7 +1,7 @@
 #pragma once
 
 #include "budget.h"
-#include "call_hooks.h"
+#include "hook.h"
 #include "elf.h"
 #include "translator.h"
 #include "interpreter.h"
@@ -11,6 +11,7 @@
 #include "types.h"
 
 #include <optional>
+#include <span>
 #include <set>
 #include <utility>
 #include <string>
@@ -35,7 +36,7 @@ struct Machine {
     FunctionRunner functions = nullptr;
     // Guest functions a frontend answers for, named by address at run time
     // rather than by what they are made of.
-    CallHooks* hooks = nullptr;
+    std::span<Hook* const> hooks = {};
     StopRequest* stopRequest = nullptr;
     // What bounds the run in progress. Only the run loop reads it; emitted code
     // is told the answer through the budget.
@@ -56,10 +57,12 @@ inline bool leave(EeContext& ee, u32 pc, u32 returnTo) {
 bool askFrontend(Machine& machine, u32 pc);
 
 inline bool enterHook(Machine& machine, u32 pc) {
-    if (machine.hooks == nullptr || !machine.hooks->isHooked(pc)) {
-        return false;
+    for (Hook* hook : machine.hooks) {
+        if (hook->isHooked(pc)) {
+            return askFrontend(machine, pc);
+        }
     }
-    return askFrontend(machine, pc);
+    return false;
 }
 
 void interpreterFallback(Machine& machine, u32 pc);

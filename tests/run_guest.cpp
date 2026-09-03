@@ -5,6 +5,7 @@
 #include "interpreter.h"
 #include "kernel.h"
 #include "memory.h"
+#include "movie.h"
 #include "run.h"
 #include "card_file.h"
 #include "wav_sink.h"
@@ -126,6 +127,15 @@ int main(int argc, char** argv) {
     }
     kernel.attachPad(&pad);
 
+    // Nothing here displays a movie, so the SFD player runs its state machine
+    // out on its own rather than being patched.
+    struct NoVideo : uee::VideoSink {
+        void write(std::span<const u8>) override {}
+    } video;
+    uee::Movie movie{kernel.mmio().ipu(), config.mpegGetPicture};
+    movie.attach(&video);
+    uee::Hook* hooks[] = {&movie};
+
     std::optional<uee::CardFile> card;
     if (const char* path = std::getenv("UEE_CARD")) {
         card.emplace(path);
@@ -137,13 +147,15 @@ int main(int argc, char** argv) {
         log.info("memory card image {}", path);
     }
 
-    if (const char* hooks = std::getenv("UEE_HOOKS")) {
-        kernel.symbolWatch().watch(kernel.symbols(), hooks);
+    if (const char* watched = std::getenv("UEE_HOOKS")) {
+        kernel.symbolWatch().watch(kernel.symbols(), watched);
     }
 
     logging = &kernel;
 
-    uee::Machine machine{interpreter, memory, kernel.mmio(), kernel, kernel.budget(), nullptr};
+    uee::Machine machine{interpreter, memory,        kernel.mmio(),
+                         kernel,      kernel.budget(), nullptr,
+                         hooks};
     std::optional<std::chrono::milliseconds> limit;
     if (const char* seconds = std::getenv("UEE_SECONDS")) {
         limit = std::chrono::seconds(std::strtoull(seconds, nullptr, 0));

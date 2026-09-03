@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ipu.h"
 #include "types.h"
 
 #include <array>
@@ -27,7 +28,8 @@ constexpr u32 kSuspended = 0x10000;
 // A transfer completes the moment the start bit is set, so none is seen busy.
 class Dmac {
 public:
-    void attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1);
+    void attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1,
+                Ipu& ipu);
 
 
     std::optional<u32> read(u32 address) const;
@@ -55,6 +57,7 @@ private:
     u32 mSkipQuadword = 0;
 
     Gif* mGif = nullptr;
+    Ipu* mIpu = nullptr;
     Vif* mVif[2] = {nullptr, nullptr};
     Memory* mMemory = nullptr;
     Interrupts* mInterrupts = nullptr;

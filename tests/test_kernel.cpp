@@ -8,6 +8,8 @@
 #include "iop_kernel.h"
 #include "pad.h"
 #include "card.h"
+#include "ee_mmio.h"
+#include "movie.h"
 #include "sio2.h"
 #include "spu2.h"
 #include "kernel.h"
@@ -797,6 +799,94 @@ void checkCardReadsBackWhatWasWritten() {
     checkEqual(answer[kChunk + 5], static_cast<u8>(0x55), "the terminator closes the answer");
 }
 
+// SFMPVP_DecodeFrmSj @ 0x595390 arms this over its ring before asking the
+// library for a picture.
+void checkIpuKeepsWhatTheDmaFedIt() {
+    constexpr u32 kToIpuChcr = 0x1000B400;
+    constexpr u32 kToIpuMadr = 0x1000B410;
+    constexpr u32 kToIpuQwc = 0x1000B420;
+    constexpr u32 kStart = 0x100;
+    constexpr u32 kSource = 0x00100000;
+    constexpr usize kQuadwords = 3;
+
+    uee::Memory memory = uee::makeMainMemory();
+    uee::R5900 cpu;
+    uee::EeMmio mmio;
+    mmio.attach(memory, cpu);
+
+    for (u32 i = 0; i < kQuadwords * 16; ++i) {
+        memory.write8(kSource + i, static_cast<u8>(i));
+    }
+    mmio.write(kToIpuMadr, kSource);
+    mmio.write(kToIpuQwc, kQuadwords);
+    mmio.write(kToIpuChcr, kStart);
+
+    const std::span<const u8> stream = mmio.ipu().getStream();
+    checkEqual(stream.size(), kQuadwords * 16, "every quadword the channel moved is kept");
+    checkEqual(stream.empty() ? u8{0} : stream[17], static_cast<u8>(17),
+               "and in the order the bytes sit in memory");
+
+    // viBufRestartDMA @ 0x5947a8 rewinds by what BP says the IPU still holds,
+    // and viBufStopDMA @ 0x5946a8 spins while CTRL reports it busy.
+    checkEqual(mmio.read(0x10002010).value_or(1), 0u, "the control register reports idle");
+    checkEqual(mmio.read(0x10002020).value_or(1), 0u, "and the bit position reports empty");
+
+    mmio.write(0x10002010, 0xFFFFFFFF);
+    checkEqual(mmio.read(0x10002010).value_or(1), 0u, "a write to it does not stick");
+
+    // One arming feeds the whole ring, which holds more than the one picture
+    // asked for.
+    mmio.ipu().consume(16);
+    mmio.write(kToIpuMadr, kSource);
+    mmio.write(kToIpuQwc, 1);
+    mmio.write(kToIpuChcr, kStart);
+    checkEqual(mmio.ipu().getStream().size(), kQuadwords * 16, "what was not read stays queued");
+}
+
+// Everything the IPU was fed since the last picture, which is all a host gets.
+struct TestVideo : uee::VideoSink {
+    std::vector<u8> written;
+    usize pictures = 0;
+
+    void write(std::span<const u8> stream) override {
+        written.insert(written.end(), stream.begin(), stream.end());
+        ++pictures;
+    }
+};
+
+// The call SFMPVP_DecodeFrmSj @ 0x595390 makes, answered here.
+void checkMovieHandsTheStreamToTheHost() {
+    constexpr u32 kEntry = 0x00500b18;
+    constexpr u32 kReturn = 0x00595478;
+
+    uee::EeContext ee;
+    uee::Ipu ipu;
+    TestVideo video;
+
+    uee::Movie movie{ipu, kEntry};
+    check(!movie.isHooked(kEntry), "an address with no host behind it is not answered");
+    movie.attach(&video);
+    check(movie.isHooked(kEntry), "the address from the game's config is");
+    check(!movie.isHooked(kEntry + 4), "and nothing else is");
+
+    const std::vector<u8> stream(64, 0xC3);
+    ipu.receive(stream);
+
+    uee::R5900& cpu = ee.cpu;
+    cpu.write64(31, kReturn);
+    check(movie.enter(ee), "the guest body does not run");
+    checkEqual(cpu.pc, kReturn, "and the call returns where it was made from");
+    checkEqual<u32>(static_cast<u32>(cpu.gpr[2].lo), 1u, "answering as the library does");
+
+    checkEqual(video.written.size(), stream.size(), "the host is given what the IPU was fed");
+    checkEqual(ipu.getStream().size(), usize{0}, "and the pipe is drained behind it");
+
+    // One call per picture, so a host knows how many are due without parsing.
+    movie.enter(ee);
+    checkEqual(video.pictures, usize{2}, "every call asks for a picture of its own");
+    checkEqual(video.written.size(), stream.size(), "with nothing fed twice");
+}
+
 // The register offsets LIBSD addresses, from its table at 0x4ca0.
 constexpr u32 kVoiceVolumeLeft = 0x000;
 constexpr u32 kVoiceVolumeRight = 0x002;
@@ -981,6 +1071,8 @@ int main() {
     checkInterruptMasksToggle();
     checkStatusIsWriteOneToClear();
     checkDmacMaskLivesInTheUpperHalf();
+    checkIpuKeepsWhatTheDmaFedIt();
+    checkMovieHandsTheStreamToTheHost();
     checkHandlerChainOrder();
     checkSbusIsReservedForTheKernel();
     checkNegativeSyscallSelectsTheSameSlot();
