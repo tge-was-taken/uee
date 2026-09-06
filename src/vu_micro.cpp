@@ -222,7 +222,7 @@ void VuMicro::executeUpper(u32 code) {
         case 0x17F: vftoi(mState, dest, ft, fs, 15); return;
         case 0x1FD: vabs(mState, dest, ft, fs); return;
         case 0x1FF: vclip(mState, fs, ft); return;
-        case 0x2FC: vopmula(mState, dest, fs, ft); return;
+        case 0x2FE: vopmula(mState, dest, fs, ft); return;
         case 0x33C: vmove(mState, dest, ft, fs); return;
         default: return;
     }

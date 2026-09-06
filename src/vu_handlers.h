@@ -68,11 +68,13 @@ inline u32 vuCombine(const Vu& vu0, u32 a, u32 b, s32 i) {
                                      ? single::flushDenormal(a)
                                      : single::flushDenormal(b));
     } else if constexpr (kind == VuKind::Madd) {
-        // The accumulate keeps full precision here where the adder above does
-        // not: no hardware case pins down which the accumulator does.
-        return vuRound(vuLane(vu0.acc, i) + single::widen(a) * single::widen(b));
+        // No hardware case pins down the accumulator's precision and the choice
+        // here is full, so a product below its last bit still has to borrow.
+        return vuRound(single::addExact(vuLane(vu0.acc, i),
+                                        single::widen(a) * single::widen(b)));
     } else {
-        return vuRound(vuLane(vu0.acc, i) - single::widen(a) * single::widen(b));
+        return vuRound(single::addExact(vuLane(vu0.acc, i),
+                                        -(single::widen(a) * single::widen(b))));
     }
 }
 

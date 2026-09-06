@@ -19,6 +19,7 @@
 #include <span>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -105,13 +106,13 @@ int main(int argc, char** argv) {
     if (!files.empty()) {
         kernel.attachFiles(files);
     }
-    uee::Disc image{disc.string()};
+    const std::unique_ptr<uee::Disc> image = uee::openDisc(disc.string());
     if (!disc.empty()) {
-        if (!image.isOpen()) {
+        if (!image->isOpen()) {
             spdlog::error("cannot open disc {}", disc.string());
             return 2;
         }
-        kernel.attachDisc(image);
+        kernel.attachDisc(*image);
     }
     interpreter.ee.cpu.pc = uee::loadElf(readFile(argv[1]), memory).entry;
     uee::applyPatches(memory, config.patches);

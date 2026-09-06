@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -33,7 +34,7 @@ int main(int argc, char** argv) {
                                   : std::format("ee{}", logging->currentThread());
     });
     if (argc < 2) {
-        log.fatal("usage: run_guest <elf> [disc.iso] [patches.toml]");
+        log.fatal("usage: run_guest <elf> [disc] [patches.toml]");
         return 2;
     }
 
@@ -80,9 +81,9 @@ int main(int argc, char** argv) {
         log.info("preloaded {}", path.stem().string());
     }
 
-    uee::Disc disc{argc > 2 ? argv[2] : ""};
-    if (disc.isOpen()) {
-        kernel.attachDisc(disc);
+    const std::unique_ptr<uee::Disc> disc = uee::openDisc(argc > 2 ? argv[2] : "");
+    if (disc->isOpen()) {
+        kernel.attachDisc(*disc);
     } else if (argc > 2) {
         log.fatal("cannot open disc {}", argv[2]);
         return 2;

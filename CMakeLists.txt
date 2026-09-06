@@ -373,6 +373,12 @@ foreach(irx ${IOP_AUTOTEST_IRXS})
     file(RELATIVE_PATH relative ${AUTOTEST_DIR} ${irx})
     string(REGEX REPLACE "\\.irx$" "" relative ${relative})
     string(REPLACE "/" "." name ${relative})
+
+    # A module with nothing recorded to compare against is not a test yet.
+    if(NOT EXISTS ${AUTOTEST_DIR}/${relative}.expected)
+        continue()
+    endif()
+
     add_test(NAME ${name} COMMAND test_iop_autotest ${irx} ${AUTOTEST_DIR}/${relative}.expected)
 
     # The module is named after itself in the generated source, so the name has

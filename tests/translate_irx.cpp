@@ -14,6 +14,7 @@
 #include <cctype>
 #include <charconv>
 #include <span>
+#include <memory>
 #include <optional>
 #include <cstdio>
 #include <cstdlib>
@@ -200,13 +201,13 @@ int translateOne(std::span<const u8> image, const std::filesystem::path& stem,
 // Names the modules and the slot each one owns, for a build system to turn into
 // one translation per module.
 int listDiscModules(const std::string& iso, const std::string& config) {
-    uee::Disc disc{iso};
-    if (!disc.isOpen()) {
+    const std::unique_ptr<uee::Disc> disc = uee::openDisc(iso);
+    if (!disc->isOpen()) {
         spdlog::critical("cannot open disc {}", iso);
         return 2;
     }
     std::vector<DiscModule> modules =
-        findModules(disc, config.empty() ? std::vector<std::string>{}
+        findModules(*disc, config.empty() ? std::vector<std::string>{}
                                          : uee::loadGameConfig(config).hostModules);
     packBases(modules);
     for (const DiscModule& module : modules) {
@@ -220,13 +221,13 @@ int listDiscModules(const std::string& iso, const std::string& config) {
 int translateDiscModule(const std::string& iso, const std::string& config,
                         const std::string& wanted, const std::filesystem::path& stem,
                         usize units) {
-    uee::Disc disc{iso};
-    if (!disc.isOpen()) {
+    const std::unique_ptr<uee::Disc> disc = uee::openDisc(iso);
+    if (!disc->isOpen()) {
         spdlog::critical("cannot open disc {}", iso);
         return 2;
     }
     std::vector<DiscModule> modules =
-        findModules(disc, config.empty() ? std::vector<std::string>{}
+        findModules(*disc, config.empty() ? std::vector<std::string>{}
                                          : uee::loadGameConfig(config).hostModules);
     packBases(modules);
     // Every module's exports first, because the order they are packed in is not

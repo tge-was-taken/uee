@@ -1,0 +1,287 @@
+-- TEST BEGIN
+loadmodule: fname rom0:SIO2MAN args 0 arg 
+RegisterLibraryEntries:  sio2man version 1.01
+RegisterIntrHandler: intr INT_SIO2, handler 45a08
+loadmodule: id 25, ret 0
+loadmodule: fname rom0:PADMAN args 0 arg 
+RegisterLibraryEntries:   padman version 1.02
+Pad driver. (99/11/22)
+sifcmd sceSifRegisterRpc: rpc_id 8000010f
+sifcmd sceSifRegisterRpc: rpc_id 8000011f
+loadmodule: id 26, ret 0
+(UpdateVSyncRate) Mode Changed to NTSC.
+Frame rate: 59.94, target speed: 1, target frame rate: 59.94, ticks per frame: 166833
+Set GS CRTC configuration. NTSC 640x448 @ 59.940 (59.82) Interlaced (FRAME)
+Max number of vertices in indexed array is 51
+giftag = 0x004b, context length = 0x004d (77)
+GS Memory Allocation:
+Locked slots:
+[140, 209] PixFormat: kPsmz24 LastFrameUsed: 0bound
+[ 70, 139] PixFormat: kPsm32 LastFrameUsed: 0bound
+[  0,  69] PixFormat: kPsm32 LastFrameUsed: 0bound
+Unlocked slots:
+[212, 212] PixFormat: kPsm32 LastFrameUsed: 0free 
+[213, 213] PixFormat: kPsm32 LastFrameUsed: 0free 
+[214, 215] PixFormat: kPsm32 LastFrameUsed: 0free 
+[216, 217] PixFormat: kPsm32 LastFrameUsed: 0free 
+[218, 219] PixFormat: kPsm32 LastFrameUsed: 0free 
+[220, 221] PixFormat: kPsm32 LastFrameUsed: 0free 
+[222, 229] PixFormat: kPsm32 LastFrameUsed: 0free 
+[230, 237] PixFormat: kPsm32 LastFrameUsed: 0free 
+[238, 269] PixFormat: kPsm32 LastFrameUsed: 0free 
+[270, 301] PixFormat: kPsm32 LastFrameUsed: 0free 
+[302, 365] PixFormat: kPsm32 LastFrameUsed: 0free 
+[366, 429] PixFormat: kPsm32 LastFrameUsed: 0free 
+[210, 211] PixFormat: kPsm8 LastFrameUsed: 0free 
+frame 0
+  page   0: 11520 of 11520 quadwords, crc b77d18ab
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc b77d18ab
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+frame 1
+[Pad] DS2 Config Finished - P1/S1 - AL: Off - AB: Usable - VS: Disabled - VL: Disabled - RB: D (0x00000000)
+  page   0: 11520 of 11520 quadwords, crc b64f4f02
+                                    
+                                    
+                                    
+                                    
+        +=                          
+      +++==+                        
+     c+++==-+                       
+    cc++===--c                      
+    cc++===---c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc b77d18ab
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+frame 2
+[Pad] DS2 Config Finished - P1/S1 - AL: On - AB: Usable - VS: Disabled - VL: Disabled - RB: D (0x00000000)
+  page   0: 11520 of 11520 quadwords, crc b64f4f02
+                                    
+                                    
+                                    
+                                    
+        +=                          
+      +++==+                        
+     c+++==-+                       
+    cc++===--c                      
+    cc++===---c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc f4d86959
+                                    
+                                    
+                                    
+                                    
+        +=+                         
+      ++===+                        
+     c++===-+                       
+    cc++===--+                      
+    cc++===---c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+frame 3
+  page   0: 11520 of 11520 quadwords, crc 22ef2d9a
+                                    
+                                    
+                                    
+                                    
+        +=+                         
+      ++===+                        
+     c++===-+                       
+    cc++===--+                      
+    cc++===--:c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc f4d86959
+                                    
+                                    
+                                    
+                                    
+        +=+                         
+      ++===+                        
+     c++===-+                       
+    cc++===--+                      
+    cc++===---c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+frame 4
+[Pad] DS2 Config Finished - P1/S1 - AL: On - AB: Usable - VS: Disabled - VL: Disabled - RB: D (0x00000000)
+  page   0: 11520 of 11520 quadwords, crc 22ef2d9a
+                                    
+                                    
+                                    
+                                    
+        +=+                         
+      ++===+                        
+     c++===-+                       
+    cc++===--+                      
+    cc++===--:c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc a01bd4a0
+                                    
+                                    
+                                    
+                                    
+        +=                          
+      +++==+                        
+     c+++==-+                       
+    cc++===--c                      
+    cc++===--:c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+frame 5
+  page   0: 11520 of 11520 quadwords, crc 17077e60
+                                    
+                                    
+                                    
+                                    
+        +=                          
+      +++==+                        
+     c+++==-+                       
+    cc++===--c                      
+    cc++===--:c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc a01bd4a0
+                                    
+                                    
+                                    
+                                    
+        +=                          
+      +++==+                        
+     c+++==-+                       
+    cc++===--c                      
+    cc++===--:c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+frame 6
+  page   0: 11520 of 11520 quadwords, crc 17077e60
+                                    
+                                    
+                                    
+                                    
+        +=                          
+      +++==+                        
+     c+++==-+                       
+    cc++===--c                      
+    cc++===--:c                     
+    cc++===--:-c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc 75fe1201
+                                    
+                                    
+                                    
+                                    
+        +=+                         
+      +++==+                        
+     c+++==-+                       
+    cc++===--+                      
+    cc++===--:c                     
+    cc++===--::c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+frame 7
+  page   0: 11520 of 11520 quadwords, crc 93ed0364
+                                    
+                                    
+                                    
+                                    
+        +=+                         
+      +++==+                        
+     c+++==-+                       
+    cc++===--+                      
+    cc++===--:c                     
+    cc++===--::c                    
+    cc++===--:::c                   
+    cc++===--::.                    
+                                    
+                                    
+  page  70: 11520 of 11520 quadwords, crc 75fe1201
+                                    
+                                    
+                                    
+                                    
+        +=+                         
+      +++==+                        
+     c+++==-+                       
+    cc++===--+                      
+    cc++===--:c                     
+    cc++===--::c                    
+    cc++===--::-c                   
+    cc++===--::.                    
+                                    
+                                    
+-- TEST END
