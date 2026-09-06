@@ -2,8 +2,12 @@
 
 #include "log.h"
 
+#include <format>
+#include <stdexcept>
+
 #include "gif.h"
 #include "memory.h"
+#include "vu_micro.h"
 
 namespace uee {
 namespace {
@@ -26,6 +30,8 @@ constexpr u32 kStmask = 0x20, kStrow = 0x30, kStcol = 0x31;
 // These carry data of their own, and a count of zero means the field's
 // maximum rather than nothing.
 constexpr u32 kMpg = 0x4A, kDirect = 0x50, kDirectHl = 0x51;
+constexpr u32 kFlushe = 0x10, kFlush = 0x11, kFlusha = 0x13;
+constexpr u32 kMscal = 0x14, kMscalf = 0x15, kMscnt = 0x17;
 }  // namespace code
 
 constexpr u32 kMicroWordsMax = 256 * 2;
@@ -50,6 +56,8 @@ constexpr u32 kRowMode = 3;
 
 constexpr u32 kCycleLimit = 4;
 
+constexpr u32 kPath2 = 2;
+
 constexpr u32 lanesOf(u32 format) {
     return ((format >> 2) & 3u) + 1u;
 }
@@ -69,6 +77,8 @@ u32 Vif::registerBase() const { return mUnit == 0 ? 0x10003800u : 0x10003C00u; }
 u32 Vif::fifoBase() const { return mUnit == 0 ? 0x10004000u : 0x10005000u; }
 u32 Vif::memoryBase() const { return mUnit == 0 ? kVu0DataBase : kVu1DataBase; }
 u32 Vif::memorySize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
+u32 Vif::microBase() const { return mUnit == 0 ? kVu0MicroBase : kVu1MicroBase; }
+u32 Vif::microSize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
 
 std::optional<u32> Vif::read(u32 address) const {
     if (address < registerBase() || address >= registerBase() + kRegisterSpan) {
@@ -89,9 +99,9 @@ std::optional<u32> Vif::read(u32 address) const {
         case kItops: return mItops;
         case kBase: return mBase;
         case kOffset: return mOffset;
-        case kTops: return mBase;
-        case kItop: return mItops;
-        case kTop: return mBase;
+        case kTops: return mTops;
+        case kItop: return mItop;
+        case kTop: return mTop;
         case kRow + 0x00: return mRow[0];
         case kRow + 0x10: return mRow[1];
         case kRow + 0x20: return mRow[2];
@@ -153,9 +163,8 @@ void Vif::consume(u32 word) {
         sendToGif(word);
         return;
     }
-    // The microcode is not run here; its words are still consumed.
     if (mMicroWords != 0) {
-        --mMicroWords;
+        uploadMicro(word);
         return;
     }
     if (mPendingTarget != nullptr) {
@@ -174,6 +183,30 @@ void Vif::consume(u32 word) {
     }
 }
 
+void Vif::uploadMicro(u32 word) {
+    mMemory->write32(microBase() + (mMicroWord % (microSize() / 4u)) * 4u, word);
+    ++mMicroWord;
+    --mMicroWords;
+}
+
+Vu& Vif::vu() const {
+    if (mVu == nullptr) {
+        throw std::runtime_error(
+            std::format("vif{} was asked for a vector unit it was not given", mUnit));
+    }
+    return *mVu;
+}
+
+// The buffer the program is about to read is the one the unpacks before it
+// filled, and the next unpacks fill the other half.
+void Vif::startMicro(u32 start) {
+    mTop = mTops;
+    mItop = mItops;
+    mSecondBuffer = !mSecondBuffer;
+    mTops = mBase + (mSecondBuffer ? mOffset : 0);
+    runMicroProgram(vu(), *mMemory, mGif, mUnit, start);
+}
+
 void Vif::sendToGif(u32 word) {
     mDirectQuadword[mDirectFill++] = word;
     --mDirectWords;
@@ -186,6 +219,9 @@ void Vif::sendToGif(u32 word) {
                                 (static_cast<u64>(mDirectQuadword[1]) << 32),
                             static_cast<u64>(mDirectQuadword[2]) |
                                 (static_cast<u64>(mDirectQuadword[3]) << 32));
+        if (mDirectWords == 0) {
+            mGif->endPath();
+        }
     }
 }
 
@@ -209,7 +245,11 @@ void Vif::execute(u32 code) {
         case code::kNop: return;
         case code::kStcycl: mCycle = immediate; return;
         case code::kOffset: mOffset = immediate & 0x3FFu; return;
-        case code::kBase: mBase = immediate & 0x3FFu; return;
+        case code::kBase:
+            mBase = immediate & 0x3FFu;
+            mTops = mBase;
+            mSecondBuffer = false;
+            return;
         case code::kItop: mItops = immediate & 0x3FFu; return;
         case code::kStmod: mMode = immediate & 3u; return;
         case code::kMskpath3:
@@ -227,11 +267,24 @@ void Vif::execute(u32 code) {
         case code::kMpg: {
             const u32 count = (code >> 16) & 0xFFu;
             mMicroWords = (count == 0 ? kMicroWordsMax : count * 2);
+            mMicroWord = immediate * 2;
             return;
         }
+        case code::kFlushe:
+        case code::kFlush:
+        case code::kFlusha:
+            return;
+        case code::kMscal:
+        case code::kMscalf:
+            startMicro(immediate);
+            return;
+        case code::kMscnt:
+            startMicro(vu().vi[Vu::kTpc]);
+            return;
         case code::kDirect:
         case code::kDirectHl:
             mDirectWords = (immediate == 0 ? kDirectQuadwordsMax : immediate) * 4;
+            mGif->beginPath(kPath2);
             return;
         case code::kStmask: mPending = 1; mPendingTarget = &mMask; return;
         case code::kStrow: mPending = 4; mPendingTarget = mRow; return;
@@ -249,7 +302,7 @@ void Vif::beginUnpack(u32 code) {
     mUnsigned = ((immediate >> 14) & 1u) != 0;
     mAddress = immediate & 0x3FFu;
     if (mUnit == 1 && ((immediate >> 15) & 1u) != 0) {
-        mAddress += mBase;
+        mAddress += mTops;
     }
     mRemaining = count == 0 ? 256u : count;
     mMasked = (command & kUnpackMasked) != 0;

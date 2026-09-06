@@ -342,7 +342,7 @@ Status Interpreter::execute(Instruction insn) {
         case Op::qmfc2_ni: qmfc2(cpu, ee.vu0, rt, insn.vs()); break;
         case Op::qmtc2_ni: qmtc2(cpu, ee.vu0, rt, insn.vs()); break;
         case Op::cfc2_ni: cfc2(cpu, ee.vu0, rt, rd); break;
-        case Op::ctc2_ni: ctc2(cpu, ee, vu1, memory, rt, rd); break;
+        case Op::ctc2_ni: ctc2(cpu, ee, memory, rt, rd); break;
 
         default:
             if (!executeVu0(ee.vu0, memory, slot.op, insn)) {

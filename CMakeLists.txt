@@ -77,6 +77,7 @@ add_library(uee SHARED
     src/patches.cpp
     src/vif.cpp
     src/gif.cpp
+    src/gs_capture.cpp
     src/gs.cpp
     src/vu_micro.cpp
     src/irx.cpp
@@ -324,6 +325,8 @@ if(UEE_BENCH)
 
 endif()
 
+add_subdirectory(tools/gsdump)
+
 set(AUTOTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps2autotests/tests)
 # Every vendored ELF with recorded output, so none is left unrun by omission.
 file(GLOB_RECURSE AUTOTEST_CANDIDATES ${AUTOTEST_DIR}/*.elf)
@@ -434,11 +437,12 @@ else()
     message(STATUS "IOP guest tests skipped: IOP_GCC=${IOP_GCC} PS2SDK=${PS2SDK}")
 endif()
 
-# Expected output derived from the kernel behaviour in the IDBs, not hardware.
+# Expected output derived from the kernel behaviour in the IDBs and, for the
+# hardware paths, from the unit manuals, not from hardware itself.
 if(EE_GCC AND EXISTS "${PS2SDK}/ee/startup/linkfile")
     foreach(guest alarm thread_sema coverage degrade
                   delay priority thread_state sema intc sif_regs syscall_hook machine resume
-                  recursion)
+                  recursion path1 draw)
         set(elf ${GUEST_DIR}/${guest}.elf)
         add_custom_command(OUTPUT ${elf}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${GUEST_DIR}

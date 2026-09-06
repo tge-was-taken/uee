@@ -2,6 +2,9 @@
 
 #include "memory.h"
 
+#include <vector>
+#include "vu_micro.h"
+
 #include <array>
 
 namespace uee {
@@ -110,6 +113,41 @@ bool EeMmio::write(u32 address, u32 value) {
         refreshCop0Condition();
     }
     return handled;
+}
+
+void EeMmio::startVu1(u32 address) {
+    runMicroProgram(mVu1, *mMemory, &mGif, 1, address);
+}
+
+// The registers the interface never intercepts sit in the window's backing
+// memory, so the snapshot is that window with the ones the unit answers for
+// written over it.
+std::vector<u8> EeMmio::privilegedRegisters() {
+    std::vector<u8> registers(kGsPrivSize);
+    for (u32 offset = 0; offset < kGsPrivSize; offset += 4) {
+        const u32 address = kGsPrivBase + offset;
+        const std::optional<u32> answered = mGs.read(address);
+        const u32 value = answered ? *answered : mMemory->readMmioBacking32(address);
+        for (u32 shift = 0; shift < 32; shift += 8) {
+            registers[offset + shift / 8] = static_cast<u8>(value >> shift);
+        }
+    }
+    return registers;
+}
+
+void EeMmio::attachGsHandler(GsHandler* handler) {
+    mHandler = handler;
+    mGif.attachHandler(handler);
+    if (handler != nullptr) {
+        handler->begin(privilegedRegisters());
+    }
+}
+
+void EeMmio::startVblank() {
+    mGs.startVblank();
+    if (mHandler != nullptr) {
+        mHandler->vsync(static_cast<u32>((mGs.csr() >> 13) & 1u), privilegedRegisters());
+    }
 }
 
 }  // namespace uee

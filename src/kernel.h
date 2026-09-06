@@ -71,6 +71,7 @@ public:
     void attachAudio(AudioSink* audio) { mIop.attachAudio(audio); }
     void attachPad(PadSource* pad) { mIop.attachPad(pad); }
     void attachCard(CardStorage* card) { mIop.attachCard(card); }
+    void attachGsHandler(GsHandler* handler) { mMmio.attachGsHandler(handler); }
 
     void advanceClock();
 
@@ -157,6 +158,7 @@ private:
     s32 setVectorHandler(u32 index, u32 handler, u32 first, u32 last);
     s32 writeTlbEntry(u32 pageMask, u32 entryHi, u32 entryLo0, u32 entryLo1);
     void printKernel(u32 format);
+    void programGsCrt(u16 interlace, u16 mode, u16 field);
 
     s32 setAlarm(u16 ticks, u32 callback, u32 argument);
     s32 releaseAlarm(s32 id);
@@ -201,9 +203,6 @@ private:
     u32 mVSyncTickAddress = 0;
     u32 mGsHParam[4] = {};
     u32 mGsVParam = 0;
-    u32 mGsCrtMode = 0;
-    u32 mGsCrtInterlace = 0;
-    u32 mGsCrtField = 0;
     std::array<u32, 16> mVectorHandlers = {};
 
     struct TlbEntry {

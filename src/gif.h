@@ -4,9 +4,11 @@
 #include "types.h"
 
 #include <optional>
+#include <vector>
 
 namespace uee {
 
+class GsHandler;
 class Memory;
 
 class Gif {
@@ -16,7 +18,13 @@ public:
         mGs = &gs;
     }
 
+    void attachHandler(GsHandler* handler) { mHandler = handler; }
+
     void writeQuadword(u64 low, u64 high);
+
+    // A kicked packet names no length, so whoever feeds one asks after every
+    // quadword whether the tag that ends it has arrived.
+    bool isPacketOpen() const { return mRemaining != 0 || !mEndOfPacket; }
 
     // Idle while claiming a queued quadword is a state the hardware cannot be
     // in, and a handler waiting on either never gets its answer.
@@ -32,9 +40,14 @@ public:
 private:
     void readTag(u64 low, u64 high);
     void writeRegister(u32 address, u64 value);
+    void capture(u64 low, u64 high);
+    void flushCapture();
 
     Memory* mMemory = nullptr;
     Gs* mGs = nullptr;
+    GsHandler* mHandler = nullptr;
+    std::vector<u8> mCaptured;
+    u32 mCapturedPath = 0;
     u32 mControl = 0;
     u32 mMode = 0;
     u32 mStatus = 0;
@@ -45,6 +58,7 @@ private:
     u64 mRegisters = 0;
     u32 mSlot = 0;
     u32 mFormat = 0;
+    bool mEndOfPacket = true;
 };
 
 }  // namespace uee

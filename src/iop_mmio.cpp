@@ -6,6 +6,8 @@
 #include "log.h"
 
 #include <algorithm>
+#include <format>
+#include <stdexcept>
 #include <vector>
 
 namespace uee {
@@ -226,6 +228,11 @@ bool IopMmio::writeWord(u32 address, u32 value) {
         startTransfer(*channel);
     }
     return true;
+}
+
+void IopMmio::startVu1(u32 address) {
+    throw std::runtime_error(
+        std::format("the iop started a vector unit at {:#x}; it has none", address));
 }
 
 }  // namespace uee

@@ -43,7 +43,6 @@ struct Machine {
     Deadline* deadline = nullptr;
 
     EeContext& ee() const { return interpreter.ee; }
-    Vu& vu1() const { return interpreter.vu1; }
 };
 
 // The address is written on every path, since a resumed function knows no

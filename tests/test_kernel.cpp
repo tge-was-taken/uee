@@ -2,6 +2,7 @@
 #include "alarm.h"
 #include "gif.h"
 #include "gs.h"
+#include "gs_capture.h"
 #include "ee_context.h"
 #include "interrupts.h"
 #include "iop_interpreter.h"
@@ -19,6 +20,10 @@
 #include "timers.h"
 
 #include <spdlog/spdlog.h>
+
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 
 #include <algorithm>
 #include <format>
@@ -810,9 +815,9 @@ void checkIpuKeepsWhatTheDmaFedIt() {
     constexpr usize kQuadwords = 3;
 
     uee::Memory memory = uee::makeMainMemory();
-    uee::R5900 cpu;
+    uee::EeContext ee;
     uee::EeMmio mmio;
-    mmio.attach(memory, cpu);
+    mmio.attach(memory, ee);
 
     for (u32 i = 0; i < kQuadwords * 16; ++i) {
         memory.write8(kSource + i, static_cast<u8>(i));
@@ -1055,6 +1060,106 @@ void checkGsCsrClearsOnWritingOne() {
     checkEqual(gs.csr() & 3u, static_cast<u64>(1), "writing a zero clears nothing");
 }
 
+// A sink stands in for whatever watches the stream, so the interface is asked
+// what it hands over rather than what it wrote to a file.
+struct RecordingHandler : uee::GsHandler {
+    struct Burst {
+        u32 path = 0;
+        std::vector<u8> data;
+    };
+
+    std::vector<Burst> bursts;
+    std::vector<u32> fields;
+    usize begun = 0;
+
+    void begin(std::span<const u8> registers) override {
+        checkEqual(registers.size(), usize{0x2000}, "the snapshot spans the register window");
+        ++begun;
+    }
+    void transfer(u32 path, std::span<const u8> data) override {
+        bursts.push_back({path, std::vector<u8>(data.begin(), data.end())});
+    }
+    void vsync(u32 field, std::span<const u8>) override { fields.push_back(field); }
+};
+
+void checkTheStreamIsCapturedOnePathAtATime() {
+    uee::Memory memory = uee::makeMainMemory();
+    uee::EeContext ee;
+    uee::EeMmio mmio;
+    mmio.attach(memory, ee);
+
+    RecordingHandler sink;
+    mmio.attachGsHandler(&sink);
+    checkEqual(sink.begun, usize{1}, "attaching says where the stream starts from");
+
+    mmio.gif().beginPath(1);
+    mmio.gif().writeQuadword(0x1000000000008001ull, 0xE);
+    mmio.gif().writeQuadword(0x00000000CAFEBABEull, 0x62);
+    mmio.gif().endPath();
+
+    mmio.gif().beginPath(3);
+    mmio.gif().writeQuadword(0x1000000000008001ull, 0xE);
+    mmio.gif().writeQuadword(0x00000000DEADBEEFull, 0x62);
+    mmio.gif().endPath();
+
+    checkEqual(sink.bursts.size(), usize{2}, "each path is handed over on its own");
+    checkEqual(sink.bursts[0].path, 1u, "the first burst came down the first path");
+    checkEqual(sink.bursts[0].data.size(), usize{32}, "with both quadwords in it");
+    checkEqual(sink.bursts[1].path, 3u, "and the second down the third");
+    checkEqual(sink.bursts[1].data[16], static_cast<u8>(0xEF),
+               "the quadwords are kept in the order they were written");
+
+    mmio.startVblank();
+    checkEqual(sink.fields.size(), usize{1}, "a field is one event");
+}
+
+// Whatever reads a capture finds the records behind a head of known length, so
+// the two have to line up.
+void checkTheCaptureIsLaidOutForItsReader() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "uee_gs_layout.ueegs";
+    const std::vector<u8> registers(0x2000, 0x5A);
+    const std::vector<u8> packet(32, 0x11);
+    {
+        uee::GsCaptureWriter writer(path, "TEST");
+        checkEqual(writer.isOpen(), true, "the dump opens where it was told to");
+        writer.begin(registers);
+        writer.transfer(1, packet);
+        writer.vsync(1, registers);
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    const std::vector<u8> dump{std::istreambuf_iterator<char>(file),
+                               std::istreambuf_iterator<char>()};
+    const auto word = [&dump](usize offset) {
+        u32 value = 0;
+        for (usize i = 0; i < 4; ++i) {
+            value |= static_cast<u32>(dump[offset + i]) << (8 * i);
+        }
+        return value;
+    };
+
+    checkEqual(std::string(dump.begin(), dump.begin() + 8), std::string("UEEGSCAP"),
+               "the file names itself first");
+    checkEqual(word(8), 1u, "in the version it was written in");
+    checkEqual(word(12), 0x2000u, "saying how much of it a snapshot spends");
+    checkEqual(word(16), 4u, "and how long the serial behind it is");
+
+    const usize opening = 20 + 4;
+    checkEqual(dump[opening], static_cast<u8>(1), "the head closes with the registers");
+    const usize records = opening + 1 + 0x2000;
+    checkEqual(dump[records], static_cast<u8>(2), "the first record is a transfer");
+    checkEqual(dump[records + 1], static_cast<u8>(1), "down the path it came from");
+    checkEqual(word(records + 2), 32u, "as long as the packet was");
+    checkEqual(dump[records + 6], static_cast<u8>(0x11), "and holding it");
+
+    const usize afterTransfer = records + 6 + packet.size();
+    checkEqual(dump[afterTransfer], static_cast<u8>(1), "a field restates the registers");
+    checkEqual(dump[afterTransfer + 1 + 0x2000], static_cast<u8>(3), "before naming itself");
+
+    std::filesystem::remove(path);
+}
+
 int main() {
     checkQueueIsFifo();
     checkQueueRotatesOldestToNewest();
@@ -1085,6 +1190,8 @@ int main() {
     checkImageCountsQuadwordsNotRegisters();
     checkGsHoldsFinishUntilTheScanlineIsOut();
     checkGsCsrClearsOnWritingOne();
+    checkTheStreamIsCapturedOnePathAtATime();
+    checkTheCaptureIsLaidOutForItsReader();
     checkAdpcmDecodesAFlatBlock();
     checkAdpcmShiftScalesTheNibble();
     checkAdpcmFilterFollowsThePreviousSamples();

@@ -8,13 +8,15 @@ namespace uee {
 
 class Gif;
 class Memory;
+struct Vu;
 
 class Vif {
 public:
-    void attach(Memory& memory, Gif& gif, u32 unit) {
+    void attach(Memory& memory, Gif& gif, u32 unit, Vu* vu) {
         mMemory = &memory;
         mGif = &gif;
         mUnit = unit;
+        mVu = vu;
     }
 
     std::optional<u32> read(u32 address) const;
@@ -30,9 +32,14 @@ private:
     u32 fifoBase() const;
     u32 memoryBase() const;
     u32 memorySize() const;
+    u32 microBase() const;
+    u32 microSize() const;
 
     void consume(u32 word);
     void execute(u32 code);
+    void uploadMicro(u32 word);
+    void startMicro(u32 start);
+    Vu& vu() const;
     void beginUnpack(u32 code);
     void sendToGif(u32 word);
     void unpack(u32 word);
@@ -47,6 +54,7 @@ private:
 
     Memory* mMemory = nullptr;
     Gif* mGif = nullptr;
+    Vu* mVu = nullptr;
     u32 mUnit = 0;
 
     u32 mStatus = 0;
@@ -56,8 +64,12 @@ private:
     u32 mMask = 0;
     u32 mCode = 0;
     u32 mItops = 0;
+    u32 mItop = 0;
     u32 mBase = 0;
     u32 mOffset = 0;
+    u32 mTops = 0;
+    u32 mTop = 0;
+    bool mSecondBuffer = false;
     u32 mRow[4]{};
     u32 mColumn[4]{};
 
@@ -75,6 +87,7 @@ private:
     u32 mDirectQuadword[4] = {};
     u32 mDirectFill = 0;
     u32 mMicroWords = 0;
+    u32 mMicroWord = 0;
     u32 mPending = 0;
     u32* mPendingTarget = nullptr;
 };

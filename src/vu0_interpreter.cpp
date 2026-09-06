@@ -31,8 +31,12 @@ bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
     case Op::vior: vior(vu0, insn.vid(), insn.vis(), insn.vit()); break;
     case Op::viaddi: viaddi(vu0, insn.vit(), insn.vis(), insn.imm5()); break;
 
-    case Op::vilwr: vilwr(vu0, memory, dest, insn.vit(), insn.vis()); break;
-    case Op::viswr: viswr(vu0, memory, dest, insn.vit(), insn.vis()); break;
+    case Op::vilwr:
+        vilwr(vu0, memory, dest, insn.vit(), insn.vis(), kVu0DataBase, kVu0MemorySize);
+        break;
+    case Op::viswr:
+        viswr(vu0, memory, dest, insn.vit(), insn.vis(), kVu0DataBase, kVu0MemorySize);
+        break;
     case Op::vsqi: vsqi(vu0, memory, dest, insn.vs(), insn.vit()); break;
 
     case Op::vsqrt: vsqrt(vu0, insn.vt(), insn.ftf()); break;

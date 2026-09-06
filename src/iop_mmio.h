@@ -29,6 +29,8 @@ public:
         return kSegments;
     }
 
+    void startVu1(u32 address) override;
+
     std::optional<u32> readWord(u32 address) const override;
     bool writeWord(u32 address, u32 value) override;
     std::optional<u16> readHalf(u32 address) const override;

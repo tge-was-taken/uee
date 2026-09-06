@@ -9,6 +9,7 @@
 #include <cstring>
 #include <span>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -102,6 +103,13 @@ public:
     Memory(const Memory&) = delete;
     Memory& operator=(const Memory&) = delete;
     Memory(Memory&&) = default;
+
+    Mmio& mmio() const {
+        if (mMmio == nullptr) {
+            throw std::runtime_error("this memory has no devices attached");
+        }
+        return *mMmio;
+    }
 
     void attach(Mmio* mmio) {
         mMmio = mmio;

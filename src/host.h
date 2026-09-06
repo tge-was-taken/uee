@@ -42,6 +42,21 @@ public:
     virtual void write(std::span<const u8> stream) = 0;
 };
 
+// The graphics stream as the interface hands it on, one burst per path it came
+// down, and the privileged registers as they stood at the field. Nothing here
+// draws.
+class GsHandler {
+public:
+    virtual ~GsHandler() = default;
+
+    // Said once, before any packet: what the registers hold is all a reader
+    // knows of the state the stream is about to change.
+    virtual void begin(std::span<const u8> privilegedRegisters) = 0;
+
+    virtual void transfer(u32 path, std::span<const u8> data) = 0;
+    virtual void vsync(u32 field, std::span<const u8> privilegedRegisters) = 0;
+};
+
 class PadSource {
 public:
     virtual ~PadSource() = default;

@@ -3,6 +3,8 @@
 #include "dmac.h"
 #include "gif.h"
 #include "gs.h"
+#include "ee_context.h"
+#include "host.h"
 #include "interrupts.h"
 #include "ipu.h"
 #include "r5900.h"
@@ -10,9 +12,11 @@
 #include "sbus.h"
 #include "timers.h"
 #include "vif.h"
+#include "vu.h"
 #include "types.h"
 
 #include <optional>
+#include <vector>
 
 namespace uee {
 
@@ -75,11 +79,12 @@ public:
         return true;
     }
 
-    void attach(Memory& memory, R5900& cpu) {
-        mCpu = &cpu;
+    void attach(Memory& memory, EeContext& ee) {
+        mCpu = &ee.cpu;
+        mMemory = &memory;
         mGif.attach(memory, mGs);
-        mVif[0].attach(memory, mGif, 0);
-        mVif[1].attach(memory, mGif, 1);
+        mVif[0].attach(memory, mGif, 0, &ee.vu0);
+        mVif[1].attach(memory, mGif, 1, &mVu1);
         mDmac.attach(memory, mInterrupts, mGif, mVif[0], mVif[1], mIpu);
         refreshCop0Condition();
     }
@@ -93,6 +98,8 @@ public:
 
     std::optional<u32> read(u32 address) const;
     bool write(u32 address, u32 value);
+
+    void startVu1(u32 address) override;
 
     // The block an address decodes to is a constant wherever the translator
     // resolved the address, so the search that finds it need not happen twice.
@@ -142,6 +149,14 @@ public:
     Gif& gif() { return mGif; }
     Ipu& ipu() { return mIpu; }
     Gs& gs() { return mGs; }
+    Vu& vu1() { return mVu1; }
+
+    void attachGsHandler(GsHandler* handler);
+
+    // The field the unit moves to, and the registers as they stand at it, are
+    // one event to anything watching the stream.
+    void startVblank();
+    std::vector<u8> privilegedRegisters();
     Vif& vif(u32 unit) { return mVif[unit]; }
     const Sbus& sbus() const { return mSbus; }
 
@@ -169,6 +184,11 @@ private:
     Vif mVif[2];
     Ipu mIpu;
     Dmac mDmac;
+    // Not part of the context an interrupt saves: VU1 keeps running its own
+    // microprogram across one.
+    Vu mVu1;
+    GsHandler* mHandler = nullptr;
+    Memory* mMemory = nullptr;
     R5900* mCpu = nullptr;
 };
 

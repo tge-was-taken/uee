@@ -293,19 +293,20 @@ inline u32 vuDataAddress(u32 pointer) {
     return kVu0DataBase + (pointer * 16u) % kVu0MemorySize;
 }
 
-inline void vilwr(Vu& vu0, Memory& memory, u32 dest, u32 vit, u32 vis) {
-    const u32 address = vuDataAddress(vu0.readVi(vis));
+// Both units run these, so the window they address is the caller's to say.
+inline void vilwr(Vu& vu, Memory& memory, u32 dest, u32 vit, u32 vis, u32 base, u32 size) {
+    const u32 address = base + (vu.readVi(vis) * 16u) % size;
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i)) {
-            vu0.writeVi(vit, memory.read32(address + 4u * static_cast<u32>(i)));
+            vu.writeVi(vit, memory.read32(address + 4u * static_cast<u32>(i)));
         }
     }
 }
-inline void viswr(Vu& vu0, Memory& memory, u32 dest, u32 vit, u32 vis) {
-    const u32 address = vuDataAddress(vu0.readVi(vis));
+inline void viswr(Vu& vu, Memory& memory, u32 dest, u32 vit, u32 vis, u32 base, u32 size) {
+    const u32 address = base + (vu.readVi(vis) * 16u) % size;
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i)) {
-            memory.write32(address + 4u * static_cast<u32>(i), vu0.readVi(vit));
+            memory.write32(address + 4u * static_cast<u32>(i), vu.readVi(vit));
         }
     }
 }
@@ -381,7 +382,7 @@ inline void vopmsub(Vu& vu0, u32 dest, u32 vd, u32 vs, u32 vt) {
 // The microprogram runs to completion here, so a guest that polls for the unit
 // to finish never sees it busy. TPC keeps where it stopped.
 inline void vcallms(Vu& vu0, Memory& memory, u32 program) {
-    vu0.vi[Vu::kTpc] = VuMicro(vu0, memory, 0).run(program);
+    runMicroProgram(vu0, memory, nullptr, 0, program);
 }
 inline void vcallmsr(Vu& vu0, Memory& memory) {
     vcallms(vu0, memory, vu0.vi[Vu::kCmsar0]);

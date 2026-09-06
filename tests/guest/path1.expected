@@ -1,0 +1,8 @@
+-- TEST BEGIN
+fifo micro uploaded: 1
+fifo mscal marker: 00000777
+fifo xgkick label: cafebabe
+dma micro uploaded: 1
+dma mscal marker: 00000777
+dma xgkick label: cafebabe
+-- TEST END

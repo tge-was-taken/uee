@@ -34,6 +34,10 @@ public:
     virtual bool writeByte(u32, u8) { return false; }
     virtual std::optional<u64> readDouble(u32) const { return std::nullopt; }
     virtual bool writeDouble(u32, u64) { return false; }
+
+    // Writing the second unit's start address is what launches it, and the
+    // unit lives behind these registers rather than in the processor.
+    virtual void startVu1(u32 address) = 0;
 };
 
 }  // namespace uee

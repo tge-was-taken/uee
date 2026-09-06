@@ -1,0 +1,8 @@
+-- TEST BEGIN
+frame 0 finished: 1
+frame 0 displayed: 1
+frame 1 finished: 1
+frame 1 displayed: 1
+frame 2 finished: 1
+frame 2 displayed: 1
+-- TEST END

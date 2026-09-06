@@ -1,6 +1,6 @@
 #include "gif.h"
 
-
+#include "host.h"
 #include "memory.h"
 
 namespace uee {
@@ -65,13 +65,36 @@ bool Gif::write(u32 address, u32 value) {
 }
 
 void Gif::beginPath(u32 path) {
+    flushCapture();
     mActivePath = path;
     mQueued = 0;
 }
 
 void Gif::endPath() {
+    flushCapture();
     mActivePath = 0;
     mQueued = 0;
+}
+
+void Gif::capture(u64 low, u64 high) {
+    if (mCapturedPath != mActivePath) {
+        flushCapture();
+        mCapturedPath = mActivePath;
+    }
+    for (u32 shift = 0; shift < 64; shift += 8) {
+        mCaptured.push_back(static_cast<u8>(low >> shift));
+    }
+    for (u32 shift = 0; shift < 64; shift += 8) {
+        mCaptured.push_back(static_cast<u8>(high >> shift));
+    }
+}
+
+void Gif::flushCapture() {
+    if (mHandler == nullptr || mCaptured.empty()) {
+        return;
+    }
+    mHandler->transfer(mCapturedPath, mCaptured);
+    mCaptured.clear();
 }
 
 void Gif::maskPath3(bool masked) {
@@ -80,6 +103,7 @@ void Gif::maskPath3(bool masked) {
 
 void Gif::readTag(u64 low, u64 high) {
     const u32 loops = static_cast<u32>(low) & 0x7FFFu;
+    mEndOfPacket = ((low >> 15) & 1u) != 0;
     const u32 descriptors = static_cast<u32>(low >> 60) & 0xFu;
     mDescriptors = descriptors == 0 ? 16u : descriptors;
     mFormat = static_cast<u32>(low >> 58) & 3u;
@@ -114,6 +138,9 @@ void Gif::writeRegister(u32 address, u64 value) {
 
 void Gif::writeQuadword(u64 low, u64 high) {
     ++mQueued;
+    if (mHandler != nullptr) {
+        capture(low, high);
+    }
     if (mRemaining == 0) {
         readTag(low, high);
         return;

@@ -214,6 +214,12 @@ std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const
     const auto vuAccess = [&](const char* name, u32 field, u32 a, u32 b) {
         return std::format("{}(ee.vu0, mem, 0x{:x}u, {}, {});", name, field, a, b);
     };
+    // Macro mode reaches the first unit's memory, whichever unit the same
+    // instruction addresses when a microprogram runs it.
+    const auto vuWindowAccess = [&](const char* name, u32 field, u32 a, u32 b) {
+        return std::format("{}(ee.vu0, mem, 0x{:x}u, {}, {}, kVu0DataBase, kVu0MemorySize);",
+                           name, field, a, b);
+    };
     // Nothing here handles the exception a taken trap raises, so the driver is
     // handed the instruction to report. Not taking one costs a comparison.
     const auto trap = [&](const char* name, const std::string& operands) {
@@ -430,7 +436,7 @@ std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const
             return std::format("qmtc2(ee.cpu, ee.vu0, {}, {});", r(rt), insn.vs());
         case Op::cfc2_ni: return std::format("cfc2(ee.cpu, ee.vu0, {}, {});", r(rt), rd);
         case Op::ctc2_ni:
-            return std::format("ctc2(ee.cpu, ee, m.vu1(), mem, {}, {});", r(rt), rd);
+            return std::format("ctc2(ee.cpu, ee, mem, {}, {});", r(rt), rd);
 
         case Op::lb: return access("lb", rt, rs, simm);
         case Op::lbu: return access("lbu", rt, rs, simm);
@@ -506,8 +512,10 @@ std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const
         case Op::viaddi:
             return std::format("viaddi(ee.vu0, {}, {}, {});", insn.vit(), insn.vis(),
                                insn.imm5());
-        case Op::vilwr: return vuAccess("vilwr", insn.dest(), insn.vit(), insn.vis());
-        case Op::viswr: return vuAccess("viswr", insn.dest(), insn.vit(), insn.vis());
+        case Op::vilwr:
+            return vuWindowAccess("vilwr", insn.dest(), insn.vit(), insn.vis());
+        case Op::viswr:
+            return vuWindowAccess("viswr", insn.dest(), insn.vit(), insn.vis());
         case Op::vsqi: return vuAccess("vsqi", insn.dest(), insn.vs(), insn.vit());
         case Op::vsqrt: return vu2("vsqrt", insn.vt(), insn.ftf());
         case Op::vrsqrt:

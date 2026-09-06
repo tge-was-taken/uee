@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
+#include <stdexcept>
 
+#include "gif.h"
 #include "memory.h"
 #include "vu_handlers.h"
 
@@ -161,7 +164,18 @@ constexpr u32 kEsadd = 0x73C, kErsadd = 0x73D, kEleng = 0x73E, kErleng = 0x73F;
 constexpr u32 kEatanxy = 0x77C, kEatanxz = 0x77D, kEsum = 0x77E;
 constexpr u32 kEsqrt = 0x7BC, kErsqrt = 0x7BD, kErcpr = 0x7BE, kWaitp = 0x7BF;
 constexpr u32 kEsin = 0x7FC, kEatan = 0x7FD, kEexp = 0x7FE;
+constexpr u32 kXgkick = 0x6FC, kXtop = 0x6BC, kXitop = 0x6BD;
 }  // namespace lower
+
+constexpr u32 kPath1 = 1;
+
+// The hardware unit runs beside the processor, so a program with no end bit
+// spins there forever while the guest carries on. Running it here has to stop
+// somewhere, and a program that means to end does so long before this.
+constexpr u32 kRunawayStep = 1'000'000;
+
+constexpr u32 kVifRegisters[2] = {0x10003800, 0x10003C00};
+constexpr u32 kItop = 0xD0, kTop = 0xE0;
 
 }  // namespace
 
@@ -362,6 +376,29 @@ void VuMicro::storeQuadword(u32 dest, u32 vf, u32 quadword) {
     }
 }
 
+u32 VuMicro::readInterfaceRegister(u32 offset) const {
+    return mMemory.read32(kVifRegisters[mUnit] + offset);
+}
+
+// The packet names no length, so the transfer runs until the unit reports the
+// tag that ended it.
+void VuMicro::kickToGif(u32 quadword) {
+    // Only the second unit has a path to the interface.
+    if (mGif == nullptr) {
+        return;
+    }
+    const u32 quadwords = dataSize() / 16u;
+    mGif->beginPath(kPath1);
+    for (u32 sent = 0; sent < quadwords; ++sent) {
+        const u32 address = dataBase() + ((quadword + sent) % quadwords) * 16u;
+        mGif->writeQuadword(mMemory.read64(address), mMemory.read64(address + 8));
+        if (!mGif->isPacketOpen()) {
+            break;
+        }
+    }
+    mGif->endPath();
+}
+
 void VuMicro::branchTo(u32 target) {
     mBranchTarget = target;
     mBranching = true;
@@ -390,6 +427,9 @@ void VuMicro::executeLower(u32 code) {
                 case lower::kMfp: vmfp(mState, dest, ft); return;
                 case lower::kWaitp:
                     return;
+                case lower::kXgkick: kickToGif(mState.readVi(fs)); return;
+                case lower::kXtop: mState.writeVi(ft, readInterfaceRegister(kTop)); return;
+                case lower::kXitop: mState.writeVi(ft, readInterfaceRegister(kItop)); return;
                 case lower::kEsadd:
                 case lower::kErsadd:
                 case lower::kEleng:
@@ -415,8 +455,12 @@ void VuMicro::executeLower(u32 code) {
                     issueQuotient(inverseRootOf(code, fs, ft), kRootLatency);
                     return;
                 case lower::kWaitq: settleQuotients(); return;
-                case lower::kIlwr: vilwr(mState, mMemory, dest, ft, fs); return;
-                case lower::kIswr: viswr(mState, mMemory, dest, ft, fs); return;
+                case lower::kIlwr:
+                    vilwr(mState, mMemory, dest, ft, fs, dataBase(), dataSize());
+                    return;
+                case lower::kIswr:
+                    viswr(mState, mMemory, dest, ft, fs, dataBase(), dataSize());
+                    return;
                 case lower::kLqi:
                     loadQuadword(dest, ft, mState.readVi(fs));
                     mState.writeVi(fs, mState.readVi(fs) + 1);
@@ -573,7 +617,7 @@ u32 VuMicro::run(u32 start) {
     }
 
     u32 remaining = 2;
-    for (u32 steps = 0; steps < instructionCount() * 4; ++steps) {
+    for (u32 steps = 0; steps < kRunawayStep; ++steps) {
         const u32 address = instructionBase() + (mProgramCounter % instructionCount()) * 8;
         const u32 lower = mMemory.read32(address);
         const u32 upper = mMemory.read32(address + 4);
@@ -622,6 +666,10 @@ u32 VuMicro::run(u32 start) {
         mProgramCounter = taken ? target : mProgramCounter + 1;
     }
     return mProgramCounter;
+}
+
+void runMicroProgram(Vu& state, Memory& memory, Gif* gif, u32 unit, u32 start) {
+    state.vi[Vu::kTpc] = VuMicro(state, memory, unit, gif).run(start);
 }
 
 }  // namespace uee

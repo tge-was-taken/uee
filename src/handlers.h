@@ -1061,10 +1061,10 @@ inline void cfc2(R5900& cpu, const Vu& vu0, u32 rt, u32 rd) {
 }
 // Writing the second unit's start address is what launches it, so that one
 // register reaches past the file it lives in.
-inline void ctc2(R5900& cpu, EeContext& ee, Vu& vu1, Memory& memory, u32 rt, u32 rd) {
+inline void ctc2(R5900& cpu, EeContext& ee, Memory& memory, u32 rt, u32 rd) {
     ee.vu0.writeControl(rd, low(cpu.gpr[rt]));
     if (rd == Vu::kCmsar1) {
-        vu1.vi[Vu::kTpc] = VuMicro(vu1, memory, 1).run(ee.vu0.vi[Vu::kCmsar1]);
+        memory.mmio().startVu1(ee.vu0.vi[Vu::kCmsar1]);
     }
 }
 

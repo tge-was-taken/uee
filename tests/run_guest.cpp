@@ -1,5 +1,6 @@
 #include "disc.h"
 #include "elf.h"
+#include "gs_capture.h"
 #include "log.h"
 #include "patches.h"
 #include "interpreter.h"
@@ -109,6 +110,17 @@ int main(int argc, char** argv) {
         }
         kernel.attachAudio(&*audio);
         log.info("writing audio to {}", path);
+    }
+
+    std::optional<uee::GsCaptureWriter> graphics;
+    if (const char* path = std::getenv("UEE_GS_CAPTURE")) {
+        graphics.emplace(path, std::filesystem::path(argv[1]).stem().string());
+        if (!graphics->isOpen()) {
+            log.fatal("cannot write the graphics stream to {}", path);
+            return 2;
+        }
+        kernel.attachGsHandler(&*graphics);
+        log.info("writing the graphics stream to {}", path);
     }
 
     // A held mask, as libpad reports it: SCE_PADstart is 0x0800. A menu acts on

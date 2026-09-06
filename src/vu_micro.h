@@ -5,11 +5,13 @@
 
 namespace uee {
 
+class Gif;
 class Memory;
 
 class VuMicro {
 public:
-    VuMicro(Vu& state, Memory& memory, u32 unit) : mState(state), mMemory(memory), mUnit(unit) {}
+    VuMicro(Vu& state, Memory& memory, u32 unit, Gif* gif)
+        : mState(state), mMemory(memory), mGif(gif), mUnit(unit) {}
 
     u32 run(u32 start);
 
@@ -39,9 +41,12 @@ private:
     void loadQuadword(u32 dest, u32 vf, u32 quadword);
     void storeQuadword(u32 dest, u32 vf, u32 quadword);
     void branchTo(u32 target);
+    void kickToGif(u32 quadword);
+    u32 readInterfaceRegister(u32 offset) const;
 
     Vu& mState;
     Memory& mMemory;
+    Gif* mGif;
     u32 mUnit;
 
     u32 mProgramCounter = 0;
@@ -59,5 +64,9 @@ private:
     u32 mPendingQuotient = 0;
     u32 mQuotientDelay = 0;
 };
+
+// The address a program stopped at is what the next start reads back, so the
+// two always move together.
+void runMicroProgram(Vu& state, Memory& memory, Gif* gif, u32 unit, u32 start);
 
 }  // namespace uee

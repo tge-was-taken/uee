@@ -97,7 +97,7 @@ Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config,
                              : kIopInstructionsPerHsync * config.iopClockScale),
       mIop(memory, mOutput, iopModules, config.hostModules, mWatched) {
     mMemory.attach(&mMmio);
-    mMmio.attach(mMemory, mContext.cpu);
+    mMmio.attach(mMemory, mContext);
     installSyscallTable(mMemory);
 
     // As the ROM's boot leaves it: taking INTC and DMAC interrupts.
@@ -565,13 +565,9 @@ SyscallResult Kernel::dispatch(u32 handler, bool interruptContext) {
             returnValue(0);
             return SyscallResult::Handled;
 
-        // The CRT mode is remembered so a later read is consistent, but nothing
-        // programs a display.
         case Syscall::SetGsCrt:
-            log.stub("SetGsCrt");
-            mGsCrtMode = arg(0);
-            mGsCrtInterlace = arg(1);
-            mGsCrtField = arg(2);
+            programGsCrt(static_cast<u16>(arg(0)), static_cast<u16>(arg(1)),
+                         static_cast<u16>(arg(2)));
             returnValue(0);
             return SyscallResult::Handled;
 
@@ -1330,6 +1326,35 @@ s32 Kernel::releaseAlarm(s32 id) {
     return mAlarms.release(id, mMmio.timers().hsyncCount());
 }
 
+// KERNEL: SetGsCrt @ 0x8000bd58. These are the values its mode switch writes
+// where the video encoder answers as a console's does and the configuration
+// word it reads is zero. A renderer works the television standard out of
+// SMODE1 and the field toggle out of SYNCV, so a display that is never
+// programmed is one that cannot be shown.
+void Kernel::programGsCrt(u16 interlace, u16 mode, u16 field) {
+    constexpr u32 kSmode1 = 0x12000010, kSmode2 = 0x12000020, kSrfsh = 0x12000030;
+    constexpr u32 kSynch1 = 0x12000040, kSynch2 = 0x12000050, kSyncv = 0x12000060;
+
+    // Zero and one ask for whatever the console is; nothing here is a PAL one.
+    const bool pal = mode == 3;
+    if (mode > 3) {
+        log.stub("SetGsCrt mode {}", mode);
+        return;
+    }
+
+    mMemory.write64(kSmode1, pal ? 0x740816504ull : 0x740814504ull);
+    mMemory.write64(kSynch1, pal ? 0x7F5C21FC83030ull : 0x7F5B61F06F040ull);
+    mMemory.write64(kSynch2, pal ? 0x34897Cull : 0x33A798ull);
+    mMemory.write64(kSrfsh, 8);
+    if (interlace != 0) {
+        mMemory.write64(kSyncv, pal ? 0xA9000502101401ull : 0xC7800601A01801ull);
+        mMemory.write64(kSmode2, (static_cast<u64>(field) << 1) | 1);
+    } else {
+        mMemory.write64(kSyncv, pal ? 0xA9000502101404ull : 0xC7800601A01802ull);
+        mMemory.write64(kSmode2, 0);
+    }
+}
+
 void Kernel::advanceClock() {
     if (!mMmio.timers().advanceTo(mBudget.executed)) {
         return;
@@ -1371,7 +1396,7 @@ void Kernel::raiseFieldInterrupts() {
     }
     mInVblank = blanking;
     if (blanking) {
-        mMmio.gs().startVblank();
+        mMmio.startVblank();
         mSpeed.countField();
     }
     log.trace("{} at scanline {}", blanking ? "vblank start" : "vblank end", line);
