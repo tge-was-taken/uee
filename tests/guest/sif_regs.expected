@@ -4,7 +4,7 @@ index 0x20 dropped: 00000000
 reg 5 ignored: 00000000
 reg 0 ignored: 00000000
 mscom: write 0badf00d, read 0badf00d
-msflg: first 00001234, merged 00001f34
+msflg: first 00011234, merged 00011f34
 smflg unraised: 1
 smcom readable: 1
 set dchain: 184

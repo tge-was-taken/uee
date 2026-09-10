@@ -366,7 +366,7 @@ foreach(elf ${AUTOTEST_ELFS})
 endforeach()
 
 # Known failures. They still run, and a fixed one turns the suite red.
-set(KNOWN_FAILURES vu.lower.efu)
+set(KNOWN_FAILURES)
 foreach(name ${KNOWN_FAILURES})
     set_tests_properties(${name} translated.${name} PROPERTIES WILL_FAIL TRUE)
 endforeach()
@@ -483,4 +483,10 @@ endif()
 # Not in the repository: an optional frontend based on sky2hook.
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/frontends/sky2hook)
     add_subdirectory(frontends/sky2hook)
+endif()
+
+# Not in the repository either: the graphics stream drawn by PCSX2's software
+# rasteriser, which it loads at run time.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/frontends/pcsx2-gs)
+    add_subdirectory(frontends/pcsx2-gs)
 endif()

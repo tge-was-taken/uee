@@ -31,11 +31,11 @@ public:
 
     void startVu1(u32 address) override;
 
-    std::optional<u32> readWord(u32 address) const override;
+    std::optional<u32> readWord(u32 address) override;
     bool writeWord(u32 address, u32 value) override;
-    std::optional<u16> readHalf(u32 address) const override;
+    std::optional<u16> readHalf(u32 address) override;
     bool writeHalf(u32 address, u16 value) override;
-    std::optional<u8> readByte(u32 address) const override;
+    std::optional<u8> readByte(u32 address) override;
     bool writeByte(u32 address, u8 value) override;
 
 private:

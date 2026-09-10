@@ -29,6 +29,9 @@ struct Fpu {
 
     u32 fpr[32]{};
     u32 acc = 0;
+    // Saturating loses how far past the range a sum went, so the accumulator
+    // stays marked: the next operation that reads it saturates again.
+    bool accSaturated = false;
     u32 fcr31 = kHardwired;
 
     u32 readControl(u32 index) const {

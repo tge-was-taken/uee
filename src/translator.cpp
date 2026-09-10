@@ -92,7 +92,9 @@ std::optional<Resolved> Translator::resolveAccess(u32 pc, u32 base, s32 offset) 
 }
 
 std::optional<std::string> Translator::emitInstruction(u32 pc, Instruction insn) const {
-    if (mDeadWrites.count(pc) != 0) {
+    // A nop is not a dead write. It writes nothing, but the units behind the
+    // instruction stream still move on for it.
+    if (insn.word != 0 && mDeadWrites.count(pc) != 0) {
         return std::string{};
     }
     const auto found = mValues.find(pc);

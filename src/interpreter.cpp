@@ -21,7 +21,7 @@ Status Interpreter::execute(Instruction insn) {
     mDelaySlot = false;
     mBranchTaken = false;
     mBranchYields = false;
-    countPerformanceEvents(cpu, 1);
+    advanceCycles(cpu, 1);
 
     const auto branchIf = [&](bool taken) {
         cpu.pc = taken ? target : pc + 8;
@@ -61,7 +61,13 @@ Status Interpreter::execute(Instruction insn) {
         case Op::Invalid:
             return Status::Undecodable;
 
-        case Op::sll: sll(cpu, rd, rt, sa); break;
+        case Op::sll:
+            if (insn.word == 0) {
+                ee.vu0.advanceFlags();
+                break;
+            }
+            sll(cpu, rd, rt, sa);
+            break;
         case Op::srl: srl(cpu, rd, rt, sa); break;
         case Op::sra: sra(cpu, rd, rt, sa); break;
         case Op::dsll: dsll(cpu, rd, rt, sa); break;
@@ -324,24 +330,26 @@ Status Interpreter::execute(Instruction insn) {
 
         case Op::eret: returnFromException(cpu); break;
 
+        case Op::sync_p: ee.vu0.settleFlags(); break;
+
         // no architectural state this models
-        case Op::sync_p:
         case Op::cache:
         case Op::pref:
-        case Op::tlbwi:
         case Op::tlbwr:
-        case Op::tlbr:
         case Op::tlbp:
             break;
+
+        case Op::tlbr: tlbr(cpu); break;
+        case Op::tlbwi: tlbwi(cpu, cpu.cop0[cop0::kIndex]); break;
 
         case Op::mfc1: mfc1(cpu, ee.fpu, rt, insn.fs()); break;
         case Op::mtc1: mtc1(cpu, ee.fpu, rt, insn.fs()); break;
         case Op::cfc1: cfc1(cpu, ee.fpu, rt, insn.fs()); break;
         case Op::ctc1: ctc1(cpu, ee.fpu, rt, insn.fs()); break;
 
-        case Op::qmfc2_ni: qmfc2(cpu, ee.vu0, rt, insn.vs()); break;
+        case Op::qmfc2_ni: qmfc2(cpu, ee.vu0, rt, insn.vs(), (insn.word & 1u) != 0); break;
         case Op::qmtc2_ni: qmtc2(cpu, ee.vu0, rt, insn.vs()); break;
-        case Op::cfc2_ni: cfc2(cpu, ee.vu0, rt, rd); break;
+        case Op::cfc2_ni: cfc2(cpu, ee.vu0, rt, rd, (insn.word & 1u) != 0); break;
         case Op::ctc2_ni: ctc2(cpu, ee, memory, rt, rd); break;
 
         default:

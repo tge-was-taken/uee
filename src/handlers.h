@@ -954,13 +954,48 @@ inline void writePerformance(R5900& cpu, u32 selector, u32 value) {
 }
 
 inline void mfc0(R5900& cpu, u32 rt, u32 rd, u32 selector) {
-    cpu.write32(rt, (rd == cop0::kPerformance) ? readPerformance(cpu, selector) : cpu.cop0[rd]);
+    cpu.write32(rt, (rd == cop0::kPerformance) ? readPerformance(cpu, selector)
+                                               : cpu.cop0[cop0::alias(rd)]);
 }
+// The mask names a page size, so a write that does not is rounded to one: a
+// pattern reaching bit 13 fills the field, and one that misses it clears it.
+inline u32 pageMaskOf(u32 value) {
+    constexpr u32 kField = 0x01FFE000u;
+    return (value & 0x2000u) != 0 ? kField : 0u;
+}
+
+// The entry the index register names, moved between it and the four registers
+// that describe one.
+inline void tlbr(R5900& cpu) {
+    const cop0::TlbEntry& entry = cpu.tlb[cpu.cop0[cop0::kIndex] % cop0::kTlbEntries];
+    cpu.cop0[cop0::kEntryHi] = entry.high;
+    cpu.cop0[cop0::kEntryLo0] = entry.low0;
+    cpu.cop0[cop0::kEntryLo1] = entry.low1;
+    cpu.cop0[cop0::kPageMask] = entry.pageMask;
+}
+
+inline void tlbwi(R5900& cpu, u32 index) {
+    cpu.tlb[index % cop0::kTlbEntries] = {cpu.cop0[cop0::kEntryHi], cpu.cop0[cop0::kEntryLo0],
+                                          cpu.cop0[cop0::kEntryLo1],
+                                          cpu.cop0[cop0::kPageMask]};
+}
+
 inline void mtc0(R5900& cpu, u32 rt, u32 rd, u32 selector) {
     if (rd == cop0::kPerformance) {
         writePerformance(cpu, selector, low(cpu.gpr[rt]));
-    } else {
-        cpu.cop0[rd] = low(cpu.gpr[rt]);
+        return;
+    }
+    const u32 written = low(cpu.gpr[rt]);
+    if (rd == cop0::kPageMask) {
+        cpu.cop0[rd] = pageMaskOf(written);
+        return;
+    }
+    const u32 mask = cop0::writeMask(rd);
+    cpu.cop0[rd] = (cpu.cop0[rd] & ~mask) | (written & mask);
+    // Writing the register the counter is compared against is what withdraws
+    // the interrupt it raised.
+    if (rd == cop0::kCompare) {
+        cpu.cop0[cop0::kCause] &= ~cop0::kCounterInterrupt;
     }
 }
 inline void di(R5900& cpu) {
@@ -1050,19 +1085,39 @@ inline void ctc1(R5900& cpu, Fpu& fpu, u32 rt, u32 fs) {
     fpu.writeControl(fs, low(cpu.gpr[rt]));
 }
 
-inline void qmfc2(R5900& cpu, const Vu& vu0, u32 rt, u32 vs) {
-    cpu.write128(rt, vu0.readVf(vs));
+inline void qmfc2(R5900& cpu, Vu& vu0, u32 rt, u32 vs, bool interlocked) {
+    cpu.write128(rt, interlocked ? vu0.readVf(vs) : vu0.takeVf(vs));
 }
 inline void qmtc2(R5900& cpu, Vu& vu0, u32 rt, u32 vs) {
     vu0.vf[vs] = cpu.gpr[rt];
 }
-inline void cfc2(R5900& cpu, const Vu& vu0, u32 rt, u32 rd) {
-    cpu.write32(rt, vu0.vi[rd]);
+// The interlocked form waits for the unit, so it sees what the unit has rather
+// than what the register was left holding.
+inline void cfc2(R5900& cpu, Vu& vu0, u32 rt, u32 rd, bool interlocked) {
+    if (rd == Vu::kStatus) {
+        cpu.write32(rt, vu0.readSeenStatus());
+        return;
+    }
+    if (rd == Vu::kMac) {
+        cpu.write32(rt, vu0.readSeenMac());
+        return;
+    }
+    if (rd != Vu::kVpuStat) {
+        cpu.write32(rt, vu0.vi[rd]);
+        return;
+    }
+    cpu.write32(rt, interlocked ? vu0.readStatus() : vu0.takeStatus());
 }
 // Writing the second unit's start address is what launches it, so that one
 // register reaches past the file it lives in.
 inline void ctc2(R5900& cpu, EeContext& ee, Memory& memory, u32 rt, u32 rd) {
     ee.vu0.writeControl(rd, low(cpu.gpr[rt]));
+    if (rd == Vu::kStatus || rd == Vu::kMac || rd == Vu::kClip) {
+        ee.vu0.settleFlags();
+    }
+    if (rd == Vu::kFbrst) {
+        ee.vu0.applyForceBreak(low(cpu.gpr[rt]));
+    }
     if (rd == Vu::kCmsar1) {
         memory.mmio().startVu1(ee.vu0.vi[Vu::kCmsar1]);
     }
@@ -1204,10 +1259,11 @@ inline void swc1(R5900& cpu, const Fpu& fpu, Memory& memory, u32 ft, Base base, 
     memory.write32(resolveEa(cpu, base, offset), fpu.fpr[ft]);
 }
 template <typename Base>
-inline void sqc2(R5900& cpu, const Vu& vu0, Memory& memory, u32 ft, Base base, s32 offset) {
+inline void sqc2(R5900& cpu, Vu& vu0, Memory& memory, u32 ft, Base base, s32 offset) {
     const u32 aligned = resolveEa(cpu, base, offset) & ~15u;
-    memory.write64(aligned, vu0.vf[ft].lo);
-    memory.write64(aligned + 8, vu0.vf[ft].hi);
+    const Reg128 value = vu0.takeVf(ft);
+    memory.write64(aligned, value.lo);
+    memory.write64(aligned + 8, value.hi);
 }
 
 template <typename Base>

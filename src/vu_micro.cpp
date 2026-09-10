@@ -12,8 +12,8 @@
 namespace uee {
 namespace {
 constexpr u32 kOne = 0x3F800000u;
-constexpr u32 kSine[5] = {0x3F800000u, 0xBE2AAAA5u, 0x3C08873Fu, 0xB94FB21Fu, 0x362E9C14u};
-constexpr u32 kArcTangent[8] = {0x3F7FFFF2u, 0xBEAAA61Cu, 0x3E4C40A6u, 0xBE0E6C63u,
+constexpr u32 kSine[5] = {0x3F800000u, 0xBE2AAAA4u, 0x3C08873Eu, 0xB94FB21Fu, 0x362E9C14u};
+constexpr u32 kArcTangent[8] = {0x3F7FFFF5u, 0xBEAAA61Cu, 0x3E4C40A6u, 0xBE0E6C63u,
                                0x3DC577DFu, 0xBD6501C4u, 0x3CB31652u, 0xBB84D7E7u};
 constexpr u32 kQuarterTurn = 0x3F490FDAu;
 constexpr u32 kExponential[6] = {0x3E7FFFA8u, 0x3D0007F4u, 0x3B29D3FFu,
@@ -31,19 +31,19 @@ inline u32 accumulate(u32 accumulator, u32 a, u32 b) {
     return single::multiplyAdd(accumulator, a, b, false).bits;
 }
 
-inline u32 divide(u32 a, u32 b) {
+inline u32 efuDivide(u32 a, u32 b) {
     if (single::widen(b) == 0.0) {
         return ((a ^ b) & single::kSignMask) | single::kLargest;
     }
     return single::div(a, b).bits;
 }
 
-inline u32 root(u32 a) {
+inline u32 efuRoot(u32 a) {
     return single::sqrt(a).bits;
 }
 
-inline u32 inverseRoot(u32 a, u32 b) {
-    return divide(a, root(b));
+inline u32 efuInverseRoot(u32 a, u32 b) {
+    return efuDivide(a, efuRoot(b));
 }
 
 inline u32 sumOfSquares(u32 x, u32 y, u32 z) {
@@ -80,7 +80,7 @@ inline u32 arcTangentOfRatio(u32 x) {
         accumulator = accumulate(accumulator, odd, kArcTangent[i]);
         odd = next;
     }
-    accumulator = accumulate(accumulator, kOne, kQuarterTurn);
+    accumulator = single::add(accumulator, kQuarterTurn).bits;
     return accumulate(accumulator, odd, kArcTangent[7]);
 }
 
@@ -90,7 +90,7 @@ inline u32 arcTangent(u32 numerator, u32 denominator) {
     if ((bottom & single::kMagnitudeMask) == 0) {
         return ((top ^ bottom) & single::kSignMask) | kOverflowedRightAngle;
     }
-    return arcTangentOfRatio(divide(top, bottom));
+    return arcTangentOfRatio(efuDivide(top, bottom));
 }
 
 inline u32 exponential(u32 x) {
@@ -105,7 +105,7 @@ inline u32 exponential(u32 x) {
     u32 value = accumulate(accumulator, power, kExponential[5]);
     value = multiply(value, value);
     value = multiply(value, value);
-    return divide(kOne, value);
+    return efuDivide(kOne, value);
 }
 
 
@@ -117,6 +117,12 @@ constexpr bool isRegisterForm(u32 code) {
 }
 
 constexpr u32 destOf(u32 code) { return (code >> 21) & 0xFu; }
+
+// The status ops carry a twelve bit immediate with its top bit ten places up
+// from the rest.
+constexpr u32 statusImmediate(u32 code) {
+    return (code & 0x7FFu) | ((code >> 10) & 0x800u);
+}
 constexpr u32 ftOf(u32 code) { return (code >> 16) & 0x1Fu; }
 constexpr u32 fsOf(u32 code) { return (code >> 11) & 0x1Fu; }
 constexpr u32 fdOf(u32 code) { return (code >> 6) & 0x1Fu; }
@@ -226,6 +232,41 @@ void VuMicro::executeUpper(u32 code) {
     }
 
     switch (((code >> 6) & 0x1Fu) << 6 | (code & 0x3Fu)) {
+        case 0x03C: vadda(mState, VuSource::X, dest, fs, ft); return;
+        case 0x03D: vadda(mState, VuSource::Y, dest, fs, ft); return;
+        case 0x03E: vadda(mState, VuSource::Z, dest, fs, ft); return;
+        case 0x03F: vadda(mState, VuSource::W, dest, fs, ft); return;
+        case 0x07C: vsuba(mState, VuSource::X, dest, fs, ft); return;
+        case 0x07D: vsuba(mState, VuSource::Y, dest, fs, ft); return;
+        case 0x07E: vsuba(mState, VuSource::Z, dest, fs, ft); return;
+        case 0x07F: vsuba(mState, VuSource::W, dest, fs, ft); return;
+        case 0x0BC: vmadda(mState, VuSource::X, dest, fs, ft); return;
+        case 0x0BD: vmadda(mState, VuSource::Y, dest, fs, ft); return;
+        case 0x0BE: vmadda(mState, VuSource::Z, dest, fs, ft); return;
+        case 0x0BF: vmadda(mState, VuSource::W, dest, fs, ft); return;
+        case 0x0FC: vmsuba(mState, VuSource::X, dest, fs, ft); return;
+        case 0x0FD: vmsuba(mState, VuSource::Y, dest, fs, ft); return;
+        case 0x0FE: vmsuba(mState, VuSource::Z, dest, fs, ft); return;
+        case 0x0FF: vmsuba(mState, VuSource::W, dest, fs, ft); return;
+        case 0x1BC: vmula(mState, VuSource::X, dest, fs, ft); return;
+        case 0x1BD: vmula(mState, VuSource::Y, dest, fs, ft); return;
+        case 0x1BE: vmula(mState, VuSource::Z, dest, fs, ft); return;
+        case 0x1BF: vmula(mState, VuSource::W, dest, fs, ft); return;
+        case 0x1FC: vmula(mState, VuSource::Q, dest, fs, ft); return;
+        case 0x1FE: vmula(mState, VuSource::I, dest, fs, ft); return;
+        case 0x23C: vadda(mState, VuSource::Q, dest, fs, ft); return;
+        case 0x23D: vmadda(mState, VuSource::Q, dest, fs, ft); return;
+        case 0x23E: vadda(mState, VuSource::I, dest, fs, ft); return;
+        case 0x23F: vmadda(mState, VuSource::I, dest, fs, ft); return;
+        case 0x27C: vsuba(mState, VuSource::Q, dest, fs, ft); return;
+        case 0x27D: vmsuba(mState, VuSource::Q, dest, fs, ft); return;
+        case 0x27E: vsuba(mState, VuSource::I, dest, fs, ft); return;
+        case 0x27F: vmsuba(mState, VuSource::I, dest, fs, ft); return;
+        case 0x2BC: vadda(mState, VuSource::Vt, dest, fs, ft); return;
+        case 0x2BD: vmadda(mState, VuSource::Vt, dest, fs, ft); return;
+        case 0x2BE: vmula(mState, VuSource::Vt, dest, fs, ft); return;
+        case 0x2FC: vsuba(mState, VuSource::Vt, dest, fs, ft); return;
+        case 0x2FD: vmsuba(mState, VuSource::Vt, dest, fs, ft); return;
         case 0x13C: vitof(mState, dest, ft, fs, 0); return;
         case 0x13D: vitof(mState, dest, ft, fs, 4); return;
         case 0x13E: vitof(mState, dest, ft, fs, 12); return;
@@ -276,32 +317,31 @@ u32 VuMicro::operandsReadyAt(u32 upper, u32 lower) const {
     }
 }
 
+// The instruction that set a flag keeps moving while the one waiting on it
+// stalls, so the clip flags land after the same number of cycles either way.
 void VuMicro::stallUntil(u32 cycle) {
     while (mCycle < cycle) {
-        advanceQuotients();
+        advancePipelines();
+        mState.vi[Vu::kClip] = mClipDelayLine[0];
+        for (u32 i = 0; i + 1 < kClipDelay; ++i) {
+            mClipDelayLine[i] = mClipDelayLine[i + 1];
+        }
+        mClipDelayLine[kClipDelay - 1] = mState.clip;
         ++mCycle;
     }
 }
 
-// A divide issued while the unit is still busy stalls until it frees, so the
-// result already in flight lands before this one even starts counting.
-void VuMicro::issueQuotient(u32 value, u32 latency) {
-    settleQuotients();
-    mPendingQuotient = value;
-    mQuotientDelay = latency;
+// The unit keeps working after the program stops, so the result lands whether
+// or not anything is left to read it.
+void VuMicro::settlePipelines() {
+    mState.settleFlags();
+    mQuotient.settle(mState.vi[Vu::kQ]);
+    mFunction.settle(mState.vi[Vu::kP]);
 }
 
-void VuMicro::advanceQuotients() {
-    if (mQuotientDelay != 0 && --mQuotientDelay == 0) {
-        mState.vi[Vu::kQ] = mPendingQuotient;
-    }
-}
-
-void VuMicro::settleQuotients() {
-    if (mQuotientDelay != 0) {
-        mState.vi[Vu::kQ] = mPendingQuotient;
-        mQuotientDelay = 0;
-    }
+void VuMicro::advancePipelines() {
+    mQuotient.advance(mState.vi[Vu::kQ]);
+    mFunction.advance(mState.vi[Vu::kP]);
 }
 
 u32 VuMicro::elementaryFunction(u32 wide, u32 code, u32 vs) {
@@ -313,15 +353,15 @@ u32 VuMicro::elementaryFunction(u32 wide, u32 code, u32 vs) {
 
     switch (wide) {
         case lower::kEsadd: return square;
-        case lower::kErsadd: return divide(kOne, square);
-        case lower::kEleng: return root(square);
-        case lower::kErleng: return inverseRoot(kOne, square);
+        case lower::kErsadd: return efuDivide(kOne, square);
+        case lower::kEleng: return efuRoot(square);
+        case lower::kErleng: return efuInverseRoot(kOne, square);
         case lower::kEatanxy: return arcTangent(y, x);
         case lower::kEatanxz: return arcTangent(z, x);
         case lower::kEsum: return sum(x, y, z, w);
-        case lower::kEsqrt: return root(scalar);
-        case lower::kErsqrt: return inverseRoot(kOne, scalar);
-        case lower::kErcpr: return divide(kOne, scalar);
+        case lower::kEsqrt: return efuRoot(scalar);
+        case lower::kErsqrt: return efuInverseRoot(kOne, scalar);
+        case lower::kErcpr: return efuDivide(kOne, scalar);
         case lower::kEsin: return sine(scalar);
         case lower::kEatan: return arcTangent(scalar, kOne);
         case lower::kEexp: return exponential(scalar);
@@ -329,22 +369,43 @@ u32 VuMicro::elementaryFunction(u32 wide, u32 code, u32 vs) {
     }
 }
 
+// How long each function takes to reach the result register, which a program
+// has to leave between the op and the read.
+u32 VuMicro::functionLatency(u32 wide) {
+    switch (wide) {
+        case lower::kEsadd: return 11;
+        case lower::kEsum: return 12;
+        case lower::kErcpr: return 12;
+        case lower::kEsqrt: return 12;
+        case lower::kErsadd: return 18;
+        case lower::kEleng: return 18;
+        case lower::kErsqrt: return 18;
+        case lower::kErleng: return 24;
+        case lower::kEsin: return 29;
+        case lower::kEexp: return 44;
+        default: return 54;
+    }
+}
+
 u32 VuMicro::quotientOf(u32 code, u32 vs, u32 vt) {
-    Vu scratch = mState;
-    vdiv(scratch, vs, (code >> 21) & 3u, vt, (code >> 23) & 3u);
-    return scratch.vi[Vu::kQ];
+    return takeQuotient(divide(sourceLane(code, vs), targetLane(code, vt)));
 }
 
 u32 VuMicro::rootOf(u32 code, u32 vt) {
-    Vu scratch = mState;
-    vsqrt(scratch, vt, (code >> 23) & 3u);
-    return scratch.vi[Vu::kQ];
+    return takeQuotient(root(targetLane(code, vt)));
 }
 
 u32 VuMicro::inverseRootOf(u32 code, u32 vs, u32 vt) {
-    Vu scratch = mState;
-    vrsqrt(scratch, vs, (code >> 21) & 3u, vt, (code >> 23) & 3u);
-    return scratch.vi[Vu::kQ];
+    return takeQuotient(inverseRoot(sourceLane(code, vs), targetLane(code, vt)));
+}
+
+u32 VuMicro::takeQuotient(Vu::Quotient q) {
+    mState.setDivideFlags(q.invalid, q.byZero);
+    return q.value;
+}
+
+u32 VuMicro::targetLane(u32 code, u32 vf) const {
+    return mState.readVf(vf).word(static_cast<s32>((code >> 23) & 3u));
 }
 
 u32 VuMicro::sourceLane(u32 code, u32 vf) const {
@@ -357,16 +418,43 @@ void VuMicro::advanceRandom() {
     value = ((value << 1) | bit) & 0x7FFFFFu;
 }
 
+// The first unit's four kilobytes repeat over the sixteen it decodes, and a
+// pointer past the end of that reads nothing at all. The second unit fills its
+// decode, so every pointer lands in memory and wraps there.
+bool isAddressable(u32 unit, u32 quadword) {
+    constexpr u32 kDecodedQuadwords = 0x400;
+    if (unit != 0) {
+        return true;
+    }
+    return static_cast<s16>(quadword) >= 0 &&
+           (quadword & 0xFFFFu) < kDecodedQuadwords;
+}
+
 void VuMicro::loadQuadword(u32 dest, u32 vf, u32 quadword) {
+    if (!isAddressable(mUnit, quadword)) {
+        const u32 zero[4]{};
+        mState.writeVf(vf, dest, zero);
+        return;
+    }
     const u32 address = dataBase() + (quadword * 16u) % dataSize();
     u32 lanes[4];
     for (s32 i = 0; i < 4; ++i) {
         lanes[i] = mMemory.read32(address + 4u * static_cast<u32>(i));
     }
     mState.writeVf(vf, dest, lanes);
+    if (mUnit == 0) {
+        for (s32 i = 0; i < 4; ++i) {
+            if (Vu::writes(dest, i)) {
+                mMemory.keepVuWindowWord(lanes[i]);
+            }
+        }
+    }
 }
 
 void VuMicro::storeQuadword(u32 dest, u32 vf, u32 quadword) {
+    if (!isAddressable(mUnit, quadword)) {
+        return;
+    }
     const u32 address = dataBase() + (quadword * 16u) % dataSize();
     const Reg128 value = mState.readVf(vf);
     for (s32 i = 0; i < 4; ++i) {
@@ -424,9 +512,13 @@ void VuMicro::executeLower(u32 code) {
                     advanceRandom();
                     [[fallthrough]];
                 case lower::kRget: vrget(mState, dest, ft); return;
-                case lower::kMfp: vmfp(mState, dest, ft); return;
-                case lower::kWaitp:
+                case lower::kMfp:
+                    if (mUnit == 0) {
+                        mState.vi[Vu::kP] = mMemory.getVuWindowWord();
+                    }
+                    vmfp(mState, dest, ft);
                     return;
+                case lower::kWaitp: mFunction.settle(mState.vi[Vu::kP]); return;
                 case lower::kXgkick: kickToGif(mState.readVi(fs)); return;
                 case lower::kXtop: mState.writeVi(ft, readInterfaceRegister(kTop)); return;
                 case lower::kXitop: mState.writeVi(ft, readInterfaceRegister(kItop)); return;
@@ -443,18 +535,26 @@ void VuMicro::executeLower(u32 code) {
                 case lower::kEsin:
                 case lower::kEatan:
                 case lower::kEexp:
-                    mState.vi[Vu::kP] = elementaryFunction(wide, code, fs);
+                    // The first unit has no elementary function unit, so the
+                    // instruction that names one does nothing there.
+                    if (mUnit == 1) {
+                        mFunction.issue(mState.vi[Vu::kP],
+                                        elementaryFunction(wide, code, fs),
+                                        functionLatency(wide));
+                    }
                     return;
                 case lower::kDiv:
-                    issueQuotient(quotientOf(code, fs, ft), kQuotientLatency);
+                    mQuotient.issue(mState.vi[Vu::kQ], quotientOf(code, fs, ft),
+                                    kQuotientLatency);
                     return;
                 case lower::kSqrt:
-                    issueQuotient(rootOf(code, ft), kQuotientLatency);
+                    mQuotient.issue(mState.vi[Vu::kQ], rootOf(code, ft), kQuotientLatency);
                     return;
                 case lower::kRsqrt:
-                    issueQuotient(inverseRootOf(code, fs, ft), kRootLatency);
+                    mQuotient.issue(mState.vi[Vu::kQ], inverseRootOf(code, fs, ft),
+                                    kRootLatency);
                     return;
-                case lower::kWaitq: settleQuotients(); return;
+                case lower::kWaitq: mQuotient.settle(mState.vi[Vu::kQ]); return;
                 case lower::kIlwr:
                     vilwr(mState, mMemory, dest, ft, fs, dataBase(), dataSize());
                     return;
@@ -519,25 +619,27 @@ void VuMicro::executeLower(u32 code) {
             mState.writeVi(1, mState.vi[Vu::kClip] == immediate24 ? 1u : 0u);
             return;
         case lower::kFsand:
-            mState.writeVi(ft, mState.vi[Vu::kStatus] & (code & 0xFFFu));
+            mState.writeVi(ft, mState.readSeenStatus() & statusImmediate(code));
             return;
         case lower::kFsor:
-            mState.writeVi(ft, mState.vi[Vu::kStatus] | (code & 0xFFFu));
+            mState.writeVi(ft, mState.readSeenStatus() | statusImmediate(code));
             return;
         case lower::kFsset:
-            mState.vi[Vu::kStatus] = code & 0xFFFu;
+            // The low bits are a view of the flag register, so a write reaches
+            // only the sticky copies, the same as ctc2.
+            mState.writeControl(Vu::kStatus, statusImmediate(code));
             return;
         case lower::kFseq:
-            mState.writeVi(ft, mState.vi[Vu::kStatus] == (code & 0xFFFu) ? 1u : 0u);
+            mState.writeVi(ft, mState.readSeenStatus() == statusImmediate(code) ? 1u : 0u);
             return;
         case lower::kFmand:
-            mState.writeVi(ft, mState.vi[Vu::kMac] & mState.readVi(fs));
+            mState.writeVi(ft, mState.readSeenMac() & mState.readVi(fs));
             return;
         case lower::kFmor:
-            mState.writeVi(ft, mState.vi[Vu::kMac] | mState.readVi(fs));
+            mState.writeVi(ft, mState.readSeenMac() | mState.readVi(fs));
             return;
         case lower::kFmeq:
-            mState.writeVi(ft, mState.vi[Vu::kMac] == mState.readVi(fs) ? 1u : 0u);
+            mState.writeVi(ft, mState.readSeenMac() == mState.readVi(fs) ? 1u : 0u);
             return;
         case lower::kIaddiu:
             mState.writeVi(ft, mState.readVi(fs) + immediate15(code));
@@ -546,14 +648,10 @@ void VuMicro::executeLower(u32 code) {
             mState.writeVi(ft, mState.readVi(fs) - immediate15(code));
             return;
         case lower::kIlw:
-            mState.writeVi(ft, mMemory.read32(dataBase() +
-                                              ((mState.readVi(fs) * 16u + (code & 0x7FFu) * 16u) %
-                                               dataSize())));
+            vilwr(mState, mMemory, destOf(code), ft, fs, dataBase(), dataSize(), offset);
             return;
         case lower::kIsw:
-            mMemory.write32(dataBase() + ((mState.readVi(fs) * 16u + (code & 0x7FFu) * 16u) %
-                                          dataSize()),
-                            mState.readVi(ft));
+            viswr(mState, mMemory, destOf(code), ft, fs, dataBase(), dataSize(), offset);
             return;
         case lower::kB: branchTo(next + static_cast<u32>(offset)); return;
         case lower::kBal:
@@ -601,28 +699,32 @@ void VuMicro::executeLower(u32 code) {
     }
 }
 
-// The end bit stops the program two instructions later, so the pair that
-// carries it and the pair behind it still run.
-u32 VuMicro::run(u32 start) {
+// The end bit stops the program one instruction later, so the pair that carries
+// it and the one behind it still run.
+VuMicro::Outcome VuMicro::run(u32 start) {
     mProgramCounter = start;
     mBranching = false;
     mEnding = false;
     for (u32& pending : mClipDelayLine) {
         pending = mState.clip;
     }
-    mQuotientDelay = 0;
+    mQuotient = {};
+    mFunction = {};
     mCycle = 0;
     for (u32& ready : mWriteReady) {
         ready = 0;
     }
 
-    u32 remaining = 2;
+    u32 remaining = 1;
     for (u32 steps = 0; steps < kRunawayStep; ++steps) {
         const u32 address = instructionBase() + (mProgramCounter % instructionCount()) * 8;
         const u32 lower = mMemory.read32(address);
         const u32 upper = mMemory.read32(address + 4);
 
         stallUntil(operandsReadyAt(upper, lower));
+
+        const u32 priorStatus = mState.vi[Vu::kStatus];
+        const u32 priorMac = mState.vi[Vu::kMac];
 
         const bool taken = mBranching;
         const u32 target = mBranchTarget;
@@ -633,11 +735,15 @@ u32 VuMicro::run(u32 start) {
             mClipDelayLine[i] = mClipDelayLine[i + 1];
         }
 
-        // A wait is a stall, so the quotient it waits for is already there for
-        // the vector op paired with it.
-        if (isRegisterForm(lower) &&
-            (((lower >> 6) & 0x1Fu) << 6 | (lower & 0x3Fu)) == lower::kWaitq) {
-            settleQuotients();
+        // A wait is a stall, so the result it waits for is already there for the
+        // vector op paired with it.
+        if (isRegisterForm(lower)) {
+            const u32 wide = ((lower >> 6) & 0x1Fu) << 6 | (lower & 0x3Fu);
+            if (wide == lower::kWaitq) {
+                mQuotient.settle(mState.vi[Vu::kQ]);
+            } else if (wide == lower::kWaitp) {
+                mFunction.settle(mState.vi[Vu::kP]);
+            }
         }
 
         if ((upper & kEndBit) != 0) {
@@ -654,22 +760,32 @@ u32 VuMicro::run(u32 start) {
         }
 
         mClipDelayLine[kClipDelay - 1] = mState.clip;
-        advanceQuotients();
+        advancePipelines();
+        mState.advanceFlags();
+        if (mState.vi[Vu::kStatus] != priorStatus || mState.vi[Vu::kMac] != priorMac) {
+            mState.stageFlags(priorStatus & Vu::kStickyMask);
+        }
         ++mCycle;
 
         if (mEnding && remaining-- == 0) {
             // The pipeline has drained by the time the program stops, so the
             // register a guest reads afterwards holds the final result.
             mState.vi[Vu::kClip] = mState.clip;
-            return mProgramCounter;
+            settlePipelines();
+            // The counter names where the program would have gone next, and
+            // wraps within the instruction memory like a fetch does.
+            return {(mProgramCounter + 1) % instructionCount(), true};
         }
         mProgramCounter = taken ? target : mProgramCounter + 1;
     }
-    return mProgramCounter;
+    settlePipelines();
+    return {mProgramCounter, false};
 }
 
-void runMicroProgram(Vu& state, Memory& memory, Gif* gif, u32 unit, u32 start) {
-    state.vi[Vu::kTpc] = VuMicro(state, memory, unit, gif).run(start);
+bool runMicroProgram(Vu& state, Memory& memory, Gif* gif, u32 unit, u32 start) {
+    const VuMicro::Outcome outcome = VuMicro(state, memory, unit, gif).run(start);
+    state.vi[Vu::kTpc] = outcome.counter;
+    return outcome.ended;
 }
 
 }  // namespace uee

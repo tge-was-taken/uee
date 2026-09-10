@@ -231,17 +231,26 @@ void checkTimerRegisterWindow() {
 
 void checkInterruptMasksToggle() {
     uee::Interrupts interrupts;
-    // INTC_MASK is write-one-to-toggle, so the same write turns a cause off.
-    interrupts.write(uee::kIntcMask, 1u << 2);
-    check(interrupts.read(uee::kIntcMask).value_or(0) == (1u << 2), "the mask bit sets");
-    interrupts.write(uee::kIntcMask, 1u << 2);
-    checkEqual<u32>(interrupts.read(uee::kIntcMask).value_or(0), 0u, "and toggles back off");
+    // The rom leaves two causes unmasked and the display asserting two more, so
+    // these move a cause neither of those touches.
+    constexpr u32 cause = 6;
+    constexpr u32 bit = 1u << cause;
+    const u32 initial = interrupts.read(uee::kIntcMask).value_or(0);
 
-    interrupts.write(uee::kIntcMask, 1u << 2);
+    // INTC_MASK is write-one-to-toggle, so the same write turns a cause off.
+    interrupts.write(uee::kIntcMask, bit);
+    checkEqual<u32>(interrupts.read(uee::kIntcMask).value_or(0), initial | bit,
+                    "the mask bit sets");
+    interrupts.write(uee::kIntcMask, bit);
+    checkEqual<u32>(interrupts.read(uee::kIntcMask).value_or(0), initial,
+                    "and toggles back off");
+
+    interrupts.write(uee::kIntcMask, bit);
     check(!interrupts.pendingIntc().has_value(), "an unmasked cause alone is not pending");
-    interrupts.raiseIntc(2);
-    checkEqual<u32>(interrupts.pendingIntc().value_or(99), 2u, "raising it makes it pending");
-    interrupts.acknowledgeIntc(2);
+    interrupts.raiseIntc(cause);
+    checkEqual<u32>(interrupts.pendingIntc().value_or(99), cause,
+                    "raising it makes it pending");
+    interrupts.acknowledgeIntc(cause);
     check(!interrupts.pendingIntc().has_value(), "acknowledging clears it");
 }
 

@@ -6,7 +6,15 @@
 namespace uee {
 
 bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
+    vu0.beginMacro();
     const u32 dest = insn.dest();
+
+    // The three that fill the quotient register hand it over late.
+    const auto delayed = [&vu0](auto&& run) {
+        const u32 previous = vu0.vi[Vu::kQ];
+        run();
+        vu0.delayQuotient(previous);
+    };
 
     switch (op) {
     case Op::vmove: vmove(vu0, dest, insn.vt(), insn.vs()); break;
@@ -21,9 +29,8 @@ bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
     case Op::vftoi12: vftoi(vu0, dest, insn.vt(), insn.vs(), 12); break;
     case Op::vftoi15: vftoi(vu0, dest, insn.vt(), insn.vs(), 15); break;
 
-    case Op::vnop:
-    case Op::vwaitq:
-        break;
+    case Op::vnop: break;
+    case Op::vwaitq: vu0.settleQuotient(); break;
 
     case Op::viadd: viadd(vu0, insn.vid(), insn.vis(), insn.vit()); break;
     case Op::visub: visub(vu0, insn.vid(), insn.vis(), insn.vit()); break;
@@ -39,8 +46,19 @@ bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
         break;
     case Op::vsqi: vsqi(vu0, memory, dest, insn.vs(), insn.vit()); break;
 
-    case Op::vsqrt: vsqrt(vu0, insn.vt(), insn.ftf()); break;
-    case Op::vrsqrt: vrsqrt(vu0, insn.vs(), insn.fsf(), insn.vt(), insn.ftf()); break;
+    case Op::vclipw:
+        vclip(vu0, insn.vs(), insn.vt());
+        // Macro mode reads the running value straight, where a microprogram
+        // takes it from a delay line.
+        vu0.vi[Vu::kClip] = vu0.clip;
+        break;
+    case Op::vdiv:
+        delayed([&] { vdiv(vu0, insn.vs(), insn.fsf(), insn.vt(), insn.ftf()); });
+        break;
+    case Op::vsqrt: delayed([&] { vsqrt(vu0, insn.vt(), insn.ftf()); }); break;
+    case Op::vrsqrt:
+        delayed([&] { vrsqrt(vu0, insn.vs(), insn.fsf(), insn.vt(), insn.ftf()); });
+        break;
 
     case Op::vcallms: vcallms(vu0, memory, insn.imm15()); break;
     case Op::vcallmsr: vcallmsr(vu0, memory); break;
@@ -57,6 +75,7 @@ bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
         break;
     }
     }
+    vu0.endMacro();
     return true;
 }
 

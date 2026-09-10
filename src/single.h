@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compiler.h"
 #include "types.h"
 
 #include <bit>
@@ -17,7 +18,7 @@ constexpr u32 kSmallestNormal = 0x00800000u;
 constexpr u32 kLargest = 0x7FFFFFFFu;
 // The VU saturates one exponent lower than the FPU: it treats exponent 255 as
 // out of range where the FPU treats it as an ordinary exponent.
-constexpr u32 kVuLargest = 0x7F7FFFFFu;
+constexpr u32 kVuLargest = 0x7FFFFFFFu;
 
 inline u32 flushDenormal(u32 bits) {
     const u32 magnitude = bits & kMagnitudeMask;
@@ -59,6 +60,13 @@ inline s32 orderKey(u32 bits) {
                                : static_cast<s32>(clean);
 }
 
+// The vector unit's max and mini order the patterns as they stand, keeping the
+// two zeros apart and denormals intact.
+inline s32 vuOrderKey(u32 bits) {
+    return (bits & kSignMask) ? ~static_cast<s32>(bits & kMagnitudeMask)
+                              : static_cast<s32>(bits);
+}
+
 // max.s and min.s do see the sign of a zero, so they need an order that keeps
 // the two zeros apart.
 inline s32 signedOrderKey(u32 bits) {
@@ -80,6 +88,19 @@ inline Wide addExact(f64 a, f64 b) {
     const f64 bPart = high - a;
     const f64 aPart = high - bPart;
     return {high, (a - aPart) + (b - bPart)};
+}
+
+struct Parts {
+    u32 sign;
+    s32 exponent;
+    u32 significand;  // 24 bits with the implicit one, zero for a zero
+};
+
+inline Parts split(u32 bits) {
+    const u32 clean = flushDenormal(bits);
+    const u32 exponent = (clean >> 23) & 0xFFu;
+    return {clean & kSignMask, static_cast<s32>(exponent),
+            exponent == 0 ? 0u : (0x800000u | (clean & 0x7FFFFFu))};
 }
 
 enum class Rounding {
@@ -108,15 +129,27 @@ inline Rounded join(u32 sign, s32 exponent, u32 significand) {
     return {sign | (static_cast<u32>(exponent) << 23) | (significand & 0x7FFFFFu), false, false};
 }
 
+inline Rounded join(Parts value) {
+    return join(value.sign, value.exponent, value.significand);
+}
+
+inline f64 widenParts(Parts value) {
+    if (value.significand == 0) {
+        return (value.sign ? -1.0 : 1.0) * 0.0;
+    }
+    return (value.sign ? -1.0 : 1.0) * static_cast<f64>(value.significand) *
+           twoTo(value.exponent - 150);
+}
+
 // The rounding is fixed at every call, so each one gets the arithmetic it
 // needs rather than a branch between two.
 template <Rounding rounding>
-inline Rounded pack(Wide exact) {
+inline Parts packParts(Wide exact) {
     const bool negative = std::signbit(exact.high);
     const u32 sign = negative ? kSignMask : 0u;
     const f64 magnitude = std::fabs(exact.high);
     if (magnitude == 0.0) {
-        return {sign, false, false};
+        return {sign, 0, 0};
     }
 
     s32 exponent = binaryExponent(magnitude);
@@ -139,7 +172,12 @@ inline Rounded pack(Wide exact) {
         exponent -= 1;
     }
 
-    return join(sign, exponent + 126, static_cast<u32>(significand));
+    return {sign, exponent + 126, static_cast<u32>(significand)};
+}
+
+template <Rounding rounding>
+inline Rounded pack(Wide exact) {
+    return join(packParts<rounding>(exact));
 }
 
 inline Rounded truncate(Wide exact) {
@@ -150,29 +188,16 @@ inline Rounded truncate(f64 exact) {
     return pack<Rounding::Truncate>(Wide{exact, 0});
 }
 
-struct Parts {
-    u32 sign;
-    s32 exponent;
-    u32 significand;  // 24 bits with the implicit one, zero for a zero
-};
-
-inline Parts split(u32 bits) {
-    const u32 clean = flushDenormal(bits);
-    const u32 exponent = (clean >> 23) & 0xFFu;
-    return {clean & kSignMask, static_cast<s32>(exponent),
-            exponent == 0 ? 0u : (0x800000u | (clean & 0x7FFFFFu))};
-}
-
 // The adder holds no bits below the significand, so alignment discards them.
-inline Rounded addParts(Parts a, Parts b) {
+inline Parts addToParts(Parts a, Parts b) {
     if (a.significand == 0 && b.significand == 0) {
-        return {a.sign & b.sign, false, false};
+        return {a.sign & b.sign, 0, 0};
     }
     if (a.significand == 0) {
-        return join(b.sign, b.exponent, b.significand);
+        return b;
     }
     if (b.significand == 0) {
-        return join(a.sign, a.exponent, a.significand);
+        return a;
     }
 
     if (a.exponent < b.exponent) {
@@ -181,50 +206,113 @@ inline Rounded addParts(Parts a, Parts b) {
         b = swapped;
     }
 
+    // One bit below the significand is kept through the alignment, which is what
+    // lets a subtraction borrow from an operand that would otherwise shift away
+    // entirely.
     const s32 shift = a.exponent - b.exponent;
-    const u32 aligned = shift >= 24 ? 0u : (b.significand >> shift);
+    const u32 wide = a.significand << 1;
+    const u32 aligned = shift >= 25 ? 0u : ((b.significand << 1) >> shift);
 
     s32 exponent = a.exponent;
     u32 sign = a.sign;
     u32 sum = 0;
 
     if (a.sign == b.sign) {
-        sum = a.significand + aligned;
-        if (sum & 0x1000000u) {
+        sum = wide + aligned;
+        if (sum & 0x2000000u) {
             sum >>= 1;
             ++exponent;
         }
-    } else if (a.significand >= aligned) {
-        sum = a.significand - aligned;
+    } else if (wide >= aligned) {
+        sum = wide - aligned;
     } else {
-        sum = aligned - a.significand;
+        sum = aligned - wide;
         sign = b.sign;
     }
 
     if (sum == 0) {
-        return {};
+        return {0, 0, 0};
     }
-    // Renormalising: the sum is at most 24 bits, so where its top bit sits says
-    // how far it has to travel in one go.
-    const s32 normalise = std::countl_zero(sum) - 8;
-    return join(sign, exponent - normalise, sum << normalise);
+    // Renormalising: where the top bit sits says how far the sum has to travel,
+    // and the guard bit is dropped rather than rounded.
+    const s32 normalise = std::countl_zero(sum) - 7;
+    return {sign, exponent - normalise, (sum << normalise) >> 1};
+}
+
+inline Rounded addParts(Parts a, Parts b) {
+    return join(addToParts(a, b));
+}
+
+// The booth tree skips a few of the low adds, so bit 15 of the product can
+// disagree with the exact one and borrow upward. The recode reads the second
+// operand, which is why the multiply is not commutative.
+//
+// From the reverse engineered EE multiplier in PCSX2 PR #12001, PS2Float.cpp.
+struct BoothDigit {
+    u32 data;
+    u32 negate;
+};
+
+inline BoothDigit boothDigit(u32 a, u32 b, u32 place) {
+    const u32 test = (place != 0 ? b >> (place * 2 - 1) : b << 1) & 7u;
+    u32 value = a << (place * 2);
+    value += (test == 3 || test == 4) ? value : 0u;
+    const u32 negate = (test >= 4 && test <= 6) ? ~0u : 0u;
+    const u32 place1 = 1u << (place * 2);
+    value ^= negate & -place1;
+    value &= (test >= 1 && test <= 6) ? ~0u : 0u;
+    return {value, negate & place1};
+}
+
+struct CarrySave {
+    u32 sum;
+    u32 carry;
+};
+
+inline CarrySave addThree(u32 a, u32 b, u32 c) {
+    const u32 u = a ^ b;
+    return {u ^ c, ((u & c) | (a & b)) << 1};
+}
+
+UEE_NOINLINE inline u64 boothProduct(u32 a, u32 b, u64 exact) {
+    const BoothDigit d0 = boothDigit(a, b, 0);
+    const BoothDigit d1 = boothDigit(a, b, 1);
+    const BoothDigit d2 = boothDigit(a, b, 2);
+    const BoothDigit d3 = boothDigit(a, b, 3);
+    const BoothDigit d4 = boothDigit(a, b, 4);
+    const BoothDigit d5 = boothDigit(a, b, 5);
+    const BoothDigit d6 = boothDigit(a, b, 6);
+    BoothDigit d7 = boothDigit(a, b, 7);
+
+    const CarrySave t0 = addThree(d1.data, d2.data, d3.data);
+    CarrySave t1 = addThree(d4.data & ~0x7FFu, d5.data & ~0xFFFu, d6.data);
+    t1.carry |= d6.negate | (d5.data & 0x800u);
+    d7.data |= (d5.data & 0x400u) + d5.negate;
+
+    const CarrySave t2 = addThree(d0.data, t0.sum, t0.carry);
+    const CarrySave t3 = addThree(d7.data, t1.sum, t1.carry);
+    const CarrySave t4 = addThree(t2.carry, t3.sum, t3.carry);
+    CarrySave t5 = addThree(t2.sum, t4.sum, t4.carry);
+
+    t5.carry += d7.negate;
+    const u32 low = (t5.sum & ~0x7FFFu) + (t5.carry & ~0x7FFFu);
+    return exact - ((low ^ static_cast<u32>(exact)) & 0x8000u);
 }
 
 // The unit truncates 48 bits back to 24. The exponent is left unbounded so a
 // caller can accumulate before the range check, which is what madd.s does.
-//
-// Not commutative: an all-ones second operand costs the product its low bit
-// when nothing carried.
 inline Parts mulParts(Parts a, Parts b) {
     if (a.significand == 0 || b.significand == 0) {
         return {a.sign ^ b.sign, 0, 0};
     }
-    const u64 wide = static_cast<u64>(a.significand) * b.significand;
+    const u64 exact = static_cast<u64>(a.significand) * b.significand;
+    // A borrow out of bit 15 only reaches the result when everything between is
+    // zero, so the tree is worth running for nothing else.
+    const u64 wide = (exact & 0x7FFFFFu) >= 0x8000u
+                         ? exact
+                         : boothProduct(a.significand, b.significand, exact);
     const bool carried = (wide >> 47) != 0;
-    u32 significand = static_cast<u32>(wide >> (carried ? 24 : 23));
-    if (!carried && significand == 0xFFFFFFu && b.significand == 0xFFFFFFu) {
-        significand = 0xFFFFFEu;
-    }
+    const u32 significand = static_cast<u32>(wide >> (carried ? 24 : 23));
     return {a.sign ^ b.sign, a.exponent + b.exponent - 127 + (carried ? 1 : 0), significand};
 }
 
@@ -240,7 +328,7 @@ inline Rounded sub(u32 a, u32 b) {
 
 inline Rounded mul(u32 a, u32 b) {
     const Parts product = mulParts(split(a), split(b));
-    return join(product.sign, product.exponent, product.significand);
+    return join(product);
 }
 
 // The accumulate keeps the product at its true exponent, so a product that
@@ -253,46 +341,97 @@ inline Rounded multiplyAdd(u32 acc, u32 a, u32 b, bool subtract) {
     return addParts(split(acc), product);
 }
 
-// The divider rounds to nearest where the adder truncates, and answers a zero
-// denominator with the largest pattern. Divide-by-zero has its own flag.
-inline Rounded div(u32 a, u32 b) {
-    const f64 denominator = widen(b);
-    if (denominator == 0.0) {
-        return {((a ^ b) & kSignMask) | kLargest, false, false};
+// A radix-2 non-restoring divider and rooter over a carry-save residual, 25
+// digits in {-1, 0, 1} and no rounding step: the answer lands on the floor of
+// the exact value or one above it depending on the residual's trajectory.
+//
+// From the reverse engineered EE divider in PCSX2 PR #12001, PS2Float.cpp.
+inline s32 selectDigit(CarrySave current) {
+    constexpr u32 mask = (1u << 24) - 1;
+    const s32 test = static_cast<s32>(((current.sum & ~mask) + current.carry) |
+                                      (current.sum & mask));
+    if (test >= 1 << 23) {
+        return 1;
     }
-    const f64 numerator = widen(a);
-    const f64 quotient = numerator / denominator;
-    const f64 residual = std::fma(-quotient, denominator, numerator);
-    return {pack<Rounding::Nearest>(Wide{quotient, residual / denominator}).bits, false, false};
+    if (test < static_cast<s32>(~0u << 24)) {
+        return -1;
+    }
+    return 0;
+}
+
+inline u32 storedSignificand(u32 bits) {
+    return (bits & 0x7FFFFFu) | 0x800000u;
+}
+
+inline Rounded div(u32 a, u32 b) {
+    const u32 sign = (a ^ b) & kSignMask;
+    const u32 numeratorExponent = (flushDenormal(a) >> 23) & 0xFFu;
+    const u32 denominatorExponent = (flushDenormal(b) >> 23) & 0xFFu;
+    if (denominatorExponent == 0) {
+        return {sign | kLargest, false, false};
+    }
+    if (numeratorExponent == 0) {
+        return {sign, false, false};
+    }
+
+    const u32 divisor = storedSignificand(a) << 2;
+    const u32 dividend = storedSignificand(b) << 2;
+    CarrySave current{divisor, 0};
+    u32 quotient = 0;
+    s32 digit = 1;
+    for (s32 step = 0; step < 25; ++step) {
+        quotient = (quotient << 1) + static_cast<u32>(digit);
+        const u32 addend = digit > 0 ? ~dividend : (digit < 0 ? dividend : 0u);
+        current.carry += digit > 0 ? 1u : 0u;
+        const CarrySave next = addThree(current.sum, current.carry, addend);
+        digit = selectDigit(digit != 0 ? next : current);
+        current.sum = next.sum << 1;
+        current.carry = next.carry << 1;
+    }
+
+    s32 exponent = static_cast<s32>(numeratorExponent) -
+                   static_cast<s32>(denominatorExponent) + 126;
+    if (quotient >= (1u << 24)) {
+        exponent += 1;
+        quotient >>= 1;
+    }
+    // The divider reports neither end of the range: only the two conditions its
+    // own flags name.
+    return {join(sign, exponent, quotient).bits, false, false};
 }
 
 // The unit takes the root of the magnitude; the format has no NaN to return.
 inline Rounded sqrt(u32 a) {
-    const f64 radicand = std::fabs(widen(a));
-    if (radicand == 0.0) {
+    const u32 clean = flushDenormal(a);
+    if ((clean & 0x7F800000u) == 0) {
         return {};
     }
-    const f64 root = std::sqrt(radicand);
-    const f64 residual = std::fma(-root, root, radicand);
-    return pack<Rounding::Nearest>(Wide{root, residual / (2.0 * root)});
+    u32 radicand = storedSignificand(clean) << 1;
+    if ((clean & 0x800000u) == 0) {
+        radicand <<= 1;
+    }
+    CarrySave current{radicand, 0};
+    u32 root = 0;
+    s32 digit = 1;
+    for (s32 step = 0; step < 25; ++step) {
+        const u32 trial = root + (static_cast<u32>(digit) << (24 - step));
+        root += static_cast<u32>(digit) << (25 - step);
+        const u32 addend = digit > 0 ? ~trial : (digit < 0 ? trial : 0u);
+        current.carry += digit > 0 ? 1u : 0u;
+        const CarrySave next = addThree(current.sum, current.carry, addend);
+        digit = selectDigit(digit != 0 ? next : current);
+        current.sum = next.sum << 1;
+        current.carry = next.carry << 1;
+    }
+    const u32 exponent = (((clean >> 23) & 0xFFu) + 127) >> 1;
+    return {((root >> 2) & 0x7FFFFFu) | (exponent << 23), false, false};
 }
 
 // The sign comes from the numerator alone, because the root took a magnitude.
 inline Rounded rsqrt(u32 a, u32 b) {
-    const u32 sign = a & kSignMask;
-    const f64 root = widen(sqrt(b).bits);
-    if (root == 0.0) {
-        return {sign | kLargest, false, false};
-    }
-    const f64 reciprocal = 1.0 / root;
-    const f64 reciprocalResidual = std::fma(-reciprocal, root, 1.0);
-    const u32 scale = pack<Rounding::Nearest>(Wide{reciprocal, reciprocalResidual / root}).bits;
-    const f64 factor = widen(scale);
-    const f64 numerator = std::fabs(widen(a));
-    const f64 product = numerator * factor;
-    const f64 residual = std::fma(numerator, factor, -product);
-    Rounded result = pack<Rounding::Truncate>(Wide{product, residual});
-    result.bits |= sign;
+    const u32 root = sqrt(b).bits;
+    Rounded result = div(a & kMagnitudeMask, root);
+    result.bits |= a & kSignMask;
     return result;
 }
 

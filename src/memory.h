@@ -29,9 +29,19 @@ constexpr u32 kScratchpadSize = 16 * 1024;
 constexpr u32 kVu0MicroBase = 0x11000000;
 constexpr u32 kVu0DataBase = 0x11004000;
 constexpr u32 kVu0MemorySize = 4 * 1024;
+// The bus gives each of the first unit's windows the same room as the second
+// unit's, so its smaller memory answers four times over.
+constexpr u32 kVu0Windows = 4;
 constexpr u32 kVu1MicroBase = 0x11008000;
 constexpr u32 kVu1DataBase = 0x1100C000;
 constexpr u32 kVu1MemorySize = 16 * 1024;
+constexpr u32 kVuWindowEnd = kVu1DataBase + kVu1MemorySize;
+
+// The units answer a word at a time, so a narrower write fills the rest of the
+// word with ones.
+constexpr bool isVuWindow(u32 address) {
+    return address >= kVu0MicroBase && address < kVuWindowEnd;
+}
 constexpr u32 kUncachedBase = 0x20000000;
 constexpr u32 kKernelBase = 0x80000000;
 constexpr u32 kUnmappedBase = 0xC0000000;
@@ -46,6 +56,9 @@ struct FixedAddress {
 struct Region {
     u32 base;
     std::vector<u8> bytes;
+    // A window wider than its storage repeats it, which is how the smaller
+    // unit's memory aliases across the space the bus gives it.
+    u32 repeats = 1;
 };
 
 // A default-constructed mirror folds nothing, so kseg2 upward faults.
@@ -208,6 +221,19 @@ public:
         return p != nullptr ? std::optional(load<u32>(p)) : std::nullopt;
     }
 
+    // A transfer walks addresses the guest never named, so what it reaches past
+    // the end is nothing rather than a fault the processor answers for.
+    u64 peek64(u32 address) {
+        const u8* p = locate(address, 8);
+        return p != nullptr ? load<u64>(p) : 0;
+    }
+
+    void poke64(u32 address, u64 value) {
+        if (u8* p = locate(address, 8)) {
+            storeAt(p, value);
+        }
+    }
+
     // No register window sits below main memory, so one comparison answers the
     // mirror and the register check together.
     bool inRam(u32 address) const { return address < mRamFast; }
@@ -219,8 +245,15 @@ public:
         return inside ? mScratchpadBytes + inPad : nullptr;
     }
 
+    // The first unit has no result register of its own, so a read of one gives
+    // back the last word its window carried.
+    u32 getVuWindowWord() const { return mVuWindowWord; }
+    void keepVuWindowWord(u32 value) { mVuWindowWord = value; }
+
 private:
     // Out of line: no guest reaches these often enough to pay for the room.
+    void widenToWord(u32 address, u32 value, u32 mask);
+    u32 mVuWindowWord = 0;
     UEE_COLD u8 readVirtual8(u32 address);
     UEE_COLD u16 readVirtual16(u32 address);
     UEE_COLD u32 readVirtual32(u32 address);
@@ -310,8 +343,14 @@ private:
             if (address < region.base) {
                 continue;
             }
-            const u32 offset = address - region.base;
+            u32 offset = address - region.base;
             const u32 limit = static_cast<u32>(region.bytes.size());
+            if (region.repeats != 1) {
+                if (offset >= limit * region.repeats) {
+                    continue;
+                }
+                offset &= limit - 1;
+            }
             if (offset < limit && limit - offset >= size) {
                 return region.bytes.data() + offset;
             }

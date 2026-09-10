@@ -47,6 +47,7 @@ constexpr u32 kScratchpadAddress = 0x80;
 constexpr u32 kStart = 0x100;
 constexpr u32 kModeShift = 2;
 constexpr u32 kModeMask = 0x3;
+constexpr u32 kModeBits = kModeMask << kModeShift;
 constexpr u32 kTagInterrupt = 0x80;
 
 constexpr u32 kNormalMode = 0;
@@ -121,7 +122,7 @@ void Dmac::attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, V
     mInterrupts = &interrupts;
 }
 
-std::optional<u32> Dmac::read(u32 address) const {
+std::optional<u32> Dmac::read(u32 address) {
     if (address == kSkipQuadword) {
         return mSkipQuadword;
     }
@@ -134,8 +135,18 @@ std::optional<u32> Dmac::read(u32 address) const {
             continue;
         }
         switch (offset) {
-            case kControl: return mChannels[i].control;
-            case kAddress: return mChannels[i].address;
+            // A read is what retires a finished channel, and it reports what
+            // the register held before that.
+            case kControl: {
+                const u32 control = mChannels[i].control;
+                retire(mChannels[i]);
+                return control;
+            }
+            case kAddress: {
+                const u32 address = mChannels[i].address;
+                retire(mChannels[i]);
+                return address;
+            }
             case kQuadwords: return mChannels[i].quadwords;
             case kTagAddress: return mChannels[i].tagAddress;
             case kReturn0: return mChannels[i].returnAddress[0];
@@ -149,13 +160,16 @@ std::optional<u32> Dmac::read(u32 address) const {
 
 bool Dmac::write(u32 address, u32 value) {
     if (address == kSkipQuadword) {
-        mSkipQuadword = value;
+        // A run and a gap, one byte each; the rest of the register keeps nothing.
+        mSkipQuadword = value & 0x00FF00FFu;
         return true;
     }
     if (address == dmac::kEnableWrite) {
         const bool resumed = (mEnable & dmac::kSuspended) != 0 &&
                              (value & dmac::kSuspended) == 0;
-        mEnable = value;
+        // Only the suspend bit is a guest's to set; the rest of the register
+        // reports what the machine came up with.
+        mEnable = (mEnable & ~dmac::kSuspended) | (value & dmac::kSuspended);
         if (resumed) {
             for (usize i = 0; i < dmac::kChannels; ++i) {
                 if ((mChannels[i].control & kStart) != 0) {
@@ -170,25 +184,33 @@ bool Dmac::write(u32 address, u32 value) {
         if (address < kChannelBase[i] || offset > kScratchpadAddress) {
             continue;
         }
+        // A finished transfer writes its address back before the guest's own
+        // write to the same register, not after it.
+        retire(mChannels[i]);
         switch (offset) {
             case kControl:
-                mChannels[i].control = value;
+                {
+                    const u32 mask = controlMask(i);
+                    const u32 mode = settledMode(i, (value >> kModeShift) & kModeMask);
+                    const u32 kept = (value & mask & ~kModeBits) |
+                                     (mode << kModeShift) | (value & kStart);
+                    mChannels[i].control = (mChannels[i].control & ~(mask | kStart)) | kept;
+                }
                 if ((value & kStart) != 0) {
                     log.trace("channel {} started, control {:08x}", i, value);
                     start(i);
                 }
                 return true;
-            case kAddress:
-                mChannels[i].address = (i == kFromScratchpad || i == kToScratchpad)
-                                           ? (value & ~kScratchpadBit)
-                                           : value;
+            case kAddress: mChannels[i].address = value & addressMask(i); return true;
+            case kQuadwords: mChannels[i].quadwords = value & kQuadwordCountMask; return true;
+            case kTagAddress:
+                mChannels[i].tagAddress = value & tagAddressMask(i);
                 return true;
-            case kQuadwords: mChannels[i].quadwords = value; return true;
-            case kTagAddress: mChannels[i].tagAddress = value; return true;
             case kReturn0: mChannels[i].returnAddress[0] = value; return true;
             case kReturn1: mChannels[i].returnAddress[1] = value; return true;
             case kScratchpadAddress:
-                mChannels[i].scratchpadAddress = value & kScratchpadQuadwordMask;
+                mChannels[i].scratchpadAddress =
+                    value & (isScratchpadChannel(i) ? kScratchpadQuadwordMask : 0u);
                 return true;
             default: return false;
         }
@@ -196,14 +218,84 @@ bool Dmac::write(u32 address, u32 value) {
     return false;
 }
 
+// Writing all ones and reading back is what these came from: every address is
+// quadword aligned, the bit that names the scratchpad belongs only to the
+// channels that cannot reach it in their own address, and a channel with no
+// list or no scratchpad keeps nothing.
+void Dmac::installBootChannels() {
+    mChannels[kVif0].control = 0x00000001;
+    mChannels[kGif].control = 0x00000001;
+    mChannels[kToScratchpad].control = 0x00000001;
+    mChannels[kSif0].control = 0x00000184;
+    mChannels[kSif0].address = 0x00158C00;
+    mChannels[kSif0 + 1].control = 0x00000085;
+    mChannels[kSif0 + 1].address = 0x00021B10;
+    mChannels[kSif0 + 1].tagAddress = 0x00021390;
+}
+
+bool Dmac::isScratchpadChannel(usize index) {
+    return index == kFromScratchpad || index == kToScratchpad;
+}
+
+u32 Dmac::addressMask(usize index) {
+    return isScratchpadChannel(index) ? 0x7FFFFFF0u : 0xFFFFFFF0u;
+}
+
+// Writing all ones and reading back is what these came from: each channel keeps
+// only the transfer bits it has a use for.
+u32 Dmac::controlMask(usize index) {
+    switch (index) {
+        case kVif0:
+        case kGif: return 0xFFFF00F4u | kModeBits;
+        case kVif1: return 0xFFFF00F0u | kModeBits;
+        case kFromScratchpad: return 0xFFFF0088u | kModeBits;
+        case kToScratchpad: return 0xFFFF00C8u | kModeBits;
+        default: return 0xFFFF00FEu;
+    }
+}
+
+// The fourth mode has no meaning, and each channel answers a write of it with
+// one of its own rather than keeping it.
+u32 Dmac::settledMode(usize index, u32 mode) {
+    if (mode != 3) {
+        return mode;
+    }
+    switch (index) {
+        case kVif0:
+        case kGif: return kChainMode;
+        case kFromScratchpad:
+        case kToScratchpad: return kInterleaveMode;
+        case kVif1: return kNormalMode;
+        default: return mode;
+    }
+}
+
+u32 Dmac::tagAddressMask(usize index) {
+    return index == kFromScratchpad ? 0u : 0xFFFFFFF0u;
+}
+
+void Dmac::retire(Channel& channel) {
+    if (!channel.finishing) {
+        return;
+    }
+    channel.finishing = false;
+    channel.control &= ~kStart;
+    channel.address = channel.retiredAddress;
+}
+
 void Dmac::start(usize index) {
-    if ((mEnable & dmac::kSuspended) != 0) {
+    // The scratchpad channels burst rather than wait for the arbiter, so the
+    // suspend the rest of them honour does not hold them.
+    if ((mEnable & dmac::kSuspended) != 0 && !isScratchpadChannel(index)) {
         return;
     }
     // SIF0 stays armed, which the guest tests before arming it again.
     if (index >= kSif0 && index <= kSif2) {
         if (index != kSif0) {
+            // The transfer to the iop is over as soon as it is armed, so the
+            // channel reports it the way a completed one does.
             mChannels[index].control &= ~kStart;
+            mInterrupts->raiseDmac(static_cast<u32>(index));
         }
         return;
     }
@@ -214,14 +306,24 @@ void Dmac::start(usize index) {
     } else if (mode == kInterleaveMode) {
         interleave(index);
     } else if (mode == kNormalMode) {
-        transfer(index, channel.address, channel.quadwords);
-        channel.address += channel.quadwords * kQuadwordBytes;
+        // A count of zero is the whole of the field's range rather than nothing.
+        // A count of zero is the whole of the field's range rather than nothing.
+        const u32 count = channel.quadwords == 0 ? 0x10000u : channel.quadwords;
+        channel.retiredAddress = transfer(index, channel.address, count);
         channel.quadwords = 0;
     } else {
         log.stub("dma channel {} mode {}", index, mode);
     }
 
-    channel.control &= ~kStart;
+    if (mode != kNormalMode) {
+        channel.retiredAddress = channel.address;
+    }
+    channel.finishing = true;
+    // A suspended controller never granted the transfer, so there is no
+    // running channel for the guest to catch.
+    if ((mEnable & dmac::kSuspended) != 0) {
+        retire(channel);
+    }
     if (index == kToIpu) {
         log.trace("ipu fed {} bytes", mIpu->getStream().size());
     }
@@ -235,14 +337,12 @@ void Dmac::interleave(usize index) {
     const u32 run = (mSkipQuadword >> 16) & 0xFFu;
     const u32 skip = mSkipQuadword & 0xFFu;
     if (run == 0) {
-        transfer(index, channel.address, channel.quadwords);
-        channel.address += channel.quadwords * kQuadwordBytes;
+        channel.address = transfer(index, channel.address, channel.quadwords);
         channel.quadwords = 0;
         return;
     }
     for (u32 moved = 0; channel.quadwords != 0; --channel.quadwords) {
-        transfer(index, channel.address, 1);
-        channel.address += kQuadwordBytes;
+        channel.address = transfer(index, channel.address, 1);
         if (++moved == run) {
             moved = 0;
             channel.address += skip * kQuadwordBytes;
@@ -259,7 +359,9 @@ void Dmac::sendTagCodes(usize index, u32 tagAddress) {
     mVif[index]->writeTag(mMemory->read64(tagAddress + 8));
 }
 
-void Dmac::transfer(usize index, u32 address, u32 quadwords) {
+// Answers where the address ended, which is not always where it started plus
+// the length: a ring wraps it.
+u32 Dmac::transfer(usize index, u32 address, u32 quadwords) {
     if (index == kVif0 || index == kVif1 || index == kGif) {
         if (index == kGif) {
             mGif->beginPath(kPath3);
@@ -277,7 +379,7 @@ void Dmac::transfer(usize index, u32 address, u32 quadwords) {
         if (index == kGif) {
             mGif->endPath();
         }
-        return;
+        return address + quadwords * kQuadwordBytes;
     }
     if (index == kToIpu) {
         std::vector<u8> bytes(static_cast<usize>(quadwords) * kQuadwordBytes);
@@ -286,25 +388,31 @@ void Dmac::transfer(usize index, u32 address, u32 quadwords) {
             bytes[i] = mMemory->read8(source + static_cast<u32>(i));
         }
         mIpu->receive(bytes);
-        return;
+        return address + quadwords * kQuadwordBytes;
     }
     if (index != kFromScratchpad && index != kToScratchpad) {
-        return;
+        return address + quadwords * kQuadwordBytes;
     }
     Channel& channel = mChannels[index];
-    u32 main = resolve(address);
+    // The ring size is a mask, so the address it wraps is the offset into it.
+    const u32 ringSize = mInterrupts->ringSize();
+    const u32 ringBase = mInterrupts->ringBase();
+    u32 cursor = address;
     for (u32 moved = 0; moved < quadwords; ++moved) {
+        const u32 main = resolve(cursor);
         const u32 scratchpad =
             kScratchpadWindow | (channel.scratchpadAddress & kScratchpadQuadwordMask);
         const u32 from = index == kFromScratchpad ? scratchpad : main;
         const u32 to = index == kFromScratchpad ? main : scratchpad;
         for (u32 i = 0; i < kQuadwordBytes; i += 8) {
-            mMemory->write64(to + i, mMemory->read64(from + i));
+            mMemory->poke64(to + i, mMemory->peek64(from + i));
         }
-        main += kQuadwordBytes;
+        cursor = ringSize != 0 ? ringBase + ((cursor + kQuadwordBytes) & ringSize)
+                               : cursor + kQuadwordBytes;
         channel.scratchpadAddress =
             (channel.scratchpadAddress + kQuadwordBytes) & kScratchpadQuadwordMask;
     }
+    return cursor;
 }
 
 // The tag lands in the upper half of the control register.
@@ -317,12 +425,24 @@ void Dmac::followChain(usize index) {
 
         const u32 follow = resolve(channel.tagAddress) + kQuadwordBytes;
         sendTagCodes(index, resolve(channel.tagAddress));
+
+        // The scratchpad channels have no address stack, so a tag that names
+        // one is loaded and then goes no further.
+        if (isScratchpadChannel(index) && (tag.id == kCall || tag.id == kReturn)) {
+            channel.address = follow;
+            channel.quadwords = tag.quadwords;
+            return;
+        }
+
         switch (tag.id) {
             case kReferenceAndEnd:
             case kReference:
             case kReferenceStalled:
                 transfer(index, resolve(tag.address), tag.quadwords);
-                channel.address = resolve(tag.address) + tag.quadwords * kQuadwordBytes;
+                // A tag with nothing to move never loads the address it names.
+                channel.address = tag.quadwords == 0
+                                      ? follow
+                                      : resolve(tag.address) + tag.quadwords * kQuadwordBytes;
                 channel.tagAddress = follow;
                 break;
             case kCount:

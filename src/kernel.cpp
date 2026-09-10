@@ -34,9 +34,16 @@ constexpr u32 kReturnRegister = 2;
 constexpr u32 kSyscallRegister = 3;
 
 // Status.IM2 gates INTC, IM3 the DMAC, bit 16 the master enable ei/di drive.
-constexpr u32 kStatusIntc = 1u << 12;
-constexpr u32 kStatusDmac = 1u << 13;
+constexpr u32 kStatusIntc = 1u << 10;
+constexpr u32 kStatusDmac = 1u << 11;
 constexpr u32 kStatusMasterEnable = 1u << 16;
+// The rom leaves the three coprocessors usable and the exception handler's own
+// interrupt disable armed.
+constexpr u32 kStatusCoprocessors = 0x70000000;
+constexpr u32 kStatusExceptionDisable = 1u << 17;
+// The counter has been running since power-on, so it has long since passed the
+// compare register the rom left at zero.
+constexpr u32 kCauseProbeRemains = 0x70000000 | cop0::kCounterInterrupt;
 constexpr u32 kMachinePsMode = 0x8000;
 // KERNEL: SifSetDChain @ 0x8000c8b0 answers with the SIF0 channel control it left.
 constexpr u32 kSifDChainResult = 0x184;
@@ -101,9 +108,31 @@ Kernel::Kernel(EeContext& ctx, Memory& memory, const GameConfig& config,
     installSyscallTable(mMemory);
 
     // As the ROM's boot leaves it: taking INTC and DMAC interrupts.
-    mContext.cpu.cop0[cop0::kStatus] =
-        cop0::kInterruptEnable | kStatusIntc | kStatusDmac | kStatusMasterEnable;
+    mContext.cpu.cop0[cop0::kStatus] = cop0::kInterruptEnable | kStatusIntc | kStatusDmac |
+                                       kStatusMasterEnable | kStatusCoprocessors |
+                                       kStatusExceptionDisable;
     mContext.cpu.cop0[cop0::kProcessorId] = cop0::kR5900Id;
+    mContext.cpu.cop0[cop0::kConfig] = cop0::kR5900Config;
+    mContext.cpu.cop0[cop0::kWired] = cop0::kWiredAfterBoot;
+    // What the rom's own probe of the coprocessor it has no unit for leaves in
+    // the exception code's neighbours.
+    mContext.cpu.cop0[cop0::kCause] = kCauseProbeRemains;
+    for (usize i = 0; i < cop0::kTlbEntries; ++i) {
+        mContext.cpu.tlb[i] = cop0::kBootTlb[i];
+    }
+    mContext.cpu.cop0[cop0::kIndex] = cop0::kBootIndex;
+    mContext.cpu.cop0[cop0::kRandom] = cop0::kBootRandom;
+    mContext.cpu.cop0[cop0::kContext] = cop0::kBootContext;
+    mContext.cpu.cop0[cop0::kBadVAddr] = cop0::kBootBadVAddr;
+    mContext.cpu.cop0[cop0::kEntryHi] = cop0::kBootEntryHi;
+    mContext.cpu.cop0[cop0::kCompare] = cop0::kBootCompare;
+    mContext.cpu.cop0[cop0::kEpc] = cop0::kBootEpc;
+    mContext.cpu.cop0[cop0::kBadPAddr] = cop0::kBootBadPAddr;
+    mContext.cpu.performanceControl = cop0::kBootPerformance;
+    mContext.cpu.cop0[27] = cop0::kBootReserved27;
+    mContext.cpu.cop0[cop0::kTagLo] = cop0::kBootTagLo;
+    mContext.cpu.cop0[cop0::kTagHi] = cop0::kBootTagHi;
+    mContext.cpu.cop0[cop0::kErrorEpc] = cop0::kBootErrorEpc;
 
     // KERNEL: InitThreads @ 0x80004ec0
     // Its CreateRomModuleThread("EENULL") takes the first block, so guest ids
@@ -134,6 +163,11 @@ SyscallResult Kernel::callSyscall(s32 number) {
 }
 
 SyscallResult Kernel::handleSyscall() {
+    // The handler is taken over rather than run, so the code it would have left
+    // behind is written here instead. The address it returns to is not: nothing
+    // here takes the exception that would have set it.
+    u32& cause = mContext.cpu.cop0[cop0::kCause];
+    cause = (cause & ~cop0::kCauseCodeMask) | (cop0::kSystemCall << cop0::kCauseCodeShift);
     const s32 raw = static_cast<s32>(static_cast<u32>(mContext.cpu.gpr[kSyscallRegister].lo));
     // The sign selects interrupt context, which must not reschedule.
     const s32 number = raw < 0 ? -raw : raw;
@@ -1359,6 +1393,9 @@ void Kernel::advanceClock() {
     if (!mMmio.timers().advanceTo(mBudget.executed)) {
         return;
     }
+    // A microprogram is long finished by the time the clock comes round, so the
+    // status a guest reads next reports the unit idle again.
+    mContext.vu0.statusSeen = 0;
     // A reply lands on a later tick, so a guest that starts a transfer and then
     // waits on its semaphore blocks first, as it would against real hardware.
     mMmio.gs().advanceScanline();
@@ -1569,7 +1606,7 @@ s32 Kernel::deci2Call(u32 function, u32 arguments) {
 }
 
 // KERNEL: SifGetReg @ 0x80006cb8
-u32 Kernel::readSifRegister(u32 id) const {
+u32 Kernel::readSifRegister(u32 id) {
     const auto sbusRegister = [this](u32 address) {
         return mMmio.sbus().read(address).value_or(0);
     };
@@ -1611,6 +1648,9 @@ u32 Kernel::writeSifRegister(u32 id, u32 value) {
 // KERNEL: SifSetDma @ 0x80006798
 u32 Kernel::sendSifDma(u32 transfers, u32 count) {
     mSif.receive(transfers, count);
+    // The channel the transfer went out on reports itself finished, which is
+    // what a guest waiting on the controller rather than the interface sees.
+    mMmio.interrupts().raiseDmac(dmac::kSif1);
     return ++mDmaTransferId;
 }
 

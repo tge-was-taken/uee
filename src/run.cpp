@@ -474,7 +474,7 @@ bool service(Machine& machine, u32 instructions) {
         machine.budget.stopped = true;
         return false;
     }
-    countPerformanceEvents(machine.ee().cpu,
+    advanceCycles(machine.ee().cpu,
                            static_cast<u32>(machine.budget.executed - machine.budget.counted));
     machine.budget.counted = machine.budget.executed;
     (void)instructions;

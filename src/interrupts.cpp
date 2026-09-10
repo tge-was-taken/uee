@@ -40,6 +40,9 @@ std::optional<u32> Interrupts::read(u32 address) const {
         case kDCtrl: return mDControl;
         case kDStat: return mDStat;
         case kDPcr: return mDPcr;
+        case kDRingSize: return mDRingSize;
+        case kDRingBase: return mDRingBase;
+        case kDStallAddress: return mDStallAddress;
         default: return std::nullopt;
     }
 }
@@ -49,14 +52,17 @@ std::optional<u32> Interrupts::read(u32 address) const {
 // KERNEL: _EnableIntc and _EnableDmac @ 0x800008c0
 bool Interrupts::write(u32 address, u32 value) {
     switch (address) {
-        case kIntcStat: mIntcStat &= ~value; return true;
+        case kIntcStat: mIntcStat = (mIntcStat & ~value) | Interrupts::kBlanking; return true;
         case kIntcMask: mIntcMask ^= value; return true;
-        case kDCtrl: mDControl = value; return true;
+        case kDCtrl: mDControl = value & kDmacControlMask; return true;
         case kDStat:
             mDStat &= ~(value & 0xFFFFu);
-            mDStat ^= value & 0xFFFF0000u;
+            mDStat ^= value & kDmacMaskBits;
             return true;
-        case kDPcr: mDPcr = value; return true;
+        case kDPcr: mDPcr = value & kDmacPriorityMask; return true;
+        case kDRingSize: mDRingSize = value & kDmacAddressMask; return true;
+        case kDRingBase: mDRingBase = value & kDmacAddressMask; return true;
+        case kDStallAddress: mDStallAddress = value & kDmacAddressMask; return true;
         default: return false;
     }
 }

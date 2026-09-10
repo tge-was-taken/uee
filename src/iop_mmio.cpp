@@ -69,7 +69,7 @@ const IopMmio::DmaChannel* IopMmio::channelFor(u32 address) const {
     return const_cast<IopMmio*>(this)->channelFor(address);
 }
 
-std::optional<u16> IopMmio::readHalf(u32 address) const {
+std::optional<u16> IopMmio::readHalf(u32 address) {
     if (address - kSpu2Base < kSpu2Size) {
         return mSpu2.readHalf(address - kSpu2Base);
     }
@@ -86,7 +86,7 @@ std::optional<u16> IopMmio::readHalf(u32 address) const {
 
 // SIO2MAN: Sio2TransferSubmit @ 0x1c4, Sio2TransferCollectResults @ 0x310
 // Both move the FIFOs a byte at a time.
-std::optional<u8> IopMmio::readByte(u32 address) const {
+std::optional<u8> IopMmio::readByte(u32 address) {
     if (address - kSio2Base >= kSio2Size) {
         return std::nullopt;
     }
@@ -121,7 +121,7 @@ bool IopMmio::writeHalf(u32 address, u16 value) {
     return writeWord(word, merged);
 }
 
-std::optional<u32> IopMmio::readWord(u32 address) const {
+std::optional<u32> IopMmio::readWord(u32 address) {
     if (address - kSio2Base < kSio2Size) {
         return const_cast<Sio2&>(mSio2).read(address - kSio2Base);
     }

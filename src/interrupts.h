@@ -18,6 +18,19 @@ constexpr u32 kDmacBase = 0x1000E000;
 constexpr u32 kDCtrl = kDmacBase + 0x00;
 constexpr u32 kDStat = kDmacBase + 0x10;
 constexpr u32 kDPcr = kDmacBase + 0x20;
+constexpr u32 kDRingSize = kDmacBase + 0x40;
+constexpr u32 kDRingBase = kDmacBase + 0x50;
+constexpr u32 kDStallAddress = kDmacBase + 0x60;
+// Every address the controller holds is quadword aligned and inside memory.
+constexpr u32 kDmacAddressMask = 0x7FFFFFF0;
+// The mask half of the status register, from writing all ones and reading back:
+// four of the sixteen places have no channel behind them.
+constexpr u32 kDmacMaskBits = 0x63BF0000;
+// The channels the priority register can name, and the bits the control
+// register keeps, from writing all ones and reading back.
+constexpr u32 kDmacPriorityMask = 0x83FF03FF;
+constexpr u32 kDmacControlMask = 0x000007FF;
+constexpr u32 kMfifoDrainMask = 0xC;
 
 // The lowest cause raised, which is the one the guest is dispatched for.
 inline std::optional<u32> lowestSet(u32 active) {
@@ -75,6 +88,18 @@ public:
     void raiseDmac(u32 channel);
     u32 readDStat() const { return mDStat; }
 
+    // The ring a transfer wraps inside while the controller drains one, and
+    // which channel it drains to. Zero means no ring is in use.
+    u32 ringSize() const { return (mDControl & kMfifoDrainMask) != 0 ? mDRingSize : 0; }
+    u32 ringBase() const { return mDRingBase; }
+
+    // The display keeps asserting both blanking causes and nothing the boot rom
+    // left behind acknowledges them, so a program finds them standing and finds
+    // them again after clearing them.
+    static constexpr u32 kBlanking = (1u << 2) | (1u << 3);
+    // The two the rom leaves unmasked besides the one this kernel adds.
+    static constexpr u32 kBootIntcMask = (1u << 1) | (1u << 12);
+
     // The lowest pending cause that is not masked, if any.
     // Asked every service interval, so they answer where they are called from.
     std::optional<u32> pendingIntc() const {
@@ -112,11 +137,17 @@ private:
     std::array<HandlerChain, kDmacChannels> mDmacChains;
     Link mFreeList;
 
-    u32 mIntcStat = 0;
-    u32 mIntcMask = 0;
-    u32 mDControl = 0;
-    u32 mDStat = 0;
+    u32 mIntcStat = kBlanking;
+    u32 mIntcMask = kBootIntcMask;
+    // The boot rom leaves the controller enabled.
+    u32 mDControl = 1;
+    // What the boot rom leaves behind: the two SIF channels it unmasked and the
+    // transfer it took to hand the program over, still flagged.
+    u32 mDStat = (1u << (7 + kDmacMaskShift)) | (1u << 6);
     u32 mDPcr = 0;
+    u32 mDRingSize = 0;
+    u32 mDRingBase = 0;
+    u32 mDStallAddress = 0;
     s32 mHandlerCount = 0;
 };
 

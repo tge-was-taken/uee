@@ -80,6 +80,10 @@ inline Lanes choose(Lanes whenClear, Lanes whenSet, Lanes mask) {
     return Lanes(_mm_blendv_epi8(whenClear.raw(), whenSet.raw(), mask.raw()));
 }
 
+inline Lanes multiplyLowEach(Lanes a, Lanes b) {
+    return Lanes(_mm_mullo_epi32(a.raw(), b.raw()));
+}
+
 inline Lanes addFloat(Lanes a, Lanes b) {
     return Lanes(_mm_castps_si128(
         _mm_add_ps(_mm_castsi128_ps(a.raw()), _mm_castsi128_ps(b.raw()))));

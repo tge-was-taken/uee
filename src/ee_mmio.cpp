@@ -10,7 +10,6 @@
 namespace uee {
 namespace {
 
-constexpr u32 kIpuBase = 0x10002000;
 
 // The ranges are disjoint, so an address decodes to one block.
 enum class Block { None, Timers, Dmac, Interrupts, Sbus, Gif, Gs, Ipu, Vif0, Vif1 };
@@ -77,7 +76,7 @@ constexpr Block blockOf(u32 address) {
 
 }  // namespace
 
-std::optional<u32> EeMmio::read(u32 address) const {
+std::optional<u32> EeMmio::read(u32 address) {
     switch (blockOf(address)) {
         case Block::Timers: return mTimers.read(address);
         case Block::Dmac: return mDmac.read(address);

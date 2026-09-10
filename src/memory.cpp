@@ -20,7 +20,8 @@ Memory::Memory(std::vector<Region> regions, SegmentMirror mirror)
     : mRegions(std::move(regions)), mMirror(mirror) {
     mExtents.reserve(mRegions.size());
     for (const Region& region : mRegions) {
-        mExtents.push_back({region.base, static_cast<u32>(region.bytes.size())});
+        mExtents.push_back(
+            {region.base, static_cast<u32>(region.bytes.size()) * region.repeats});
     }
     if (!mRegions.empty() && mRegions.front().base == 0) {
         mRamBytes = mRegions.front().bytes.data();
@@ -102,6 +103,10 @@ void Memory::writeVirtual8(u32 address, u8 value) {
         storeAt(pad, value);
         return;
     }
+    if (isVuWindow(address)) {
+        widenToWord(address, value, 0xFFu);
+        return;
+    }
     const u32 folded = mMirror.apply(address);
     if (mMmio != nullptr && isRegister(folded) && mMmio->writeByte(folded, value)) {
         return;
@@ -109,9 +114,20 @@ void Memory::writeVirtual8(u32 address, u8 value) {
     store(resolveAddress(address, 1), value);
 }
 
+// The rest of the word the unit could not have left alone reads as ones.
+void Memory::widenToWord(u32 address, u32 value, u32 mask) {
+    const u32 shift = (address & 3u) * 8u;
+    const u32 kept = ~(mask << shift);
+    writeVirtual32(address & ~3u, kept | ((value & mask) << shift));
+}
+
 void Memory::writeVirtual16(u32 address, u16 value) {
     if (u8* pad = scratchpadAt(address, 2)) {
         storeAt(pad, value);
+        return;
+    }
+    if (isVuWindow(address)) {
+        widenToWord(address, value, 0xFFFFu);
         return;
     }
     const u32 folded = mMirror.apply(address);
@@ -126,6 +142,9 @@ void Memory::writeVirtual32(u32 address, u32 value) {
         storeAt(pad, value);
         return;
     }
+    if (isVuWindow(address)) {
+        mVuWindowWord = value;
+    }
     const u32 folded = mMirror.apply(address);
     if (mMmio != nullptr && isRegister(folded) && mMmio->writeWord(folded, value)) {
         return;
@@ -137,6 +156,9 @@ void Memory::writeVirtual64(u32 address, u64 value) {
     if (u8* pad = scratchpadAt(address, 8)) {
         storeAt(pad, value);
         return;
+    }
+    if (isVuWindow(address)) {
+        mVuWindowWord = static_cast<u32>(value >> 32);
     }
     const u32 folded = mMirror.apply(address);
     if (mMmio != nullptr && isRegister(folded)) {
@@ -155,8 +177,8 @@ Memory makeMainMemory() {
     regions.push_back({0, std::vector<u8>(kMainRamSize)});
     regions.push_back({kMmioBase, std::vector<u8>(kMmioSize)});
     regions.push_back({kScratchpadBase, std::vector<u8>(kScratchpadSize)});
-    regions.push_back({kVu0MicroBase, std::vector<u8>(kVu0MemorySize)});
-    regions.push_back({kVu0DataBase, std::vector<u8>(kVu0MemorySize)});
+    regions.push_back({kVu0MicroBase, std::vector<u8>(kVu0MemorySize), kVu0Windows});
+    regions.push_back({kVu0DataBase, std::vector<u8>(kVu0MemorySize), kVu0Windows});
     regions.push_back({kVu1MicroBase, std::vector<u8>(kVu1MemorySize)});
     regions.push_back({kVu1DataBase, std::vector<u8>(kVu1MemorySize)});
     regions.push_back({kGsPrivBase, std::vector<u8>(kGsPrivSize)});

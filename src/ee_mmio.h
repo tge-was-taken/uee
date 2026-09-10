@@ -21,7 +21,9 @@
 namespace uee {
 
 // The ranges are disjoint, so an address decodes to one block.
-enum class EeMmioBlock { None, Timers, Dmac, Interrupts, Sbus, Gif, Gs, Vif0, Vif1 };
+constexpr u32 kIpuBase = 0x10002000;
+
+enum class EeMmioBlock { None, Timers, Dmac, Interrupts, Sbus, Gif, Gs, Ipu, Vif0, Vif1 };
 
 struct RegisterRange {
     u32 base = 0;
@@ -40,6 +42,7 @@ constexpr RegisterRange kRanges[] = {
     {0x1000F200, 0x0100, EeMmioBlock::Sbus},
     {0x1000F520, 0x0004, EeMmioBlock::Dmac},
     {0x1000F590, 0x0004, EeMmioBlock::Dmac},
+    {kIpuBase, 0x0100, EeMmioBlock::Ipu},
     {0x10003000, 0x0100, EeMmioBlock::Gif},
     {0x10003800, 0x0180, EeMmioBlock::Vif0},
     {0x10003C00, 0x0180, EeMmioBlock::Vif1},
@@ -67,7 +70,7 @@ public:
         return kSegments;
     }
 
-    std::optional<u32> readWord(u32 address) const override { return read(address); }
+    std::optional<u32> readWord(u32 address) override { return read(address); }
     bool writeWord(u32 address, u32 value) override { return write(address, value); }
     // Only the GS has a 64-bit register modelled; everything else splits.
     std::optional<u64> readDouble(u32 address) const override { return mGs.readDouble(address); }
@@ -86,6 +89,7 @@ public:
         mVif[0].attach(memory, mGif, 0, &ee.vu0);
         mVif[1].attach(memory, mGif, 1, &mVu1);
         mDmac.attach(memory, mInterrupts, mGif, mVif[0], mVif[1], mIpu);
+        mDmac.installBootChannels();
         refreshCop0Condition();
     }
 
@@ -96,14 +100,14 @@ public:
         }
     }
 
-    std::optional<u32> read(u32 address) const;
+    std::optional<u32> read(u32 address);
     bool write(u32 address, u32 value);
 
     void startVu1(u32 address) override;
 
     // The block an address decodes to is a constant wherever the translator
     // resolved the address, so the search that finds it need not happen twice.
-    std::optional<u32> readFrom(EeMmioBlock block, u32 address) const {
+    std::optional<u32> readFrom(EeMmioBlock block, u32 address) {
         switch (block) {
             case EeMmioBlock::Timers: return mTimers.read(address);
             case EeMmioBlock::Dmac: return mDmac.read(address);
@@ -111,6 +115,7 @@ public:
             case EeMmioBlock::Sbus: return mSbus.read(address);
             case EeMmioBlock::Gif: return mGif.read(address);
             case EeMmioBlock::Gs: return mGs.read(address);
+            case EeMmioBlock::Ipu: return mIpu.read(address - kIpuBase);
             case EeMmioBlock::Vif0: return mVif[0].read(address);
             case EeMmioBlock::Vif1: return mVif[1].read(address);
             case EeMmioBlock::None: return std::nullopt;
@@ -169,6 +174,7 @@ private:
             case EeMmioBlock::Sbus: return mSbus.write(address, value);
             case EeMmioBlock::Gif: return mGif.write(address, value);
             case EeMmioBlock::Gs: return mGs.write(address, value);
+            case EeMmioBlock::Ipu: return mIpu.write(address - kIpuBase, value);
             case EeMmioBlock::Vif0: return mVif[0].write(address, value);
             case EeMmioBlock::Vif1: return mVif[1].write(address, value);
             case EeMmioBlock::None: return false;

@@ -13,7 +13,12 @@ public:
     VuMicro(Vu& state, Memory& memory, u32 unit, Gif* gif)
         : mState(state), mMemory(memory), mGif(gif), mUnit(unit) {}
 
-    u32 run(u32 start);
+    struct Outcome {
+        u32 counter;
+        bool ended;
+    };
+
+    Outcome run(u32 start);
 
 private:
     u32 instructionBase() const;
@@ -24,9 +29,12 @@ private:
     void executeUpper(u32 code);
     void executeLower(u32 code);
     u32 elementaryFunction(u32 wide, u32 code, u32 vs);
+    static u32 functionLatency(u32 wide);
     u32 quotientOf(u32 code, u32 vs, u32 vt);
     u32 rootOf(u32 code, u32 vt);
     u32 inverseRootOf(u32 code, u32 vs, u32 vt);
+    u32 takeQuotient(Vu::Quotient q);
+    u32 targetLane(u32 code, u32 vf) const;
     u32 sourceLane(u32 code, u32 vf) const;
     void advanceRandom();
     static constexpr u32 kFmacLatency = 4;
@@ -35,9 +43,8 @@ private:
 
     u32 operandsReadyAt(u32 upper, u32 lower) const;
     void stallUntil(u32 cycle);
-    void issueQuotient(u32 value, u32 latency);
-    void advanceQuotients();
-    void settleQuotients();
+    void advancePipelines();
+    void settlePipelines();
     void loadQuadword(u32 dest, u32 vf, u32 quadword);
     void storeQuadword(u32 dest, u32 vf, u32 quadword);
     void branchTo(u32 target);
@@ -61,12 +68,37 @@ private:
     // in Q.
     static constexpr u32 kQuotientLatency = 7;
     static constexpr u32 kRootLatency = 13;
-    u32 mPendingQuotient = 0;
-    u32 mQuotientDelay = 0;
+
+    // A result the unit hands over some instructions after the one that asked
+    // for it; reading the register before then sees what it held.
+    struct DelayedResult {
+        u32 value = 0;
+        u32 delay = 0;
+
+        void issue(u32& target, u32 next, u32 latency) {
+            settle(target);
+            value = next;
+            delay = latency;
+        }
+        void advance(u32& target) {
+            if (delay != 0 && --delay == 0) {
+                target = value;
+            }
+        }
+        void settle(u32& target) {
+            if (delay != 0) {
+                target = value;
+                delay = 0;
+            }
+        }
+    };
+
+    DelayedResult mQuotient;
+    DelayedResult mFunction;
 };
 
 // The address a program stopped at is what the next start reads back, so the
 // two always move together.
-void runMicroProgram(Vu& state, Memory& memory, Gif* gif, u32 unit, u32 start);
+bool runMicroProgram(Vu& state, Memory& memory, Gif* gif, u32 unit, u32 start);
 
 }  // namespace uee

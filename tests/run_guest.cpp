@@ -25,7 +25,7 @@
 
 
 namespace {
-uee::LoggerChannel log("run");
+uee::LoggerChannel logger("run");
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -35,13 +35,13 @@ int main(int argc, char** argv) {
                                   : std::format("ee{}", logging->currentThread());
     });
     if (argc < 2) {
-        log.fatal("usage: run_guest <elf> [disc] [patches.toml]");
+        logger.fatal("usage: run_guest <elf> [disc] [patches.toml]");
         return 2;
     }
 
     std::ifstream file(argv[1], std::ios::binary);
     if (!file) {
-        log.fatal("cannot open {}", argv[1]);
+        logger.fatal("cannot open {}", argv[1]);
         return 2;
     }
     const std::vector<u8> image{std::istreambuf_iterator<char>(file),
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
         try {
             config = uee::loadGameConfig(argv[3]);
         } catch (const std::exception& error) {
-            log.fatal("{}", error.what());
+            logger.fatal("{}", error.what());
             return 2;
         }
     }
@@ -70,23 +70,23 @@ int main(int argc, char** argv) {
         const std::filesystem::path path = root / module;
         std::ifstream irx(path, std::ios::binary);
         if (!irx) {
-            log.fatal("cannot open preloaded module {}", path.string());
+            logger.fatal("cannot open preloaded module {}", path.string());
             return 2;
         }
         const std::vector<u8> bytes{std::istreambuf_iterator<char>(irx),
                                     std::istreambuf_iterator<char>()};
         if (!kernel.iop().loadModule(path.stem().string(), bytes)) {
-            log.fatal("preloaded module {} did not start", path.string());
+            logger.fatal("preloaded module {} did not start", path.string());
             return 2;
         }
-        log.info("preloaded {}", path.stem().string());
+        logger.info("preloaded {}", path.stem().string());
     }
 
     const std::unique_ptr<uee::Disc> disc = uee::openDisc(argc > 2 ? argv[2] : "");
     if (disc->isOpen()) {
         kernel.attachDisc(*disc);
     } else if (argc > 2) {
-        log.fatal("cannot open disc {}", argv[2]);
+        logger.fatal("cannot open disc {}", argv[2]);
         return 2;
     }
 
@@ -105,22 +105,22 @@ int main(int argc, char** argv) {
     if (const char* path = std::getenv("UEE_AUDIO")) {
         audio.emplace(path, uee::kSpuSampleRate, uee::kSpuChannels);
         if (!audio->isOpen()) {
-            log.fatal("cannot write audio to {}", path);
+            logger.fatal("cannot write audio to {}", path);
             return 2;
         }
         kernel.attachAudio(&*audio);
-        log.info("writing audio to {}", path);
+        logger.info("writing audio to {}", path);
     }
 
     std::optional<uee::GsCaptureWriter> graphics;
     if (const char* path = std::getenv("UEE_GS_CAPTURE")) {
         graphics.emplace(path, std::filesystem::path(argv[1]).stem().string());
         if (!graphics->isOpen()) {
-            log.fatal("cannot write the graphics stream to {}", path);
+            logger.fatal("cannot write the graphics stream to {}", path);
             return 2;
         }
         kernel.attachGsHandler(&*graphics);
-        log.info("writing the graphics stream to {}", path);
+        logger.info("writing the graphics stream to {}", path);
     }
 
     // A held mask, as libpad reports it: SCE_PADstart is 0x0800. A menu acts on
@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
     } pad;
     if (const char* held = std::getenv("UEE_PAD")) {
         pad.held = static_cast<u16>(std::strtoul(held, nullptr, 0));
-        log.info("pressing pad buttons {:04x}", pad.held);
+        logger.info("pressing pad buttons {:04x}", pad.held);
     }
     kernel.attachPad(&pad);
 
@@ -153,11 +153,11 @@ int main(int argc, char** argv) {
     if (const char* path = std::getenv("UEE_CARD")) {
         card.emplace(path);
         if (!card->isOpen()) {
-            log.fatal("cannot open memory card image {}", path);
+            logger.fatal("cannot open memory card image {}", path);
             return 2;
         }
         kernel.attachCard(&*card);
-        log.info("memory card image {}", path);
+        logger.info("memory card image {}", path);
     }
 
     if (const char* watched = std::getenv("UEE_HOOKS")) {
@@ -177,10 +177,10 @@ int main(int argc, char** argv) {
 
     std::fputs(kernel.readOutput().c_str(), stdout);
     if (stop.reason == uee::StopReason::Exited) {
-        log.info("{}", uee::describe(stop));
+        logger.info("{}", uee::describe(stop));
         return 0;
     }
-    log.error("{}", uee::describe(stop));
+    logger.error("{}", uee::describe(stop));
     kernel.reportThreads();
     return 1;
 }

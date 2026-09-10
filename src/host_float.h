@@ -63,10 +63,9 @@ inline std::optional<u32> sub(u32 a, u32 b) {
     return add(a, b ^ kSignBit);
 }
 
-// The multiplier drops the product's low bit when b's significand is all ones.
 inline std::optional<u32> mul(u32 a, u32 b) {
     if (exponentOf(a) > kHighestOperand || exponentOf(b) > kHighestOperand ||
-        (b & 0x7FFFFFu) == 0x7FFFFFu) {
+        losesLowBit(a, b)) {
         return std::nullopt;
     }
     const u32 product = std::bit_cast<u32>(std::bit_cast<float>(a) * std::bit_cast<float>(b));
@@ -76,7 +75,7 @@ inline std::optional<u32> mul(u32 a, u32 b) {
 // Only offered where the result comes out plain.
 inline std::optional<u32> multiplyAdd(u32 acc, u32 a, u32 b, bool subtract) {
     if (exponentOf(acc) > kHighestOperand || exponentOf(a) > kHighestOperand ||
-        exponentOf(b) > kHighestOperand || (b & 0x7FFFFFu) == 0x7FFFFFu) {
+        exponentOf(b) > kHighestOperand || losesLowBit(a, b)) {
         return std::nullopt;
     }
     const u32 product = std::bit_cast<u32>(std::bit_cast<float>(a) * std::bit_cast<float>(b));
@@ -98,6 +97,23 @@ inline Lanes ceilingLanes() {
 // The vector unit keeps no overflow flag, so only a saturating result is out.
 inline bool areLanesPlain(Lanes result) {
     return !arch::anyLaneSet(arch::greaterThanSigned(result.exponents(), ceilingLanes()));
+}
+
+// The multiplier's tree only moves the product when a borrow out of bit 15 can
+// reach the result, and that needs every bit between to be zero.
+inline bool losesLowBit(u32 a, u32 b) {
+    const u64 exact = static_cast<u64>(0x800000u | (a & 0x7FFFFFu)) *
+                      (0x800000u | (b & 0x7FFFFFu));
+    return (exact & 0x7FFFFFu) < 0x8000u;
+}
+
+inline bool anyLoseLowBit(Lanes a, Lanes b) {
+    const Lanes significand = Lanes::broadcast(0x7FFFFF);
+    const Lanes implicit = Lanes::broadcast(0x800000);
+    const Lanes sa = arch::either(arch::maskWith(a, significand), implicit);
+    const Lanes sb = arch::either(arch::maskWith(b, significand), implicit);
+    const Lanes low = arch::maskWith(arch::multiplyLowEach(sa, sb), significand);
+    return arch::anyLaneSet(arch::greaterThanSigned(Lanes::broadcast(0x8000), low));
 }
 
 inline bool anyOperandTooLarge(Lanes a, Lanes b) {
@@ -136,9 +152,7 @@ inline bool subLanes(Lanes a, Lanes b, u32 out[4]) {
 }
 
 inline bool mulLanes(Lanes a, Lanes b, u32 out[4]) {
-    const Lanes significand = Lanes::broadcast(0x7FFFFF);
-    if (anyOperandTooLarge(a, b) ||
-        arch::anyLaneSet(arch::equalTo(arch::maskWith(b, significand), significand))) {
+    if (anyOperandTooLarge(a, b) || anyLoseLowBit(a, b)) {
         return false;
     }
     const Lanes product = arch::multiplyFloat(a, b);
@@ -149,11 +163,13 @@ inline bool mulLanes(Lanes a, Lanes b, u32 out[4]) {
     return true;
 }
 
-// One rounding is what the unit does, which is what an FMA gives.
+// One rounding is what the unit does, which is what an FMA gives, apart from
+// the low bit the multiplier's tree can drop.
 inline bool maddLanes(Lanes acc, Lanes a, Lanes b, u32 out[4], bool subtract) {
     const Lanes highest =
         arch::maxUnsigned(arch::maxUnsigned(a.exponents(), b.exponents()), acc.exponents());
-    if (arch::anyLaneSet(arch::greaterThanSigned(highest, ceilingLanes()))) {
+    if (arch::anyLaneSet(arch::greaterThanSigned(highest, ceilingLanes())) ||
+        anyLoseLowBit(a, b)) {
         return false;
     }
     const Lanes bits =

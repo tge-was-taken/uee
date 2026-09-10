@@ -64,6 +64,7 @@ std::string_view blockName(EeMmioBlock block) {
         case EeMmioBlock::Sbus: return "Sbus";
         case EeMmioBlock::Gif: return "Gif";
         case EeMmioBlock::Gs: return "Gs";
+        case EeMmioBlock::Ipu: return "Ipu";
         case EeMmioBlock::Vif0: return "Vif0";
         case EeMmioBlock::Vif1: return "Vif1";
         case EeMmioBlock::None: return "None";
@@ -132,6 +133,8 @@ private:
     std::string writeGpr(u32 reg, u32 value) const override;
     std::string writeConstant(u32 reg, u32 value) const override;
     std::optional<std::string> emitOne(u32 pc, Instruction insn) const override;
+    std::optional<std::string> emitOperation(u32 pc, Instruction insn) const;
+    bool followsVectorUnitOp(u32 pc) const;
     std::optional<std::string> emitBranchCondition(Op op, Instruction insn) const override;
     std::optional<Trap> emitTrap(Instruction insn, const BlockValues& values,
                                  u32 pc) const override;
@@ -139,7 +142,34 @@ private:
     std::string countInstructionsOnly(u32 count) const override;
 };
 
+// Every macro instruction the vector unit executes, which is every one whose
+// name starts with a v, moves the quotient register a step along.
+bool isVectorUnitOp(Op op) {
+    const std::string_view name = lookupName(op);
+    return !name.empty() && name.front() == 'v';
+}
+
+// The flag registers are two deep, so only an instruction within two of the
+// one that filled them can be the point where the handover shows.
+bool EeTranslator::followsVectorUnitOp(u32 pc) const {
+    for (u32 back = 4; back <= 8; back += 4) {
+        const std::optional<u32> word = mMemory.peek32(pc - back);
+        if (word && isVectorUnitOp(getOp(Instruction{*word}))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const {
+    const std::optional<std::string> body = emitOperation(pc, insn);
+    if (!body || !isVectorUnitOp(getOp(insn))) {
+        return body;
+    }
+    return "ee.vu0.beginMacro(); " + *body + " ee.vu0.endMacro();";
+}
+
+std::optional<std::string> EeTranslator::emitOperation(u32 pc, Instruction insn) const {
     const Op op = getOp(insn);
     const u32 rs = insn.rs();
     const u32 rt = insn.rt();
@@ -151,7 +181,8 @@ std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const
 
     // sll zero, zero, 0 is the canonical nop.
     if (insn.word == 0) {
-        return std::string{};
+        return followsVectorUnitOp(pc) ? std::string{"ee.vu0.advanceFlags();"}
+                                       : std::string{};
     }
 
     const auto gpr3 = [&](const char* name, u32 a, u32 b, u32 c) {
@@ -431,10 +462,13 @@ std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const
             return std::format("ctc1(ee.cpu, ee.fpu, {}, {});", r(rt), insn.fs());
 
         case Op::qmfc2_ni:
-            return std::format("qmfc2(ee.cpu, ee.vu0, {}, {});", r(rt), insn.vs());
+            return std::format("qmfc2(ee.cpu, ee.vu0, {}, {}, {});", r(rt), insn.vs(),
+                               (insn.word & 1u) != 0 ? "true" : "false");
         case Op::qmtc2_ni:
             return std::format("qmtc2(ee.cpu, ee.vu0, {}, {});", r(rt), insn.vs());
-        case Op::cfc2_ni: return std::format("cfc2(ee.cpu, ee.vu0, {}, {});", r(rt), rd);
+        case Op::cfc2_ni:
+            return std::format("cfc2(ee.cpu, ee.vu0, {}, {}, {});", r(rt), rd,
+                               (insn.word & 1u) != 0 ? "true" : "false");
         case Op::ctc2_ni:
             return std::format("ctc2(ee.cpu, ee, mem, {}, {});", r(rt), rd);
 
@@ -517,10 +551,24 @@ std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const
         case Op::viswr:
             return vuWindowAccess("viswr", insn.dest(), insn.vit(), insn.vis());
         case Op::vsqi: return vuAccess("vsqi", insn.dest(), insn.vs(), insn.vit());
-        case Op::vsqrt: return vu2("vsqrt", insn.vt(), insn.ftf());
-        case Op::vrsqrt:
-            return std::format("vrsqrt(ee.vu0, {}, {}, {}, {});", insn.vs(), insn.fsf(),
+        case Op::vclipw:
+            return std::format("vclip(ee.vu0, {}, {}); ee.vu0.vi[Vu::kClip] = ee.vu0.clip;",
+                               insn.vs(), insn.vt());
+        case Op::vdiv:
+            return std::format("{{ const u32 previous = ee.vu0.vi[Vu::kQ]; "
+                               "vdiv(ee.vu0, {}, {}, {}, {}); "
+                               "ee.vu0.delayQuotient(previous); }}",
+                               insn.vs(), insn.fsf(), insn.vt(), insn.ftf());
+        case Op::vsqrt:
+            return std::format("{{ const u32 previous = ee.vu0.vi[Vu::kQ]; "
+                               "vsqrt(ee.vu0, {}, {}); "
+                               "ee.vu0.delayQuotient(previous); }}",
                                insn.vt(), insn.ftf());
+        case Op::vrsqrt:
+            return std::format("{{ const u32 previous = ee.vu0.vi[Vu::kQ]; "
+                               "vrsqrt(ee.vu0, {}, {}, {}, {}); "
+                               "ee.vu0.delayQuotient(previous); }}",
+                               insn.vs(), insn.fsf(), insn.vt(), insn.ftf());
         case Op::vopmula:
             return vuField("vopmula", insn.dest(), insn.vs(), insn.vt());
         case Op::vopmsub:
@@ -544,16 +592,18 @@ std::optional<std::string> EeTranslator::emitOne(u32 pc, Instruction insn) const
         case Op::tlti: return trapImmediate("tltiTaken");
         case Op::tltiu: return trapImmediate("tltiuTaken");
 
+        case Op::vwaitq: return std::string{"ee.vu0.settleQuotient();"};
+
+        case Op::sync_p: return std::string{"ee.vu0.settleFlags();"};
+
         case Op::vnop:
-        case Op::vwaitq:
-        case Op::sync_p:
         case Op::cache:
         case Op::pref:
-        case Op::tlbwi:
         case Op::tlbwr:
-        case Op::tlbr:
         case Op::tlbp:
             return std::string{};
+        case Op::tlbr: return std::string{"tlbr(ee.cpu);"};
+        case Op::tlbwi: return std::string{"tlbwi(ee.cpu, ee.cpu.cop0[cop0::kIndex]);"};
 
         default: {
             VuForm form;

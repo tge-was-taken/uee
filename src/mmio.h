@@ -26,11 +26,13 @@ public:
     // for the range test and never for the call.
     virtual std::span<const MmioSegment> segments() const = 0;
 
-    virtual std::optional<u32> readWord(u32 address) const = 0;
+    // Reading a register is not always free of consequence, so these are not
+    // const: a channel that reports itself finished is one example.
+    virtual std::optional<u32> readWord(u32 address) = 0;
     virtual bool writeWord(u32 address, u32 value) = 0;
-    virtual std::optional<u16> readHalf(u32) const { return std::nullopt; }
+    virtual std::optional<u16> readHalf(u32) { return std::nullopt; }
     virtual bool writeHalf(u32, u16) { return false; }
-    virtual std::optional<u8> readByte(u32) const { return std::nullopt; }
+    virtual std::optional<u8> readByte(u32) { return std::nullopt; }
     virtual bool writeByte(u32, u8) { return false; }
     virtual std::optional<u64> readDouble(u32) const { return std::nullopt; }
     virtual bool writeDouble(u32, u64) { return false; }

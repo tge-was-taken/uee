@@ -12,32 +12,62 @@ inline u32 causeOf(single::Rounded result) {
     return (result.overflow ? Fpu::kOverflow : 0u) | (result.underflow ? Fpu::kUnderflow : 0u);
 }
 
+// An operation that raises nothing leaves the cause register naming the last
+// one that did.
+inline void raiseIfAny(Fpu& fpu, u32 cause) {
+    if (cause != 0) {
+        fpu.raise(cause);
+    }
+}
+
 inline u32 rounded(Fpu& fpu, single::Rounded result) {
-    fpu.raise(causeOf(result));
+    raiseIfAny(fpu, causeOf(result));
     return result.bits;
 }
 
 inline u32 flagged(Fpu& fpu, single::Rounded result, u32 cause) {
-    fpu.raise(cause);
+    raiseIfAny(fpu, cause);
     return result.bits;
+}
+
+// A denormal is nothing to the unit, so it divides by zero the same way.
+inline bool isZeroValue(u32 bits) {
+    return (single::flushDenormal(bits) & single::kMagnitudeMask) == 0;
 }
 
 inline u32 quotient(Fpu& fpu, u32 numerator, u32 denominator) {
     const single::Rounded result = single::div(numerator, denominator);
-    if ((denominator & single::kMagnitudeMask) != 0) {
+    if (!isZeroValue(denominator)) {
         return rounded(fpu, result);
     }
-    const bool zeroByZero = (numerator & single::kMagnitudeMask) == 0;
-    return flagged(fpu, result, zeroByZero ? Fpu::kInvalid : Fpu::kDivideByZero);
+    return flagged(fpu, result,
+                   isZeroValue(numerator) ? Fpu::kInvalid : Fpu::kDivideByZero);
 }
 
+// The multiply passes through the flag logic on its own before the sum
+// replaces the visible result, and an accumulator that already saturated keeps
+// reporting it.
 UEE_NOINLINE inline u32 accumulatedSoft(Fpu& fpu, u32 a, u32 b, bool subtract) {
-    return rounded(fpu, single::multiplyAdd(fpu.acc, a, b, subtract));
+    single::Rounded result = single::multiplyAdd(fpu.acc, a, b, subtract);
+    u32 cause = causeOf(result);
+    if (fpu.accSaturated) {
+        cause |= Fpu::kOverflow;
+        result.bits = (result.bits & single::kSignMask) | single::kLargest;
+    }
+    // Unlike the plain operations, an accumulate names its own outcome in the
+    // cause register even when there is nothing to report.
+    fpu.raise(cause);
+    // The multiply passes through the flag logic on its own, but only what it
+    // leaves in the sticky copies survives the sum's own report.
+    fpu.fcr31 |= causeOf(single::mul(a, b)) >> 11;
+    return result.bits;
 }
 
 inline u32 accumulated(Fpu& fpu, u32 a, u32 b, bool subtract) {
-    if (const std::optional<u32> fast = host::multiplyAdd(fpu.acc, a, b, subtract)) {
-        return *fast;
+    if (!fpu.accSaturated) {
+        if (const std::optional<u32> fast = host::multiplyAdd(fpu.acc, a, b, subtract)) {
+            return *fast;
+        }
     }
     return accumulatedSoft(fpu, a, b, subtract);
 }
@@ -47,15 +77,21 @@ inline u32 rootOf(Fpu& fpu, u32 value) {
     return (value & single::kSignMask) ? flagged(fpu, root, Fpu::kInvalid) : rounded(fpu, root);
 }
 
+// A root of nothing is only a division by zero if there is something to divide;
+// nothing over nothing is the invalid one, as it is for the divider.
 inline u32 reciprocalRootOf(Fpu& fpu, u32 numerator, u32 radicand) {
     const single::Rounded result = single::rsqrt(numerator, radicand);
-    if (radicand & single::kSignMask) {
-        return flagged(fpu, result, Fpu::kInvalid);
+    const bool rootIsZero = isZeroValue(radicand);
+    const bool negative = (radicand & single::kSignMask) != 0;
+    if (!rootIsZero && !negative) {
+        return rounded(fpu, result);
     }
-    if ((radicand & single::kMagnitudeMask) == 0) {
-        return flagged(fpu, result, Fpu::kDivideByZero);
+    const bool zeroNumerator = isZeroValue(numerator);
+    u32 cause = (negative || zeroNumerator) ? Fpu::kInvalid : 0u;
+    if (rootIsZero && !zeroNumerator) {
+        cause |= Fpu::kDivideByZero;
     }
-    return rounded(fpu, result);
+    return flagged(fpu, result, cause);
 }
 
 // The host answers only where it raises no flag, so taking its answer leaves
@@ -101,14 +137,42 @@ inline void sub_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
 inline void mul_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
     fpu.fpr[fd] = multiplied(fpu, fpu.fpr[fs], fpu.fpr[ft]);
 }
+// A saturated result is the only one the accumulator has to remember, and the
+// host answers only where nothing saturated.
+inline void writeAcc(Fpu& fpu, u32 value, bool saturated) {
+    fpu.acc = value;
+    fpu.accSaturated = saturated;
+}
+
 UEE_NOINLINE inline void adda_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = added(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+    const u32 a = fpu.fpr[fs], b = fpu.fpr[ft];
+    if (const std::optional<u32> fast = host::add(a, b)) {
+        writeAcc(fpu, *fast, false);
+        return;
+    }
+    const single::Rounded result = single::add(a, b);
+    raiseIfAny(fpu, causeOf(result));
+    writeAcc(fpu, result.bits, result.overflow);
 }
 UEE_NOINLINE inline void suba_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = subtracted(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+    const u32 a = fpu.fpr[fs], b = fpu.fpr[ft];
+    if (const std::optional<u32> fast = host::sub(a, b)) {
+        writeAcc(fpu, *fast, false);
+        return;
+    }
+    const single::Rounded result = single::sub(a, b);
+    raiseIfAny(fpu, causeOf(result));
+    writeAcc(fpu, result.bits, result.overflow);
 }
 UEE_NOINLINE inline void mula_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = multiplied(fpu, fpu.fpr[fs], fpu.fpr[ft]);
+    const u32 a = fpu.fpr[fs], b = fpu.fpr[ft];
+    if (const std::optional<u32> fast = host::mul(a, b)) {
+        writeAcc(fpu, *fast, false);
+        return;
+    }
+    const single::Rounded result = single::mul(a, b);
+    raiseIfAny(fpu, causeOf(result));
+    writeAcc(fpu, result.bits, result.overflow);
 }
 
 UEE_NOINLINE inline void madd_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
@@ -118,10 +182,12 @@ UEE_NOINLINE inline void msub_s(Fpu& fpu, u32 fd, u32 fs, u32 ft) {
     fpu.fpr[fd] = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], true);
 }
 UEE_NOINLINE inline void madda_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], false);
+    const u32 value = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], false);
+    writeAcc(fpu, value, (fpu.fcr31 & Fpu::kOverflow) != 0);
 }
 UEE_NOINLINE inline void msuba_s(Fpu& fpu, u32 fs, u32 ft) {
-    fpu.acc = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], true);
+    const u32 value = accumulated(fpu, fpu.fpr[fs], fpu.fpr[ft], true);
+    writeAcc(fpu, value, (fpu.fcr31 & Fpu::kOverflow) != 0);
 }
 
 UEE_NOINLINE inline void sqrt_s(Fpu& fpu, u32 fd, u32 ft) {

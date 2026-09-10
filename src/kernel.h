@@ -165,7 +165,7 @@ private:
 
     u32 sendSifDma(u32 transfers, u32 count);
     s32 deci2Call(u32 function, u32 arguments);
-    u32 readSifRegister(u32 id) const;
+    u32 readSifRegister(u32 id);
     u32 writeSifRegister(u32 id, u32 value);
 
     void raiseFieldInterrupts();
@@ -219,7 +219,9 @@ private:
     u32 mHandlerDepth = 0;
     Budget mBudget;
     u32 mMachineType = 0;
-    u32 mOsdConfig = 0;
+    // What the console this runtime was measured against holds: english, ntsc,
+    // a full screen and a timezone of 144 minutes.
+    u32 mOsdConfig = 0x0781201A;
     bool mIdle = false;
 
     struct SyscallReturn {

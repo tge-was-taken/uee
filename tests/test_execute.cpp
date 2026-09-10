@@ -68,6 +68,25 @@ bool oracleFollowsHost(Op op) {
         case Op::vaddaw: case Op::vaddaq: case Op::vaddai:
         case Op::vsuba: case Op::vsubax: case Op::vsubay: case Op::vsubaz:
         case Op::vsubaw: case Op::vsubaq: case Op::vsubai:
+        // The multiplier truncates the product to 24 bits before the sum, which
+        // these vectors reach with a single rounding over the whole operation.
+        case Op::vmadd: case Op::vmaddx: case Op::vmaddy: case Op::vmaddz:
+        case Op::vmaddw: case Op::vmaddq: case Op::vmaddi:
+        case Op::vmsub: case Op::vmsubx: case Op::vmsuby: case Op::vmsubz:
+        case Op::vmsubw: case Op::vmsubq: case Op::vmsubi:
+        case Op::vmadda: case Op::vmaddax: case Op::vmadday: case Op::vmaddaz:
+        case Op::vmaddaw: case Op::vmaddaq: case Op::vmaddai:
+        case Op::vmsuba: case Op::vmsubax: case Op::vmsubay: case Op::vmsubaz:
+        case Op::vmsubaw: case Op::vmsubaq: case Op::vmsubai:
+        case Op::vopmsub:
+        // The divider and the rooter are non-restoring, and the multiplier's
+        // booth tree drops a bit these vectors keep.
+        case Op::vdiv: case Op::vsqrt: case Op::vrsqrt:
+        case Op::vmul: case Op::vmulx: case Op::vmuly: case Op::vmulz:
+        case Op::vmulw: case Op::vmulq: case Op::vmuli:
+        case Op::vmula: case Op::vmulax: case Op::vmulay: case Op::vmulaz:
+        case Op::vmulaw: case Op::vmulaq: case Op::vmulai:
+        case Op::vopmula:
             return true;
         default:
             return false;
@@ -268,7 +287,7 @@ void setUp(EeContext& ee, const Case& k) {
     ee.fpu.fpr[k.ft] = k.ftValue;
     ee.fpu.fcr31 = k.fcr31;
     ee.fpu.acc = k.facc;
-    ee.vu0.acc = k.acc;
+    ee.vu0.loadAcc(k.acc);
     ee.vu0.vi[Vu::kQ] = k.q;
     ee.vu0.vi[Vu::kP] = k.p;
     ee.vu0.vi[Vu::kStatus] = k.vstatus;
@@ -299,7 +318,7 @@ void setUp(EeContext& ee, const Case& k) {
         } else if (ch.file == "vi") {
             ee.vu0.vi[ch.index & 31] = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "acc") {
-            ee.vu0.acc = ch.before;
+            ee.vu0.loadAcc(ch.before);
         } else if (ch.file == "q") {
             ee.vu0.vi[Vu::kQ] = static_cast<u32>(ch.before.lo);
         } else if (ch.file == "sa") {

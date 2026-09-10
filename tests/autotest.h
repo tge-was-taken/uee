@@ -16,6 +16,9 @@
 #include <string>
 #include <string_view>
 #include <chrono>
+#include <format>
+
+#include <unistd.h>
 #include <vector>
 
 namespace uee::autotest {
@@ -73,6 +76,25 @@ inline void reportDifferences(std::string_view name, std::string_view actual,
     }
 }
 
+class ScratchDirectory {
+public:
+    explicit ScratchDirectory(const std::string& name)
+        : mPath(std::filesystem::temp_directory_path() /
+                std::format("uee-{}-{}", name, getpid())) {
+        std::filesystem::remove_all(mPath);
+        std::filesystem::create_directories(mPath);
+    }
+    ~ScratchDirectory() { std::filesystem::remove_all(mPath); }
+
+    ScratchDirectory(const ScratchDirectory&) = delete;
+    ScratchDirectory& operator=(const ScratchDirectory&) = delete;
+
+    const std::filesystem::path& path() const { return mPath; }
+
+private:
+    std::filesystem::path mPath;
+};
+
 inline int run(int argc, char** argv, FunctionRunner translated) {
     configureLogging();
     if (argc < 3) {
@@ -88,6 +110,11 @@ inline int run(int argc, char** argv, FunctionRunner translated) {
     Kernel kernel(interpreter.ee, memory);
 
     interpreter.ee.cpu.pc = loadElf(readFile(elfPath), memory).entry;
+
+    // The recordings were made on a console with a usb stick mounted, and a
+    // test that finds one allocates for it before it measures anything.
+    const ScratchDirectory storage(name);
+    kernel.attachFiles(storage.path());
 
     Machine machine{interpreter, memory, kernel.mmio(), kernel, kernel.budget(), translated};
     const Stop stop = run(machine, kTimeLimit);

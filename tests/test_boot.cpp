@@ -21,7 +21,7 @@
 
 namespace {
 
-uee::LoggerChannel log("boot");
+uee::LoggerChannel logger("boot");
 
 // Only a bound on a guest that never reaches its checkpoint.
 constexpr std::chrono::seconds kTimeLimit{300};
@@ -34,7 +34,7 @@ struct Options {
 };
 
 [[noreturn]] void fail(const std::string& message) {
-    log.fatal("{}", message);
+    logger.fatal("{}", message);
     std::exit(2);
 }
 
@@ -141,15 +141,15 @@ int main(int argc, char** argv) {
     const u64 reached = kernel.symbolWatch().getHits(options.checkpoint);
 
     if (isClean(stop.reason) && reached >= options.entries) {
-        log.info("{}, {} entered {} times", uee::describe(stop), options.checkpoint, reached);
+        logger.info("{}, {} entered {} times", uee::describe(stop), options.checkpoint, reached);
         return 0;
     }
 
     if (!isClean(stop.reason)) {
-        log.error("{}", uee::describe(stop));
+        logger.error("{}", uee::describe(stop));
     }
     if (reached < options.entries) {
-        log.error("{} entered {} times, wanted {}", options.checkpoint, reached,
+        logger.error("{} entered {} times, wanted {}", options.checkpoint, reached,
                   options.entries);
     }
     std::fputs(kernel.readOutput().c_str(), stdout);

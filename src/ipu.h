@@ -21,6 +21,9 @@ public:
     bool write(u32 address, u32 value);
 
 private:
+    u32 mControl = 0;
+    u32 mBitPosition = 0;
+    u32 mDecoded = 0;
     std::vector<u8> mStream;
 };
 
