@@ -384,12 +384,14 @@ void Vif::execute(u32 code) {
     switch (command) {
         case code::kNop: return;
         case code::kStcycl: mCycle = immediate; return;
-        case code::kOffset: mOffset = immediate & 0x3FFu; return;
-        case code::kBase:
-            mBase = immediate & 0x3FFu;
+        // The offset is what restarts double buffering, from the first buffer;
+        // a base on its own waits for the next swap or offset to take effect.
+        case code::kOffset:
+            mOffset = immediate & 0x3FFu;
             mTops = mBase;
             mSecondBuffer = false;
             return;
+        case code::kBase: mBase = immediate & 0x3FFu; return;
         case code::kItop: mItops = immediate & 0x3FFu; return;
         case code::kStmod: mMode = immediate & 3u; return;
         case code::kMskpath3:
