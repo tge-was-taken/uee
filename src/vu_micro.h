@@ -20,6 +20,11 @@ public:
 
     Outcome run(u32 start);
 
+    void begin(u32 start);
+    // Runs one instruction pair; true once the program has ended.
+    bool step();
+    u32 getProgramCounter() const { return mProgramCounter; }
+
 private:
     u32 instructionBase() const;
     u32 instructionCount() const;
@@ -28,6 +33,7 @@ private:
 
     void executeUpper(u32 code);
     void executeLower(u32 code);
+    void executeLowerBeside(u32 upper, u32 lower, const Reg128& upperBefore);
     u32 elementaryFunction(u32 wide, u32 code, u32 vs);
     static u32 functionLatency(u32 wide);
     u32 quotientOf(u32 code, u32 vs, u32 vt);
@@ -60,6 +66,7 @@ private:
     u32 mBranchTarget = 0;
     bool mBranching = false;
     bool mEnding = false;
+    u32 mEndDelay = 1;
     // A clip result reaches the register a program can read four instructions
     // after the one that worked it out.
     static constexpr u32 kClipDelay = 4;

@@ -128,6 +128,25 @@ constexpr u32 fsOf(u32 code) { return (code >> 11) & 0x1Fu; }
 constexpr u32 fdOf(u32 code) { return (code >> 6) & 0x1Fu; }
 constexpr u32 broadcastOf(u32 code) { return code & 3u; }
 
+// The vector register an upper instruction writes, or zero for one that writes
+// only the accumulator, the clip flags or nothing.
+constexpr u32 upperDestination(u32 code) {
+    if ((code & 0x3Fu) < 0x30u) {
+        return fdOf(code);
+    }
+    if ((code & 0x3Cu) != 0x3Cu) {
+        return 0;
+    }
+    switch (((code >> 6) & 0x1Fu) << 6 | (code & 0x3Fu)) {
+        case 0x13C: case 0x13D: case 0x13E: case 0x13F:
+        case 0x17C: case 0x17D: case 0x17E: case 0x17F:
+        case 0x1FD:
+            return ftOf(code);
+        default:
+            return 0;
+    }
+}
+
 constexpr u32 immediate15(u32 code) {
     return (code & 0x7FFu) | ((code >> 10) & 0x7800u);
 }
@@ -699,14 +718,48 @@ void VuMicro::executeLower(u32 code) {
     }
 }
 
+// The upper result lands several cycles after the pair issues, so the lower
+// instruction beside it reads the register as it was. Where both write the
+// same register, the lanes the upper one names are the ones that stick.
+void VuMicro::executeLowerBeside(u32 upper, u32 lower, const Reg128& upperBefore) {
+    const u32 target = upperDestination(upper);
+    if (target == 0) {
+        executeLower(lower);
+        return;
+    }
+    const Reg128 upperResult = mState.vf[target];
+    mState.vf[target] = upperBefore;
+    executeLower(lower);
+    const u32 dest = destOf(upper);
+    for (s32 i = 0; i < 4; ++i) {
+        if (Vu::writes(dest, i)) {
+            mState.vf[target].setWord(i, upperResult.word(i));
+        }
+    }
+}
+
 // The end bit stops the program one instruction later, so the pair that carries
 // it and the one behind it still run.
 VuMicro::Outcome VuMicro::run(u32 start) {
+    begin(start);
+    for (u32 steps = 0; steps < kRunawayStep; ++steps) {
+        if (step()) {
+            // The counter names where the program would have gone next, and
+            // wraps within the instruction memory like a fetch does.
+            return {(mProgramCounter + 1) % instructionCount(), true};
+        }
+    }
+    settlePipelines();
+    return {mProgramCounter, false};
+}
+
+void VuMicro::begin(u32 start) {
     mProgramCounter = start;
     mBranching = false;
     mEnding = false;
+    mEndDelay = 1;
     for (u32& pending : mClipDelayLine) {
-        pending = mState.clip;
+        pending = mState.vi[Vu::kClip];
     }
     mQuotient = {};
     mFunction = {};
@@ -714,72 +767,69 @@ VuMicro::Outcome VuMicro::run(u32 start) {
     for (u32& ready : mWriteReady) {
         ready = 0;
     }
+}
 
-    u32 remaining = 1;
-    for (u32 steps = 0; steps < kRunawayStep; ++steps) {
-        const u32 address = instructionBase() + (mProgramCounter % instructionCount()) * 8;
-        const u32 lower = mMemory.read32(address);
-        const u32 upper = mMemory.read32(address + 4);
+bool VuMicro::step() {
+    const u32 address = instructionBase() + (mProgramCounter % instructionCount()) * 8;
+    const u32 lower = mMemory.read32(address);
+    const u32 upper = mMemory.read32(address + 4);
 
-        stallUntil(operandsReadyAt(upper, lower));
+    stallUntil(operandsReadyAt(upper, lower));
 
-        const u32 priorStatus = mState.vi[Vu::kStatus];
-        const u32 priorMac = mState.vi[Vu::kMac];
+    const u32 priorStatus = mState.vi[Vu::kStatus];
+    const u32 priorMac = mState.vi[Vu::kMac];
 
-        const bool taken = mBranching;
-        const u32 target = mBranchTarget;
-        mBranching = false;
+    const bool taken = mBranching;
+    const u32 target = mBranchTarget;
+    mBranching = false;
 
-        mState.vi[Vu::kClip] = mClipDelayLine[0];
-        for (u32 i = 0; i + 1 < kClipDelay; ++i) {
-            mClipDelayLine[i] = mClipDelayLine[i + 1];
-        }
-
-        // A wait is a stall, so the result it waits for is already there for the
-        // vector op paired with it.
-        if (isRegisterForm(lower)) {
-            const u32 wide = ((lower >> 6) & 0x1Fu) << 6 | (lower & 0x3Fu);
-            if (wide == lower::kWaitq) {
-                mQuotient.settle(mState.vi[Vu::kQ]);
-            } else if (wide == lower::kWaitp) {
-                mFunction.settle(mState.vi[Vu::kP]);
-            }
-        }
-
-        if ((upper & kEndBit) != 0) {
-            mEnding = true;
-        }
-        executeUpper(upper);
-        if (fdOf(upper) != 0) {
-            mWriteReady[fdOf(upper)] = mCycle + kFmacLatency;
-        }
-        if ((upper & kImmediateBit) != 0) {
-            mState.vi[Vu::kI] = lower;
-        } else {
-            executeLower(lower);
-        }
-
-        mClipDelayLine[kClipDelay - 1] = mState.clip;
-        advancePipelines();
-        mState.advanceFlags();
-        if (mState.vi[Vu::kStatus] != priorStatus || mState.vi[Vu::kMac] != priorMac) {
-            mState.stageFlags(priorStatus & Vu::kStickyMask);
-        }
-        ++mCycle;
-
-        if (mEnding && remaining-- == 0) {
-            // The pipeline has drained by the time the program stops, so the
-            // register a guest reads afterwards holds the final result.
-            mState.vi[Vu::kClip] = mState.clip;
-            settlePipelines();
-            // The counter names where the program would have gone next, and
-            // wraps within the instruction memory like a fetch does.
-            return {(mProgramCounter + 1) % instructionCount(), true};
-        }
-        mProgramCounter = taken ? target : mProgramCounter + 1;
+    mState.vi[Vu::kClip] = mClipDelayLine[0];
+    for (u32 i = 0; i + 1 < kClipDelay; ++i) {
+        mClipDelayLine[i] = mClipDelayLine[i + 1];
     }
-    settlePipelines();
-    return {mProgramCounter, false};
+
+    // A wait is a stall, so the result it waits for is already there for the
+    // vector op paired with it.
+    if (isRegisterForm(lower)) {
+        const u32 wide = ((lower >> 6) & 0x1Fu) << 6 | (lower & 0x3Fu);
+        if (wide == lower::kWaitq) {
+            mQuotient.settle(mState.vi[Vu::kQ]);
+        } else if (wide == lower::kWaitp) {
+            mFunction.settle(mState.vi[Vu::kP]);
+        }
+    }
+
+    if ((upper & kEndBit) != 0) {
+        mEnding = true;
+    }
+    const Reg128 upperBefore = mState.vf[upperDestination(upper)];
+    executeUpper(upper);
+    if (upperDestination(upper) != 0) {
+        mWriteReady[upperDestination(upper)] = mCycle + kFmacLatency;
+    }
+    if ((upper & kImmediateBit) != 0) {
+        mState.vi[Vu::kI] = lower;
+    } else {
+        executeLowerBeside(upper, lower, upperBefore);
+    }
+
+    mClipDelayLine[kClipDelay - 1] = mState.clip;
+    advancePipelines();
+    mState.advanceFlags();
+    if (mState.vi[Vu::kStatus] != priorStatus || mState.vi[Vu::kMac] != priorMac) {
+        mState.stageFlags(priorStatus & Vu::kStickyMask);
+    }
+    ++mCycle;
+
+    if (mEnding && mEndDelay-- == 0) {
+        // The pipeline has drained by the time the program stops, so the
+        // register a guest reads afterwards holds the final result.
+        mState.vi[Vu::kClip] = mState.clip;
+        settlePipelines();
+        return true;
+    }
+    mProgramCounter = taken ? target : mProgramCounter + 1;
+    return false;
 }
 
 bool runMicroProgram(Vu& state, Memory& memory, Gif* gif, u32 unit, u32 start) {
