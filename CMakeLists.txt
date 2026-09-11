@@ -129,6 +129,21 @@ target_link_libraries(test_execute PRIVATE uee spdlog::spdlog)
 add_test(NAME execute
          COMMAND test_execute ${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors/execute.tsv)
 
+# Vectors PCSX2's interpreters recorded while games ran. They are too large to
+# keep here, so HW_VECTORS_DIR names the directory pcsx2-hook merged them into.
+set(HW_VECTORS_DIR "" CACHE PATH "Directory holding the merged *_vectors.jsonl files")
+add_executable(test_vu1_vectors tests/test_vu1_vectors.cpp)
+target_link_libraries(test_vu1_vectors PRIVATE uee spdlog::spdlog)
+add_executable(test_vif_vectors tests/test_vif_vectors.cpp)
+target_link_libraries(test_vif_vectors PRIVATE uee spdlog::spdlog)
+add_executable(test_spu_vectors tests/test_spu_vectors.cpp)
+target_link_libraries(test_spu_vectors PRIVATE uee spdlog::spdlog)
+if(HW_VECTORS_DIR)
+    add_test(NAME vectors.vu1 COMMAND test_vu1_vectors ${HW_VECTORS_DIR}/vu1_vectors.jsonl)
+    add_test(NAME vectors.vif COMMAND test_vif_vectors ${HW_VECTORS_DIR}/vif_vectors.jsonl)
+    add_test(NAME vectors.spu COMMAND test_spu_vectors ${HW_VECTORS_DIR})
+endif()
+
 add_executable(test_autotest tests/test_autotest.cpp)
 target_link_libraries(test_autotest PRIVATE uee spdlog::spdlog)
 
