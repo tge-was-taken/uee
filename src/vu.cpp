@@ -29,7 +29,6 @@ u32 Vu::controlMask(u32 index) {
 }
 
 void Vu::writeControl(u32 index, u32 value) {
-    // The mask says which bits a write reaches; the rest keep what they had.
     const u32 mask = controlMask(index);
     vi[index] = (vi[index] & ~mask) | (value & mask);
     // The clipping unit's own running value is what the next clip builds on, so

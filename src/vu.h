@@ -38,9 +38,8 @@ struct Vu {
     // The rom leaves every lane of the accumulator set, which a program that
     // reads it without writing it first finds there.
     Reg128 acc{~0ull, ~0ull};
-    // Saturating loses how far past the range a sum went, so the lane stays
-    // marked: the next accumulate that reads it saturates again. What the rom
-    // leaves in the accumulator is itself a saturated value.
+    // Saturating loses how far past the range a sum went, so the next accumulate
+    // saturates again. The rom leaves the accumulator saturated.
     bool accSaturated[4]{true, true, true, true};
     Reg128 beforeCall[32]{};
     bool hasBeforeCall = false;
@@ -48,10 +47,10 @@ struct Vu {
         u32 status;
         u32 mac;
     };
-    Flags mSeenFlags{};
-    Flags mStagedLive{};
-    Flags mStagedFull{};
-    u32 mKeptSticky = 0;
+    Flags seenFlags{};
+    Flags stagedLive{};
+    Flags stagedFull{};
+    u32 keptSticky = 0;
 
     u32 pendingQuotient = 0;
     u32 quotientDelay = 0;
@@ -105,40 +104,38 @@ struct Vu {
     // asked for it, and a read before then sees what the register held.
     static constexpr u32 kQuotientDelay = 6;
 
-    // The flag registers an instruction leaves take an instruction to be
-    // readable, and the four sticky copies of the mac bits arrive one after
-    // that. The two the divider owns are not among them.
+    // Flags are readable one instruction later and their sticky copies one after
+    // that, except the two the divider owns.
     static constexpr u32 kStickyMask = 0x3C0u;
 
-    void stageFlags(u32 keptSticky) {
-        mStagedLive = {(vi[kStatus] & ~kStickyMask) | keptSticky, vi[kMac]};
-        mStagedFull = {vi[kStatus], vi[kMac]};
+    void stageFlags(u32 sticky) {
+        stagedLive = {(vi[kStatus] & ~kStickyMask) | sticky, vi[kMac]};
+        stagedFull = {vi[kStatus], vi[kMac]};
     }
 
     void advanceFlags() {
-        mSeenFlags = mStagedLive;
-        mStagedLive = mStagedFull;
+        seenFlags = stagedLive;
+        stagedLive = stagedFull;
     }
 
-    // The pair a macro instruction runs between: the first publishes what the
-    // one before it left and remembers the sticky bits, the second hands over
-    // what this one produced.
+    // Around each macro instruction: begin publishes what the one before left,
+    // end hands over what this one produced.
     void beginMacro() {
         advanceQuotient();
-        mKeptSticky = vi[kStatus] & kStickyMask;
+        keptSticky = vi[kStatus] & kStickyMask;
         advanceFlags();
     }
 
-    void endMacro() { stageFlags(mKeptSticky); }
+    void endMacro() { stageFlags(keptSticky); }
 
-    void settleFlags() {
-        mSeenFlags = {vi[kStatus], vi[kMac]};
-        mStagedLive = mSeenFlags;
-        mStagedFull = mSeenFlags;
+    void syncFlags() {
+        seenFlags = {vi[kStatus], vi[kMac]};
+        stagedLive = seenFlags;
+        stagedFull = seenFlags;
     }
 
-    u32 readSeenStatus() const { return mSeenFlags.status; }
-    u32 readSeenMac() const { return mSeenFlags.mac; }
+    u32 readSeenStatus() const { return seenFlags.status; }
+    u32 readSeenMac() const { return seenFlags.mac; }
 
     void delayQuotient(u32 previous) {
         pendingQuotient = vi[kQ];
@@ -152,7 +149,7 @@ struct Vu {
         }
     }
 
-    void settleQuotient() {
+    void syncQuotient() {
         if (quotientDelay != 0) {
             vi[kQ] = pendingQuotient;
             quotientDelay = 0;

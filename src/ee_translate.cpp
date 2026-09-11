@@ -236,6 +236,12 @@ std::optional<std::string> EeTranslator::emitOperation(u32 pc, Instruction insn)
     const auto vu3 = [&](const char* name, u32 a, u32 b, u32 c) {
         return std::format("{}(ee.vu0, {}, {}, {});", name, a, b, c);
     };
+    // The three that fill the quotient register hand it over late.
+    const auto delayQuotient = [](const std::string& call) {
+        return std::format("{{ const u32 previous = ee.vu0.vi[Vu::kQ]; {} "
+                           "ee.vu0.delayQuotient(previous); }}",
+                           call);
+    };
     const auto vuField = [&](const char* name, u32 field, u32 a, u32 b) {
         return std::format("{}(ee.vu0, 0x{:x}u, {}, {});", name, field, a, b);
     };
@@ -555,20 +561,12 @@ std::optional<std::string> EeTranslator::emitOperation(u32 pc, Instruction insn)
             return std::format("vclip(ee.vu0, {}, {}); ee.vu0.vi[Vu::kClip] = ee.vu0.clip;",
                                insn.vs(), insn.vt());
         case Op::vdiv:
-            return std::format("{{ const u32 previous = ee.vu0.vi[Vu::kQ]; "
-                               "vdiv(ee.vu0, {}, {}, {}, {}); "
-                               "ee.vu0.delayQuotient(previous); }}",
-                               insn.vs(), insn.fsf(), insn.vt(), insn.ftf());
-        case Op::vsqrt:
-            return std::format("{{ const u32 previous = ee.vu0.vi[Vu::kQ]; "
-                               "vsqrt(ee.vu0, {}, {}); "
-                               "ee.vu0.delayQuotient(previous); }}",
-                               insn.vt(), insn.ftf());
+            return delayQuotient(std::format("vdiv(ee.vu0, {}, {}, {}, {});", insn.vs(),
+                                             insn.fsf(), insn.vt(), insn.ftf()));
+        case Op::vsqrt: return delayQuotient(vu2("vsqrt", insn.vt(), insn.ftf()));
         case Op::vrsqrt:
-            return std::format("{{ const u32 previous = ee.vu0.vi[Vu::kQ]; "
-                               "vrsqrt(ee.vu0, {}, {}, {}, {}); "
-                               "ee.vu0.delayQuotient(previous); }}",
-                               insn.vs(), insn.fsf(), insn.vt(), insn.ftf());
+            return delayQuotient(std::format("vrsqrt(ee.vu0, {}, {}, {}, {});", insn.vs(),
+                                             insn.fsf(), insn.vt(), insn.ftf()));
         case Op::vopmula:
             return vuField("vopmula", insn.dest(), insn.vs(), insn.vt());
         case Op::vopmsub:
@@ -592,10 +590,8 @@ std::optional<std::string> EeTranslator::emitOperation(u32 pc, Instruction insn)
         case Op::tlti: return trapImmediate("tltiTaken");
         case Op::tltiu: return trapImmediate("tltiuTaken");
 
-        case Op::vwaitq: return std::string{"ee.vu0.settleQuotient();"};
-
-        case Op::sync_p: return std::string{"ee.vu0.settleFlags();"};
-
+        case Op::vwaitq: return std::string{"ee.vu0.syncQuotient();"};
+        case Op::sync_p: return std::string{"ee.vu0.syncFlags();"};
         case Op::vnop:
         case Op::cache:
         case Op::pref:
@@ -607,7 +603,7 @@ std::optional<std::string> EeTranslator::emitOperation(u32 pc, Instruction insn)
 
         default: {
             VuForm form;
-            if (!vuFormOf(op, form)) {
+            if (!findVuForm(op, form)) {
                 return std::nullopt;
             }
             const std::string_view name = vuHandlerName(form.kind, form.toAcc);

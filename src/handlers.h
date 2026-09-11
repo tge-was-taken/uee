@@ -955,11 +955,11 @@ inline void writePerformance(R5900& cpu, u32 selector, u32 value) {
 
 inline void mfc0(R5900& cpu, u32 rt, u32 rd, u32 selector) {
     cpu.write32(rt, (rd == cop0::kPerformance) ? readPerformance(cpu, selector)
-                                               : cpu.cop0[cop0::alias(rd)]);
+                                               : cpu.cop0[cop0::resolveAlias(rd)]);
 }
 // The mask names a page size, so a write that does not is rounded to one: a
 // pattern reaching bit 13 fills the field, and one that misses it clears it.
-inline u32 pageMaskOf(u32 value) {
+inline u32 roundPageMask(u32 value) {
     constexpr u32 kField = 0x01FFE000u;
     return (value & 0x2000u) != 0 ? kField : 0u;
 }
@@ -987,10 +987,10 @@ inline void mtc0(R5900& cpu, u32 rt, u32 rd, u32 selector) {
     }
     const u32 written = low(cpu.gpr[rt]);
     if (rd == cop0::kPageMask) {
-        cpu.cop0[rd] = pageMaskOf(written);
+        cpu.cop0[rd] = roundPageMask(written);
         return;
     }
-    const u32 mask = cop0::writeMask(rd);
+    const u32 mask = cop0::getWriteMask(rd);
     cpu.cop0[rd] = (cpu.cop0[rd] & ~mask) | (written & mask);
     // Writing the register the counter is compared against is what withdraws
     // the interrupt it raised.
@@ -1113,7 +1113,7 @@ inline void cfc2(R5900& cpu, Vu& vu0, u32 rt, u32 rd, bool interlocked) {
 inline void ctc2(R5900& cpu, EeContext& ee, Memory& memory, u32 rt, u32 rd) {
     ee.vu0.writeControl(rd, low(cpu.gpr[rt]));
     if (rd == Vu::kStatus || rd == Vu::kMac || rd == Vu::kClip) {
-        ee.vu0.settleFlags();
+        ee.vu0.syncFlags();
     }
     if (rd == Vu::kFbrst) {
         ee.vu0.applyForceBreak(low(cpu.gpr[rt]));

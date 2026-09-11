@@ -185,17 +185,17 @@ constexpr u32 kCounterInterrupt = 1u << 15;
 
 // A reserved number answers with a real register rather than one of its own,
 // and writing all ones and reading back is where each mask came from.
-constexpr u32 alias(u32 index) {
+constexpr u32 resolveAlias(u32 index) {
     switch (index) {
         case 7: return kWired;
         case 17: case 18: case 19: return kConfig;
-        case 20: case 21: case 22: return 23;
+        case 20: case 21: case 22: return kBadPAddr;
         case 31: return kProcessorId;
         default: return index;
     }
 }
 
-constexpr u32 writeMask(u32 index) {
+constexpr u32 getWriteMask(u32 index) {
     switch (index) {
         case kIndex: return 0x8000003Fu;
         case kContext: return 0xFF800000u;
@@ -203,7 +203,7 @@ constexpr u32 writeMask(u32 index) {
         case kEntryLo1: return 0x03FFFFFFu;
         case kPageMask: return 0x01FFE000u;
         case 1: case 7: case 15: case kConfig:
-        case 17: case 18: case 19: case 20: case 21: case 22: case 23:
+        case 17: case 18: case 19: case 20: case 21: case 22: case kBadPAddr:
         case 26: case 27: case 31:
             return 0u;
         default: return 0xFFFFFFFFu;

@@ -27,7 +27,7 @@ inline u32 flushDenormal(u32 bits) {
 }
 
 // ldexp and frexp do not inline, and this is the path every result takes.
-inline f64 twoTo(s32 exponent) {
+inline f64 getPowerOfTwo(s32 exponent) {
     return std::bit_cast<f64>(static_cast<u64>(exponent + 1023) << 52);
 }
 
@@ -38,7 +38,7 @@ inline f64 roundDown(f64 value) {
 }
 
 // What frexp reports: the magnitude is its mantissa in [0.5, 1) times this.
-inline s32 binaryExponent(f64 magnitude) {
+inline s32 getBinaryExponent(f64 magnitude) {
     return static_cast<s32>((std::bit_cast<u64>(magnitude) >> 52) & 0x7FFu) - 1022;
 }
 
@@ -49,12 +49,12 @@ inline f64 widen(u32 bits) {
         return sign * 0.0;
     }
     return sign * static_cast<f64>(0x800000u | (bits & 0x7FFFFFu)) *
-           twoTo(static_cast<s32>(exponent) - 150);
+           getPowerOfTwo(static_cast<s32>(exponent) - 150);
 }
 
 // Nothing here is unordered, so once denormals flush the patterns are a total
 // order and a comparison is an integer one.
-inline s32 orderKey(u32 bits) {
+inline s32 getOrderKey(u32 bits) {
     const u32 clean = flushDenormal(bits);
     return (clean & kSignMask) ? -static_cast<s32>(clean & kMagnitudeMask)
                                : static_cast<s32>(clean);
@@ -62,14 +62,14 @@ inline s32 orderKey(u32 bits) {
 
 // The vector unit's max and mini order the patterns as they stand, keeping the
 // two zeros apart and denormals intact.
-inline s32 vuOrderKey(u32 bits) {
+inline s32 getVuOrderKey(u32 bits) {
     return (bits & kSignMask) ? ~static_cast<s32>(bits & kMagnitudeMask)
                               : static_cast<s32>(bits);
 }
 
 // max.s and min.s do see the sign of a zero, so they need an order that keeps
 // the two zeros apart.
-inline s32 signedOrderKey(u32 bits) {
+inline s32 getSignedOrderKey(u32 bits) {
     const u32 clean = flushDenormal(bits);
     return (clean & kSignMask) ? ~static_cast<s32>(clean & kMagnitudeMask)
                                : static_cast<s32>(clean);
@@ -138,7 +138,7 @@ inline f64 widenParts(Parts value) {
         return (value.sign ? -1.0 : 1.0) * 0.0;
     }
     return (value.sign ? -1.0 : 1.0) * static_cast<f64>(value.significand) *
-           twoTo(value.exponent - 150);
+           getPowerOfTwo(value.exponent - 150);
 }
 
 // The rounding is fixed at every call, so each one gets the arithmetic it
@@ -152,8 +152,8 @@ inline Parts packParts(Wide exact) {
         return {sign, 0, 0};
     }
 
-    s32 exponent = binaryExponent(magnitude);
-    const f64 scale = twoTo(24 - exponent);
+    s32 exponent = getBinaryExponent(magnitude);
+    const f64 scale = getPowerOfTwo(24 - exponent);
     const f64 scaled = magnitude * scale;
     f64 significand = roundDown(scaled);
     const f64 residual = negative ? -exact.low : exact.low;
@@ -243,17 +243,15 @@ inline Rounded addParts(Parts a, Parts b) {
     return join(addToParts(a, b));
 }
 
-// The booth tree skips a few of the low adds, so bit 15 of the product can
-// disagree with the exact one and borrow upward. The recode reads the second
-// operand, which is why the multiply is not commutative.
-//
+// The booth tree skips a few low adds, so bit 15 can borrow upward. The recode
+// reads the second operand, which makes the multiply not commutative.
 // From the reverse engineered EE multiplier in PCSX2 PR #12001, PS2Float.cpp.
 struct BoothDigit {
     u32 data;
     u32 negate;
 };
 
-inline BoothDigit boothDigit(u32 a, u32 b, u32 place) {
+inline BoothDigit computeBoothDigit(u32 a, u32 b, u32 place) {
     const u32 test = (place != 0 ? b >> (place * 2 - 1) : b << 1) & 7u;
     u32 value = a << (place * 2);
     value += (test == 3 || test == 4) ? value : 0u;
@@ -274,15 +272,15 @@ inline CarrySave addThree(u32 a, u32 b, u32 c) {
     return {u ^ c, ((u & c) | (a & b)) << 1};
 }
 
-UEE_NOINLINE inline u64 boothProduct(u32 a, u32 b, u64 exact) {
-    const BoothDigit d0 = boothDigit(a, b, 0);
-    const BoothDigit d1 = boothDigit(a, b, 1);
-    const BoothDigit d2 = boothDigit(a, b, 2);
-    const BoothDigit d3 = boothDigit(a, b, 3);
-    const BoothDigit d4 = boothDigit(a, b, 4);
-    const BoothDigit d5 = boothDigit(a, b, 5);
-    const BoothDigit d6 = boothDigit(a, b, 6);
-    BoothDigit d7 = boothDigit(a, b, 7);
+UEE_NOINLINE inline u64 computeBoothProduct(u32 a, u32 b, u64 exact) {
+    const BoothDigit d0 = computeBoothDigit(a, b, 0);
+    const BoothDigit d1 = computeBoothDigit(a, b, 1);
+    const BoothDigit d2 = computeBoothDigit(a, b, 2);
+    const BoothDigit d3 = computeBoothDigit(a, b, 3);
+    const BoothDigit d4 = computeBoothDigit(a, b, 4);
+    const BoothDigit d5 = computeBoothDigit(a, b, 5);
+    const BoothDigit d6 = computeBoothDigit(a, b, 6);
+    BoothDigit d7 = computeBoothDigit(a, b, 7);
 
     const CarrySave t0 = addThree(d1.data, d2.data, d3.data);
     CarrySave t1 = addThree(d4.data & ~0x7FFu, d5.data & ~0xFFFu, d6.data);
@@ -301,7 +299,7 @@ UEE_NOINLINE inline u64 boothProduct(u32 a, u32 b, u64 exact) {
 
 // The unit truncates 48 bits back to 24. The exponent is left unbounded so a
 // caller can accumulate before the range check, which is what madd.s does.
-inline Parts mulParts(Parts a, Parts b) {
+inline Parts multiplyParts(Parts a, Parts b) {
     if (a.significand == 0 || b.significand == 0) {
         return {a.sign ^ b.sign, 0, 0};
     }
@@ -310,7 +308,7 @@ inline Parts mulParts(Parts a, Parts b) {
     // zero, so the tree is worth running for nothing else.
     const u64 wide = (exact & 0x7FFFFFu) >= 0x8000u
                          ? exact
-                         : boothProduct(a.significand, b.significand, exact);
+                         : computeBoothProduct(a.significand, b.significand, exact);
     const bool carried = (wide >> 47) != 0;
     const u32 significand = static_cast<u32>(wide >> (carried ? 24 : 23));
     return {a.sign ^ b.sign, a.exponent + b.exponent - 127 + (carried ? 1 : 0), significand};
@@ -327,24 +325,22 @@ inline Rounded sub(u32 a, u32 b) {
 }
 
 inline Rounded mul(u32 a, u32 b) {
-    const Parts product = mulParts(split(a), split(b));
+    const Parts product = multiplyParts(split(a), split(b));
     return join(product);
 }
 
 // The accumulate keeps the product at its true exponent, so a product that
 // would have saturated on its own still dominates the sum.
 inline Rounded multiplyAdd(u32 acc, u32 a, u32 b, bool subtract) {
-    Parts product = mulParts(split(a), split(b));
+    Parts product = multiplyParts(split(a), split(b));
     if (subtract) {
         product.sign ^= kSignMask;
     }
     return addParts(split(acc), product);
 }
 
-// A radix-2 non-restoring divider and rooter over a carry-save residual, 25
-// digits in {-1, 0, 1} and no rounding step: the answer lands on the floor of
-// the exact value or one above it depending on the residual's trajectory.
-//
+// Radix-2 non-restoring, carry-save, 25 digits and no rounding step: the answer
+// is the exact floor or one above it, depending on the residual.
 // From the reverse engineered EE divider in PCSX2 PR #12001, PS2Float.cpp.
 inline s32 selectDigit(CarrySave current) {
     constexpr u32 mask = (1u << 24) - 1;
@@ -359,7 +355,7 @@ inline s32 selectDigit(CarrySave current) {
     return 0;
 }
 
-inline u32 storedSignificand(u32 bits) {
+inline u32 getStoredSignificand(u32 bits) {
     return (bits & 0x7FFFFFu) | 0x800000u;
 }
 
@@ -374,8 +370,8 @@ inline Rounded div(u32 a, u32 b) {
         return {sign, false, false};
     }
 
-    const u32 divisor = storedSignificand(a) << 2;
-    const u32 dividend = storedSignificand(b) << 2;
+    const u32 divisor = getStoredSignificand(a) << 2;
+    const u32 dividend = getStoredSignificand(b) << 2;
     CarrySave current{divisor, 0};
     u32 quotient = 0;
     s32 digit = 1;
@@ -406,7 +402,7 @@ inline Rounded sqrt(u32 a) {
     if ((clean & 0x7F800000u) == 0) {
         return {};
     }
-    u32 radicand = storedSignificand(clean) << 1;
+    u32 radicand = getStoredSignificand(clean) << 1;
     if ((clean & 0x800000u) == 0) {
         radicand <<= 1;
     }
@@ -437,7 +433,7 @@ inline Rounded rsqrt(u32 a, u32 b) {
 
 // Comparing patterns keeps the top exponent away from the host FPU, where it
 // would read as an infinity or a NaN.
-inline s32 toInt32(u32 bits) {
+inline s32 convertToInt32(u32 bits) {
     const u32 clean = flushDenormal(bits);
     if ((clean & kMagnitudeMask) >= 0x4F000000u) {
         return (clean & kSignMask) ? INT32_MIN : INT32_MAX;
@@ -449,7 +445,7 @@ inline u32 clampToVu(u32 bits) {
     return ((bits & kMagnitudeMask) > kVuLargest) ? ((bits & kSignMask) | kVuLargest) : bits;
 }
 
-inline u32 fromInt32(s32 value) {
+inline u32 convertFromInt32(s32 value) {
     return truncate(static_cast<f64>(value)).bits;
 }
 

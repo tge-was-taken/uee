@@ -24,24 +24,16 @@ struct VuForm {
     bool toAcc;
 };
 
-inline f64 vuLane(const Reg128& r, s32 i) {
-    return single::widen(r.word(i));
-}
-
 // An operand above the range is brought down; a saturated result is not.
-inline u32 vuSaturate(single::Rounded rounded) {
+inline u32 clampVuResult(single::Rounded rounded) {
     return rounded.overflow ? rounded.bits : single::clampToVu(rounded.bits);
 }
 
-inline u32 vuRound(single::Wide exact) {
-    return vuSaturate(single::truncate(exact));
+inline u32 getRangeFlags(single::Rounded rounded) {
+    return (rounded.underflow ? Vu::kUnderflow : 0u) | (rounded.overflow ? Vu::kOverflow : 0u);
 }
 
-inline u32 vuRound(f64 exact) {
-    return vuRound(single::Wide{exact, 0});
-}
-
-inline u32 vuOperand(const Vu& vu0, VuSource source, const Reg128& vt, s32 i) {
+inline u32 readOperand(const Vu& vu0, VuSource source, const Reg128& vt, s32 i) {
     switch (source) {
         case VuSource::X: return vt.word(0);
         case VuSource::Y: return vt.word(1);
@@ -55,20 +47,20 @@ inline u32 vuOperand(const Vu& vu0, VuSource source, const Reg128& vt, s32 i) {
 
 // The adder loses whatever shifts past its width.
 template <VuKind kind>
-inline u32 vuCombine(const Vu& vu0, u32 a, u32 b, s32 i) {
+inline u32 combineLane(const Vu& vu0, u32 a, u32 b, s32 i) {
     if constexpr (kind == VuKind::Add) {
-        return vuSaturate(single::add(a, b));
+        return clampVuResult(single::add(a, b));
     } else if constexpr (kind == VuKind::Sub) {
-        return vuSaturate(single::sub(a, b));
+        return clampVuResult(single::sub(a, b));
     } else if constexpr (kind == VuKind::Mul) {
-        return vuSaturate(single::mul(a, b));
+        return clampVuResult(single::mul(a, b));
     } else if constexpr (kind == VuKind::Max) {
         // Nothing is computed, so the operand is passed on whole.
-        return single::vuOrderKey(a) > single::vuOrderKey(b) ? a : b;
+        return single::getVuOrderKey(a) > single::getVuOrderKey(b) ? a : b;
     } else if constexpr (kind == VuKind::Mini) {
-        return single::vuOrderKey(a) < single::vuOrderKey(b) ? a : b;
+        return single::getVuOrderKey(a) < single::getVuOrderKey(b) ? a : b;
     } else {
-        return vuSaturate(
+        return clampVuResult(
             single::multiplyAdd(vu0.acc.word(i), a, b, kind == VuKind::Msub));
     }
 }
@@ -76,7 +68,7 @@ inline u32 vuCombine(const Vu& vu0, u32 a, u32 b, s32 i) {
 // The four-lane path reports neither the range nor the exponent the accumulator
 // keeps, so a result that saturated or vanished is worked out again here.
 template <VuKind kind>
-inline single::Parts exactLane(const Vu& vu0, u32 a, u32 b, s32 i) {
+inline single::Parts computeExactLane(const Vu& vu0, u32 a, u32 b, s32 i) {
     if constexpr (kind == VuKind::Add) {
         return single::addToParts(single::split(a), single::split(b));
     } else if constexpr (kind == VuKind::Sub) {
@@ -84,9 +76,9 @@ inline single::Parts exactLane(const Vu& vu0, u32 a, u32 b, s32 i) {
         negated.sign ^= single::kSignMask;
         return single::addToParts(single::split(a), negated);
     } else if constexpr (kind == VuKind::Mul) {
-        return single::mulParts(single::split(a), single::split(b));
+        return single::multiplyParts(single::split(a), single::split(b));
     } else {
-        single::Parts product = single::mulParts(single::split(a), single::split(b));
+        single::Parts product = single::multiplyParts(single::split(a), single::split(b));
         if constexpr (kind == VuKind::Msub) {
             product.sign ^= single::kSignMask;
         }
@@ -133,7 +125,7 @@ UEE_NOINLINE inline void computeLanes(const Vu& vu0, const Reg128& a, const Reg1
         return;
     }
     for (s32 i = 0; i < 4; ++i) {
-        out[i] = vuCombine<kind>(vu0, a.word(i), b.word(i), i);
+        out[i] = combineLane<kind>(vu0, a.word(i), b.word(i), i);
     }
 }
 
@@ -143,7 +135,7 @@ inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32
                      u32 vt) {
     const Reg128 a = vu0.readVf(vs);
     const Reg128 read = vu0.readVf(vt);
-    const u32 shared = vuOperand(vu0, source, read, 0);
+    const u32 shared = readOperand(vu0, source, read, 0);
     const Reg128 b =
         source == VuSource::Vt ? read : lanes(shared, shared, shared, shared);
     u32 out[4];
@@ -158,9 +150,8 @@ inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32
             u32 productFlags[4];
             for (s32 i = 0; i < 4; ++i) {
                 const single::Rounded rounded = single::mul(a.word(i), b.word(i));
-                product[i] = vuSaturate(rounded);
-                productFlags[i] = (rounded.underflow ? Vu::kUnderflow : 0u) |
-                                  (rounded.overflow ? Vu::kOverflow : 0u);
+                product[i] = clampVuResult(rounded);
+                productFlags[i] = getRangeFlags(rounded);
             }
             vu0.addSticky(dest, product, productFlags);
         }
@@ -171,10 +162,8 @@ inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32
         for (s32 i = 0; i < 4; ++i) {
             flags[i] = 0;
             if (needsExactLane(out[i])) {
-                const single::Rounded rounded =
-                    single::join(exactLane<kind>(vu0, a.word(i), b.word(i), i));
-                flags[i] = (rounded.underflow ? Vu::kUnderflow : 0u) |
-                           (rounded.overflow ? Vu::kOverflow : 0u);
+                flags[i] = getRangeFlags(
+                    single::join(computeExactLane<kind>(vu0, a.word(i), b.word(i), i)));
             }
             if constexpr (readsAcc) {
                 if (vu0.accSaturated[i]) {
@@ -319,15 +308,15 @@ inline void vabs(Vu& vu0, u32 dest, u32 vt, u32 vs) {
     vectorUnary(vu0, dest, vt, vs, [](u32 word) { return word & ~single::kSignMask; });
 }
 // The scaled conversions read and write fixed point
-constexpr u32 powerOfTwo(s32 exponent) { return static_cast<u32>(127 + exponent) << 23; }
+constexpr u32 encodePowerOfTwo(s32 exponent) { return static_cast<u32>(127 + exponent) << 23; }
 
 inline void vitof(Vu& vu0, u32 dest, u32 vt, u32 vs, s32 fraction) {
     vectorUnary(vu0, dest, vt, vs, [fraction](u32 word) {
-        const u32 value = single::fromInt32(static_cast<s32>(word));
+        const u32 value = single::convertFromInt32(static_cast<s32>(word));
         if (fraction == 0) {
             return value;
         }
-        return single::clampToVu(single::mul(value, powerOfTwo(-fraction)).bits);
+        return single::clampToVu(single::mul(value, encodePowerOfTwo(-fraction)).bits);
     });
 }
 
@@ -335,8 +324,8 @@ inline void vftoi(Vu& vu0, u32 dest, u32 vt, u32 vs, s32 fraction) {
     vectorUnary(vu0, dest, vt, vs, [fraction](u32 word) {
         const u32 scaled =
             fraction == 0 ? word
-                          : single::clampToVu(single::mul(word, powerOfTwo(fraction)).bits);
-        return static_cast<u32>(single::toInt32(scaled));
+                          : single::clampToVu(single::mul(word, encodePowerOfTwo(fraction)).bits);
+        return static_cast<u32>(single::convertToInt32(scaled));
     });
 }
 
@@ -356,31 +345,30 @@ inline void viaddi(Vu& vu0, u32 vit, u32 vis, s32 imm) {
     vu0.writeVi(vit, vu0.readVi(vis) + static_cast<u32>(imm));
 }
 
-inline u32 vuDataAddress(u32 pointer) {
+inline u32 getDataAddress(u32 pointer) {
     return kVu0DataBase + (pointer * 16u) % kVu0MemorySize;
 }
 
 // Both units run these, so the window they address is the caller's to say.
-inline u32 vuIntegerAddress(const Vu& vu, u32 vis, u32 base, u32 size, s32 offset) {
+inline u32 getIntegerAddress(const Vu& vu, u32 vis, u32 base, u32 size, s32 offset) {
     return base + ((vu.readVi(vis) + static_cast<u32>(offset)) * 16u) % size;
 }
 
-// A load encodes the field into one lane rather than picking a bit out of it,
-// so a field with more than one bit set names a lane that need not be among
-// them and an empty field still names one.
-inline u32 integerLane(u32 dest) {
+// The field is encoded into one lane rather than picked apart, so several bits
+// can name a lane outside them and no bits still names one.
+inline u32 getIntegerLane(u32 dest) {
     const bool x = (dest & 8u) != 0, y = (dest & 4u) != 0, z = (dest & 2u) != 0;
     return (x == y ? 2u : 0u) | (!x && !z ? 1u : 0u);
 }
 
 inline void vilwr(Vu& vu, Memory& memory, u32 dest, u32 vit, u32 vis, u32 base, u32 size,
                   s32 offset = 0) {
-    const u32 address = vuIntegerAddress(vu, vis, base, size, offset);
-    vu.writeVi(vit, memory.read32(address + 4u * integerLane(dest)));
+    const u32 address = getIntegerAddress(vu, vis, base, size, offset);
+    vu.writeVi(vit, memory.read32(address + 4u * getIntegerLane(dest)));
 }
 inline void viswr(Vu& vu, Memory& memory, u32 dest, u32 vit, u32 vis, u32 base, u32 size,
                   s32 offset = 0) {
-    const u32 address = vuIntegerAddress(vu, vis, base, size, offset);
+    const u32 address = getIntegerAddress(vu, vis, base, size, offset);
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i)) {
             memory.write32(address + 4u * static_cast<u32>(i), vu.readVi(vit));
@@ -390,7 +378,7 @@ inline void viswr(Vu& vu, Memory& memory, u32 dest, u32 vit, u32 vis, u32 base, 
 inline void vsqi(Vu& vu0, Memory& memory, u32 dest, u32 vs, u32 vit) {
     const u32 pointer = vu0.readVi(vit);
     const Reg128 value = vu0.readVf(vs);
-    const u32 address = vuDataAddress(pointer);
+    const u32 address = getDataAddress(pointer);
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i)) {
             memory.write32(address + 4u * static_cast<u32>(i), value.word(i));
@@ -399,54 +387,50 @@ inline void vsqi(Vu& vu0, Memory& memory, u32 dest, u32 vs, u32 vit) {
     vu0.writeVi(vit, pointer + 1);
 }
 
-inline f64 vuRootOfLane(const Reg128& vt, u32 field) {
-    return std::sqrt(std::abs(vuLane(vt, static_cast<s32>(field))));
-}
-
 inline bool isZeroLane(u32 bits) {
     return (single::flushDenormal(bits) & single::kMagnitudeMask) == 0;
 }
 
 // The divider truncates twice, which no single rounding reproduces.
-inline Vu::Quotient divide(u32 a, u32 b) {
+inline Vu::Quotient computeVuQuotient(u32 a, u32 b) {
     if (isZeroLane(b)) {
         return {((a ^ b) & single::kSignMask) | single::kLargest, isZeroLane(a),
                 !isZeroLane(a)};
     }
-    return {vuSaturate(single::div(a, b)), false, false};
+    return {clampVuResult(single::div(a, b)), false, false};
 }
 
 // The sign is dropped rather than answered, so a negative radicand is only
 // reported, never refused.
-inline Vu::Quotient root(u32 b) {
-    return {vuSaturate(single::sqrt(b)), (b & single::kSignMask) != 0, false};
+inline Vu::Quotient computeVuRoot(u32 b) {
+    return {clampVuResult(single::sqrt(b)), (b & single::kSignMask) != 0, false};
 }
 
-inline Vu::Quotient inverseRoot(u32 a, u32 b) {
+inline Vu::Quotient computeVuInverseRoot(u32 a, u32 b) {
     const bool negative = (b & single::kSignMask) != 0;
     // The root has no sign left to contribute, so the numerator carries it.
     if (isZeroLane(b)) {
         return {(a & single::kSignMask) | single::kLargest,
                 negative || isZeroLane(a), !isZeroLane(a)};
     }
-    return {vuSaturate(single::rsqrt(a, b)), negative, false};
+    return {clampVuResult(single::rsqrt(a, b)), negative, false};
 }
 
 inline void vdiv(Vu& vu0, u32 vs, u32 fsf, u32 vt, u32 ftf) {
-    const Vu::Quotient q = divide(vu0.readVf(vs).word(static_cast<s32>(fsf)),
+    const Vu::Quotient q = computeVuQuotient(vu0.readVf(vs).word(static_cast<s32>(fsf)),
                               vu0.readVf(vt).word(static_cast<s32>(ftf)));
     vu0.setDivideFlags(q.invalid, q.byZero);
     vu0.vi[Vu::kQ] = q.value;
 }
 
 inline void vsqrt(Vu& vu0, u32 vt, u32 ftf) {
-    const Vu::Quotient q = root(vu0.readVf(vt).word(static_cast<s32>(ftf)));
+    const Vu::Quotient q = computeVuRoot(vu0.readVf(vt).word(static_cast<s32>(ftf)));
     vu0.setDivideFlags(q.invalid, q.byZero);
     vu0.vi[Vu::kQ] = q.value;
 }
 
 inline void vrsqrt(Vu& vu0, u32 vs, u32 fsf, u32 vt, u32 ftf) {
-    const Vu::Quotient q = inverseRoot(vu0.readVf(vs).word(static_cast<s32>(fsf)),
+    const Vu::Quotient q = computeVuInverseRoot(vu0.readVf(vs).word(static_cast<s32>(fsf)),
                                    vu0.readVf(vt).word(static_cast<s32>(ftf)));
     vu0.setDivideFlags(q.invalid, q.byZero);
     vu0.vi[Vu::kQ] = q.value;
@@ -471,10 +455,6 @@ inline void vclip(Vu& vu0, u32 vs, u32 vt) {
 
 constexpr u32 kOuterProductDest = 0xEu;
 
-inline u32 rangeFlags(single::Rounded rounded) {
-    return (rounded.underflow ? Vu::kUnderflow : 0u) | (rounded.overflow ? Vu::kOverflow : 0u);
-}
-
 inline void vopmula(Vu& vu0, u32 dest, u32 vs, u32 vt) {
     const Reg128 a = vu0.readVf(vs);
     const Reg128 b = vu0.readVf(vt);
@@ -483,8 +463,8 @@ inline void vopmula(Vu& vu0, u32 dest, u32 vs, u32 vt) {
     bool saturated[4]{};
     for (s32 i = 0; i < 3; ++i) {
         const single::Rounded rounded = single::mul(a.word((i + 1) % 3), b.word((i + 2) % 3));
-        out[i] = vuSaturate(rounded);
-        flags[i] = rangeFlags(rounded);
+        out[i] = clampVuResult(rounded);
+        flags[i] = getRangeFlags(rounded);
         saturated[i] = rounded.overflow;
     }
     const u32 written = dest & kOuterProductDest;
@@ -502,13 +482,13 @@ inline void vopmsub(Vu& vu0, u32 dest, u32 vd, u32 vs, u32 vt) {
     for (s32 i = 0; i < 3; ++i) {
         const single::Rounded multiplied =
             single::mul(a.word((i + 1) % 3), b.word((i + 2) % 3));
-        product[i] = vuSaturate(multiplied);
-        productFlags[i] = rangeFlags(multiplied);
+        product[i] = clampVuResult(multiplied);
+        productFlags[i] = getRangeFlags(multiplied);
 
         const single::Rounded rounded = single::multiplyAdd(
             vu0.acc.word(i), a.word((i + 1) % 3), b.word((i + 2) % 3), true);
-        out[i] = vuSaturate(rounded);
-        flags[i] = rangeFlags(rounded);
+        out[i] = clampVuResult(rounded);
+        flags[i] = getRangeFlags(rounded);
         // A product the multiplier could not hold saturates before the adder
         // sees it, so the difference saturates with it.
         if (vu0.accSaturated[i] || (productFlags[i] & Vu::kOverflow) != 0) {
@@ -527,13 +507,13 @@ inline void vcallms(Vu& vu0, Memory& memory, u32 program) {
     vu0.keepBeforeCall();
     runMicroProgram(vu0, memory, nullptr, 0, program);
     vu0.started = true;
-    vu0.settleFlags();
+    vu0.syncFlags();
 }
 inline void vcallmsr(Vu& vu0, Memory& memory) {
     vcallms(vu0, memory, vu0.vi[Vu::kCmsar0]);
 }
 
-inline bool vuFormOf(Op op, VuForm& form) {
+inline bool findVuForm(Op op, VuForm& form) {
     switch (op) {
         case Op::vadd: form = {VuKind::Add, VuSource::Vt, false}; return true;
         case Op::vaddx: form = {VuKind::Add, VuSource::X, false}; return true;

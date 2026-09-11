@@ -330,7 +330,7 @@ Status Interpreter::execute(Instruction insn) {
 
         case Op::eret: returnFromException(cpu); break;
 
-        case Op::sync_p: ee.vu0.settleFlags(); break;
+        case Op::sync_p: ee.vu0.syncFlags(); break;
 
         // no architectural state this models
         case Op::cache:

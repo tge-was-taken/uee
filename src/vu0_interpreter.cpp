@@ -30,7 +30,7 @@ bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
     case Op::vftoi15: vftoi(vu0, dest, insn.vt(), insn.vs(), 15); break;
 
     case Op::vnop: break;
-    case Op::vwaitq: vu0.settleQuotient(); break;
+    case Op::vwaitq: vu0.syncQuotient(); break;
 
     case Op::viadd: viadd(vu0, insn.vid(), insn.vis(), insn.vit()); break;
     case Op::visub: visub(vu0, insn.vid(), insn.vis(), insn.vit()); break;
@@ -68,7 +68,7 @@ bool executeVu0(Vu& vu0, Memory& memory, Op op, Instruction insn) {
 
     default: {
         VuForm form;
-        if (!vuFormOf(op, form)) {
+        if (!findVuForm(op, form)) {
             return false;
         }
         vectorOp(vu0, form, dest, insn.vd(), insn.vs(), insn.vt());
