@@ -42,10 +42,8 @@ words = [
     0x0000000A,  # "\n" at 0x1052f0
 ]
 
-# SLUS_216.21: H_SfdPlay_UpdateTask @ 0x10a860, jump table at 0x7b5250. Case 2
-# is the playing state and case 6 the finished one; s3 holds the task's work and
-# the state is the halfword at +0x1e4. Entering the finish state in place of the
-# playing one skips the movie, which is what a frontend with no decoder needs.
+# SLUS_216.21: H_SfdPlay_UpdateTask @ 0x10a860, jump table at 0x7b5250.
+# Enters the finished state (6, the halfword at s3+0x1e4) in place of playing (2).
 [[patch]]
 address = 0x0010a910
 words = [

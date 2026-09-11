@@ -163,9 +163,8 @@ SyscallResult Kernel::callSyscall(s32 number) {
 }
 
 SyscallResult Kernel::handleSyscall() {
-    // The handler is taken over rather than run, so the code it would have left
-    // behind is written here instead. The address it returns to is not: nothing
-    // here takes the exception that would have set it.
+    // The handler is taken over rather than run, so the cause it would have left
+    // is written here. EPC is not, since no exception was taken.
     u32& cause = mContext.cpu.cop0[cop0::kCause];
     cause = (cause & ~cop0::kCauseCodeMask) | (cop0::kSystemCall << cop0::kCauseCodeShift);
     const s32 raw = static_cast<s32>(static_cast<u32>(mContext.cpu.gpr[kSyscallRegister].lo));
