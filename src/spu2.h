@@ -87,8 +87,8 @@ private:
         Sweep right;
     };
 
-    Voice* voiceAt(u32 core, u32 offset, u32 base, u32 stride);
-    const Voice* voiceAt(u32 core, u32 offset, u32 base, u32 stride) const;
+    Voice* findVoice(u32 core, u32 offset, u32 base, u32 stride);
+    const Voice* findVoice(u32 core, u32 offset, u32 base, u32 stride) const;
 
     void keyOn(Core& core, u32 voices);
     void keyOff(Core& core, u32 voices);

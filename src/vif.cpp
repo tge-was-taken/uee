@@ -74,11 +74,15 @@ constexpr u32 kCycleLimit = 4;
 
 constexpr u32 kPath2 = 2;
 
-constexpr u32 lanesOf(u32 format) {
+constexpr bool startsMicro(u32 command) {
+    return command == code::kMscal || command == code::kMscalf || command == code::kMscnt;
+}
+
+constexpr u32 getLanes(u32 format) {
     return ((format >> 2) & 3u) + 1u;
 }
 
-constexpr u32 widthOf(u32 format) {
+constexpr u32 getWidth(u32 format) {
     switch (format & 3u) {
         case 0: return 32;
         case 1: return 16;
@@ -89,25 +93,24 @@ constexpr u32 widthOf(u32 format) {
 
 }  // namespace
 
-u32 Vif::registerBase() const { return mUnit == 0 ? 0x10003800u : 0x10003C00u; }
-u32 Vif::fifoBase() const { return mUnit == 0 ? 0x10004000u : 0x10005000u; }
-u32 Vif::memoryBase() const { return mUnit == 0 ? kVu0DataBase : kVu1DataBase; }
-u32 Vif::memorySize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
-u32 Vif::microBase() const { return mUnit == 0 ? kVu0MicroBase : kVu1MicroBase; }
-u32 Vif::microSize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
+u32 Vif::getRegisterBase() const { return mUnit == 0 ? 0x10003800u : 0x10003C00u; }
+u32 Vif::getFifoBase() const { return mUnit == 0 ? 0x10004000u : 0x10005000u; }
+u32 Vif::getMemoryBase() const { return mUnit == 0 ? kVu0DataBase : kVu1DataBase; }
+u32 Vif::getMemorySize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
+u32 Vif::getMicroBase() const { return mUnit == 0 ? kVu0MicroBase : kVu1MicroBase; }
+u32 Vif::getMicroSize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
 
 std::optional<u32> Vif::read(u32 address) {
-    if (address < registerBase() || address >= registerBase() + kRegisterSpan) {
+    if (address < getRegisterBase() || address >= getRegisterBase() + kRegisterSpan) {
         return std::nullopt;
     }
-    switch (address - registerBase()) {
+    switch (address - getRegisterBase()) {
         case kStat: {
-            // Nothing waited for a quadword the processor wrote, so the unit is
-            // still decoding it the first time the guest looks and settled by
-            // the next.
+            // Nothing waited for a quadword the processor wrote, so it is still
+            // decoding the first time the guest looks and done by the next.
             const u32 decoding = mFedByProcessor ? kDecoding : 0u;
             mFedByProcessor = false;
-            return (mStatus & ~3u) | (fifoCount() << kFifoCountShift) | decoding |
+            return (mStatus & ~3u) | (getFifoCount() << kFifoCountShift) | decoding |
                    ((mUnit == 1 && mSecondBuffer) ? kDoubleBuffer : 0u) |
                    (mStalled ? kDecoding
                              : (isTransferring() ? kTransferring
@@ -143,7 +146,7 @@ std::optional<u32> Vif::read(u32 address) {
 }
 
 bool Vif::write(u32 address, u32 value) {
-    if (address >= fifoBase() && address < fifoBase() + kFifoSpan) {
+    if (address >= getFifoBase() && address < getFifoBase() + kFifoSpan) {
         // Nothing waits for a quadword the processor writes the way the
         // controller waits for one it sends, so the unit is still decoding it.
         mFedByProcessor = true;
@@ -154,10 +157,10 @@ bool Vif::write(u32 address, u32 value) {
         consume(value);
         return true;
     }
-    if (address < registerBase() || address >= registerBase() + kRegisterSpan) {
+    if (address < getRegisterBase() || address >= getRegisterBase() + kRegisterSpan) {
         return false;
     }
-    switch (address - registerBase()) {
+    switch (address - getRegisterBase()) {
         // Writing one clears the sticky bits rather than setting them.
         case kStat: mStatus &= ~value; return true;
         case kFbrst:
@@ -201,7 +204,7 @@ bool Vif::write(u32 address, u32 value) {
 
 // The first unit holds half what the second does, and the count moves in the
 // halves the write port takes a quadword in.
-u32 Vif::fifoCount() const {
+u32 Vif::getFifoCount() const {
     return std::min((mFifoWords / 4) * 2, mUnit == 0 ? 8u : 16u);
 }
 
@@ -253,13 +256,13 @@ void Vif::consume(u32 word) {
 }
 
 void Vif::uploadMicro(u32 word) {
-    mMemory->write32(microBase() + (mMicroWord % (microSize() / 4u)) * 4u, word);
+    mMemory->write32(getMicroBase() + (mMicroWord % (getMicroSize() / 4u)) * 4u, word);
     ++mMicroWord;
     --mMicroWords;
     mNum = (mMicroWords + 1) / 2;
 }
 
-Vu& Vif::vu() const {
+Vu& Vif::getVu() const {
     if (mVu == nullptr) {
         throw std::runtime_error(
             std::format("vif{} was asked for a vector unit it was not given", mUnit));
@@ -274,7 +277,7 @@ void Vif::startMicro(u32 start) {
     mItop = mItops;
     mSecondBuffer = !mSecondBuffer;
     mTops = (mBase + (mSecondBuffer ? mOffset : 0)) & 0x3FFu;
-    vu().microRunning = !runMicroProgram(vu(), *mMemory, mGif, mUnit, start);
+    getVu().microRunning = !runMicroProgram(getVu(), *mMemory, mGif, mUnit, start);
 }
 
 void Vif::sendToGif(u32 word) {
@@ -335,15 +338,6 @@ bool Vif::decodes(u32 command) const {
     }
 }
 
-namespace {
-
-bool startsMicro(u32 command) {
-    return command == code::kMscal || command == code::kMscalf ||
-           command == code::kMscnt;
-}
-
-}  // namespace
-
 void Vif::execute(u32 code) {
     mCode = code;
     const u32 command = (code >> 24) & 0x7Fu;
@@ -363,7 +357,7 @@ void Vif::execute(u32 code) {
 
     // A program that never reached its end bit is still running, and the unit
     // waits there rather than starting a second one over it.
-    if (vu().microRunning && startsMicro(command)) {
+    if (getVu().microRunning && startsMicro(command)) {
         mStatus |= kProgramWait;
         mStalled = true;
         return;
@@ -422,7 +416,7 @@ void Vif::execute(u32 code) {
             startMicro(immediate);
             return;
         case code::kMscnt:
-            startMicro(vu().vi[Vu::kTpc]);
+            startMicro(getVu().vi[Vu::kTpc]);
             return;
         case code::kDirect:
         case code::kDirectHl:
@@ -456,7 +450,7 @@ void Vif::beginUnpack(u32 code) {
     drainMaskedQuadwords();
 }
 
-u32 Vif::destinationOf(u32 index) const {
+u32 Vif::getDestination(u32 index) const {
     const u32 cycle = mCycle & 0xFFu;
     const u32 write = (mCycle >> 8) & 0xFFu;
     if (write == 0 || cycle < write) {
@@ -466,21 +460,20 @@ u32 Vif::destinationOf(u32 index) const {
 }
 
 // A zero write cycle is the widest one rather than none at all.
-u32 Vif::writeCycle() const {
+u32 Vif::getWriteCycle() const {
     const u32 write = (mCycle >> 8) & 0xFFu;
     return write == 0 ? 256u : write;
 }
 
 // A write cycle wider than the read cycle leaves quadwords the data does not
-// reach, which the unit fills from the last element it wrote rather than
-// reading more.
+// reach, which the unit fills from the last element rather than reading more.
 bool Vif::isFillCycle(u32 index) const {
     const u32 read = mCycle & 0xFFu;
-    return read < writeCycle() && (index % writeCycle()) >= read;
+    return read < getWriteCycle() && (index % getWriteCycle()) >= read;
 }
 
-u32 Vif::cycleOf(u32 index) const {
-    const u32 position = index % writeCycle();
+u32 Vif::getCycleIndex(u32 index) const {
+    const u32 position = index % getWriteCycle();
     return position < kCycleLimit ? position : kCycleLimit - 1;
 }
 
@@ -501,8 +494,8 @@ bool Vif::needsData(u32 index) const {
     if (!mMasked) {
         return true;
     }
-    const u32 cycle = cycleOf(index);
-    for (u32 lane = 0; lane < lanesOf(mFormat); ++lane) {
+    const u32 cycle = getCycleIndex(index);
+    for (u32 lane = 0; lane < getLanes(mFormat); ++lane) {
         if (((mMask >> (cycle * 8u + lane * 2u)) & 3u) == 0) {
             return true;
         }
@@ -539,27 +532,27 @@ void Vif::flushQuadword() {
 }
 
 void Vif::writeLane(u32 quadword, u32 lane, u32 value) {
-    const u32 offset = (quadword % (memorySize() / 16u)) * 16u + lane * 4u;
-    mMemory->write32(memoryBase() + offset, value);
+    const u32 offset = (quadword % (getMemorySize() / 16u)) * 16u + lane * 4u;
+    mMemory->write32(getMemoryBase() + offset, value);
 }
 
 void Vif::writeMasked(u32 index, u32 lane, u32 value) {
     if (!mMasked) {
-        writeLane(destinationOf(index), lane, offsetBy(lane, value));
+        writeLane(getDestination(index), lane, offsetBy(lane, value));
         return;
     }
-    const u32 cycle = cycleOf(index);
+    const u32 cycle = getCycleIndex(index);
     switch ((mMask >> (cycle * 8u + lane * 2u)) & 3u) {
-        case 0: writeLane(destinationOf(index), lane, offsetBy(lane, value)); return;
-        case 1: writeLane(destinationOf(index), lane, mRow[lane]); return;
-        case 2: writeLane(destinationOf(index), lane, mColumn[cycle]); return;
+        case 0: writeLane(getDestination(index), lane, offsetBy(lane, value)); return;
+        case 1: writeLane(getDestination(index), lane, mRow[lane]); return;
+        case 2: writeLane(getDestination(index), lane, mColumn[cycle]); return;
         default: return;
     }
 }
 
 bool Vif::unpack(u32 word) {
-    const u32 lanes = lanesOf(mFormat);
-    const u32 width = widthOf(mFormat);
+    const u32 lanes = getLanes(mFormat);
+    const u32 width = getWidth(mFormat);
     const u32 perWord = width == 32 ? 1u : (32u / width);
 
     for (u32 i = 0; i < perWord && (mRemaining != 0 || mHoldingThree); ++i) {
@@ -583,9 +576,7 @@ bool Vif::unpack(u32 word) {
             continue;
         }
         // A three lane element takes its fourth lane from the value that starts
-        // the next one, so the write waits until that value arrives. After the
-        // last element that value is only looked at: a word it starts belongs to
-        // whatever follows the unpack.
+        // the next one. After the last element that value is only looked at.
         if (mHoldingThree) {
             mHoldingThree = false;
             mElement[3] = value;

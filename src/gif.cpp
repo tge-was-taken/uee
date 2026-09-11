@@ -92,8 +92,6 @@ void Gif::endPath() {
     mStatus &= ~kOutputPathActive;
 }
 
-
-
 void Gif::capture(u64 low, u64 high) {
     if (mCapturedPath != mActivePath) {
         flushCapture();
@@ -115,10 +113,8 @@ void Gif::flushCapture() {
     mCaptured.clear();
 }
 
-// A masked path cannot reach the unit, so what a transfer sends it waits in the
-// queue. RenderWare's DMA handler starts a masked transfer and then waits for
-// the queue to fill before it starts the unit that shares the interface, so a
-// queue that never fills stops it there.
+// A masked path cannot reach the unit, so what it is sent waits in the queue.
+// RenderWare starts a masked transfer and waits for the queue to fill.
 void Gif::maskPath3(bool masked) {
     mStatus = masked ? (mStatus | kPath3Masked) : (mStatus & ~kPath3Masked);
     mPath3Masked = masked;
@@ -140,7 +136,7 @@ void Gif::maskPath3(bool masked) {
 void Gif::readTag(u64 low, u64 high) {
     const u32 loops = static_cast<u32>(low) & 0x7FFFu;
     const u32 descriptors = static_cast<u32>(low >> 60) & 0xFu;
-    Packet& open = packet();
+    Packet& open = getPacket();
     open.endOfPacket = ((low >> 15) & 1u) != 0;
     open.descriptors = descriptors == 0 ? 16u : descriptors;
     open.format = static_cast<u32>(low >> 58) & 3u;
@@ -183,7 +179,7 @@ void Gif::writeQuadword(u64 low, u64 high) {
     if (mHandler != nullptr) {
         capture(low, high);
     }
-    Packet& open = packet();
+    Packet& open = getPacket();
     if (open.remaining == 0) {
         readTag(low, high);
         return;

@@ -33,35 +33,35 @@ public:
     void writeTag(u64 codes);
 
 private:
-    u32 registerBase() const;
-    u32 fifoBase() const;
-    u32 memoryBase() const;
-    u32 memorySize() const;
-    u32 microBase() const;
-    u32 microSize() const;
+    u32 getRegisterBase() const;
+    u32 getFifoBase() const;
+    u32 getMemoryBase() const;
+    u32 getMemorySize() const;
+    u32 getMicroBase() const;
+    u32 getMicroSize() const;
 
     void consume(u32 word);
-    u32 fifoCount() const;
+    u32 getFifoCount() const;
     bool wantsData() const;
     bool isTransferring() const;
     bool decodes(u32 command) const;
     void execute(u32 code);
     void uploadMicro(u32 word);
     void startMicro(u32 start);
-    Vu& vu() const;
+    Vu& getVu() const;
     void beginUnpack(u32 code);
     void sendToGif(u32 word);
     bool unpack(u32 word);
     bool needsData(u32 index) const;
-    u32 writeCycle() const;
+    u32 getWriteCycle() const;
     bool isFillCycle(u32 index) const;
     void drainMaskedQuadwords();
     void flushQuadword();
     void writeLane(u32 quadword, u32 lane, u32 value);
     void writeMasked(u32 index, u32 lane, u32 value);
     u32 offsetBy(u32 lane, u32 value);
-    u32 destinationOf(u32 index) const;
-    u32 cycleOf(u32 index) const;
+    u32 getDestination(u32 index) const;
+    u32 getCycleIndex(u32 index) const;
 
     Memory* mMemory = nullptr;
     Gif* mGif = nullptr;

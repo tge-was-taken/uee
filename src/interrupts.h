@@ -90,12 +90,11 @@ public:
 
     // The ring a transfer wraps inside while the controller drains one, and
     // which channel it drains to. Zero means no ring is in use.
-    u32 ringSize() const { return (mDControl & kMfifoDrainMask) != 0 ? mDRingSize : 0; }
-    u32 ringBase() const { return mDRingBase; }
+    u32 getRingSize() const { return (mDControl & kMfifoDrainMask) != 0 ? mDRingSize : 0; }
+    u32 getRingBase() const { return mDRingBase; }
 
-    // The display keeps asserting both blanking causes and nothing the boot rom
-    // left behind acknowledges them, so a program finds them standing and finds
-    // them again after clearing them.
+    // The display keeps asserting both blanking causes, so a program finds them
+    // standing, and standing again after clearing them.
     static constexpr u32 kBlanking = (1u << 2) | (1u << 3);
     // The two the rom leaves unmasked besides the one this kernel adds.
     static constexpr u32 kBootIntcMask = (1u << 1) | (1u << 12);

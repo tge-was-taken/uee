@@ -17,9 +17,9 @@
 #include <string_view>
 #include <chrono>
 #include <format>
+#include <vector>
 
 #include <unistd.h>
-#include <vector>
 
 namespace uee::autotest {
 
@@ -89,7 +89,7 @@ public:
     ScratchDirectory(const ScratchDirectory&) = delete;
     ScratchDirectory& operator=(const ScratchDirectory&) = delete;
 
-    const std::filesystem::path& path() const { return mPath; }
+    const std::filesystem::path& getPath() const { return mPath; }
 
 private:
     std::filesystem::path mPath;
@@ -114,7 +114,7 @@ inline int run(int argc, char** argv, FunctionRunner translated) {
     // The recordings were made on a console with a usb stick mounted, and a
     // test that finds one allocates for it before it measures anything.
     const ScratchDirectory storage(name);
-    kernel.attachFiles(storage.path());
+    kernel.attachFiles(storage.getPath());
 
     Machine machine{interpreter, memory, kernel.mmio(), kernel, kernel.budget(), translated};
     const Stop stop = run(machine, kTimeLimit);

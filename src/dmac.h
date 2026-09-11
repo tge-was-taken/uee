@@ -31,7 +31,6 @@ public:
     void attach(Memory& memory, Interrupts& interrupts, Gif& gif, Vif& vif0, Vif& vif1,
                 Ipu& ipu);
 
-
     // What the boot rom leaves on each channel: the direction the one way ones
     // are fixed at, and the two the interface was still using.
     void installBootChannels();
@@ -46,21 +45,19 @@ private:
         u32 quadwords = 0;
         u32 tagAddress = 0;
         u32 returnAddress[dmac::kReturnDepth] = {};
-        // Where the transfer ended, which the channel writes back when it
-        // retires rather than as it runs.
+        // A transfer done at once retires on the next access instead, or a
+        // guest that polls the start bit never sees it running.
         u32 retiredAddress = 0;
         bool finishing = false;
         usize returnDepth = 0;
         u32 scratchpadAddress = 0;
-        // A transfer this runtime performs at once still has to look like it
-        // took time, or a guest that polls the start bit never sees one run.
     };
 
     static bool isScratchpadChannel(usize index);
-    static u32 addressMask(usize index);
-    static u32 controlMask(usize index);
-    static u32 settledMode(usize index, u32 mode);
-    static u32 tagAddressMask(usize index);
+    static u32 getAddressMask(usize index);
+    static u32 getControlMask(usize index);
+    static u32 resolveMode(usize index, u32 mode);
+    static u32 getTagAddressMask(usize index);
     void retire(Channel& channel);
     void start(usize index);
     void interleave(usize index);

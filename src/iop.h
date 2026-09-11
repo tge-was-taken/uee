@@ -54,7 +54,7 @@ public:
 
 private:
     Stop enter(IopScheduler::Skipping skipping = IopScheduler::Skipping::Allowed);
-    bool settle(IopScheduler::Skipping skipping = IopScheduler::Skipping::Allowed);
+    bool sync(IopScheduler::Skipping skipping = IopScheduler::Skipping::Allowed);
     bool dispatchPendingHandlers();
     void runHandler(const IopHandlerCall& call);
 

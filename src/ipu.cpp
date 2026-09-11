@@ -8,38 +8,36 @@ namespace uee {
 namespace {
 
 constexpr u32 kCommand = 0x00;
+constexpr u32 kCommandHigh = 0x04;
 constexpr u32 kControl = 0x10;
-constexpr u32 kControlWritable = 0x07F30000;
-constexpr u32 kReset = 1u << 30;
-constexpr u32 kBusy = 1u << 31;
 constexpr u32 kBitPosition = 0x20;
 constexpr u32 kTop = 0x30;
 
+constexpr u32 kControlWritable = 0x07F30000;
+constexpr u32 kReset = 1u << 30;
 // viBufStopDMA @ 0x5946a8 spins while CTRL reports busy, and viBufRestartDMA
 // @ 0x5947a8 rewinds by what BP says the IPU still holds.
-constexpr u32 kIdle = 0;
+constexpr u32 kBusy = 1u << 31;
+// What a decode leaves in the control register while it waits for a stream.
+constexpr u32 kDecodeState = 0x3F00;
 
 constexpr u32 kCommandShift = 28;
 constexpr u32 kClearCommand = 0;
-constexpr u32 kThresholdCommand = 9;
+constexpr u32 kDecodeCommand = 1;
+constexpr u32 kVariableCommand = 3;
 constexpr u32 kQuantiserCommand = 5;
 constexpr u32 kVectorCommand = 6;
-constexpr u32 kDecodeCommand = 1;
+constexpr u32 kThresholdCommand = 9;
 constexpr u32 kPositionMask = 0x7F;
-constexpr u32 kCommandHigh = 0x04;
-// What a decode leaves in the control register while it waits for a stream.
-constexpr u32 kDecodeState = 0x3F00;
-constexpr u32 kVariableCommand = 3;
 // A variable length read decodes against a picture state the unit was never
 // given, so what it answers is what the rom left it able to say.
 constexpr u32 kVariableResult = 0x000A0010;
 
-// The bits the boot rom left in the unit, which is what a program reads before
-// it has fed the unit anything of its own. The peek turns within a word rather
-// than reading across the four.
+// What the boot rom left in the unit, read before a program feeds it. The peek
+// turns within a word rather than reading across the four.
 constexpr u32 kLeftoverStream[4] = {0x8C31AD35, 0xFF7FCE39, 0x8C31AD35, 0xFF7FCE39};
 
-constexpr u32 peekAt(u32 position) {
+constexpr u32 peekStream(u32 position) {
     const u32 word = kLeftoverStream[(position >> 5) & 3u];
     const u32 turn = position & 31u;
     return turn == 0 ? word : ((word << turn) | (word >> (32 - turn)));
@@ -61,10 +59,10 @@ std::optional<u32> Ipu::read(u32 address) const {
     switch (address) {
         case kControl: return mControl;
         case kBitPosition: return mBitPosition;
-        case kTop: return peekAt(mBitPosition);
+        case kTop: return peekStream(mBitPosition);
         // The command register answers with the bits under the position, and
         // its upper half with whether the unit is still working.
-        case kCommand: return mDecoded ? mDecoded : peekAt(mBitPosition);
+        case kCommand: return mDecoded ? mDecoded : peekStream(mBitPosition);
         case kCommandHigh: return mControl & kBusy;
         default: return std::nullopt;
     }
@@ -75,9 +73,8 @@ std::optional<u32> Ipu::read(u32 address) const {
 bool Ipu::write(u32 address, u32 value) {
     switch (address) {
         case kCommand:
-            // The commands that only load a table finish on their own; the
-            // ones that decode wait for input this unit never reads, which is
-            // what a guest polling before it feeds the stream sees.
+            // Loading a table finishes on its own; decoding waits for input,
+            // which is what a guest polling before it feeds the stream sees.
             mDecoded = 0;
             switch (value >> kCommandShift) {
                 case kClearCommand: mBitPosition = value & kPositionMask; return true;

@@ -188,23 +188,22 @@ bool Dmac::write(u32 address, u32 value) {
         // write to the same register, not after it.
         retire(mChannels[i]);
         switch (offset) {
-            case kControl:
-                {
-                    const u32 mask = controlMask(i);
-                    const u32 mode = settledMode(i, (value >> kModeShift) & kModeMask);
-                    const u32 kept = (value & mask & ~kModeBits) |
-                                     (mode << kModeShift) | (value & kStart);
-                    mChannels[i].control = (mChannels[i].control & ~(mask | kStart)) | kept;
-                }
+            case kControl: {
+                const u32 mask = getControlMask(i);
+                const u32 mode = resolveMode(i, (value >> kModeShift) & kModeMask);
+                const u32 kept =
+                    (value & mask & ~kModeBits) | (mode << kModeShift) | (value & kStart);
+                mChannels[i].control = (mChannels[i].control & ~(mask | kStart)) | kept;
                 if ((value & kStart) != 0) {
                     log.trace("channel {} started, control {:08x}", i, value);
                     start(i);
                 }
                 return true;
-            case kAddress: mChannels[i].address = value & addressMask(i); return true;
+            }
+            case kAddress: mChannels[i].address = value & getAddressMask(i); return true;
             case kQuadwords: mChannels[i].quadwords = value & kQuadwordCountMask; return true;
             case kTagAddress:
-                mChannels[i].tagAddress = value & tagAddressMask(i);
+                mChannels[i].tagAddress = value & getTagAddressMask(i);
                 return true;
             case kReturn0: mChannels[i].returnAddress[0] = value; return true;
             case kReturn1: mChannels[i].returnAddress[1] = value; return true;
@@ -218,10 +217,6 @@ bool Dmac::write(u32 address, u32 value) {
     return false;
 }
 
-// Writing all ones and reading back is what these came from: every address is
-// quadword aligned, the bit that names the scratchpad belongs only to the
-// channels that cannot reach it in their own address, and a channel with no
-// list or no scratchpad keeps nothing.
 void Dmac::installBootChannels() {
     mChannels[kVif0].control = 0x00000001;
     mChannels[kGif].control = 0x00000001;
@@ -237,13 +232,15 @@ bool Dmac::isScratchpadChannel(usize index) {
     return index == kFromScratchpad || index == kToScratchpad;
 }
 
-u32 Dmac::addressMask(usize index) {
+// Measured by writing all ones and reading back. Only the channels that cannot
+// reach the scratchpad in their own address keep the bit that names it.
+u32 Dmac::getAddressMask(usize index) {
     return isScratchpadChannel(index) ? 0x7FFFFFF0u : 0xFFFFFFF0u;
 }
 
 // Writing all ones and reading back is what these came from: each channel keeps
 // only the transfer bits it has a use for.
-u32 Dmac::controlMask(usize index) {
+u32 Dmac::getControlMask(usize index) {
     switch (index) {
         case kVif0:
         case kGif: return 0xFFFF00F4u | kModeBits;
@@ -256,7 +253,7 @@ u32 Dmac::controlMask(usize index) {
 
 // The fourth mode has no meaning, and each channel answers a write of it with
 // one of its own rather than keeping it.
-u32 Dmac::settledMode(usize index, u32 mode) {
+u32 Dmac::resolveMode(usize index, u32 mode) {
     if (mode != 3) {
         return mode;
     }
@@ -270,7 +267,7 @@ u32 Dmac::settledMode(usize index, u32 mode) {
     }
 }
 
-u32 Dmac::tagAddressMask(usize index) {
+u32 Dmac::getTagAddressMask(usize index) {
     return index == kFromScratchpad ? 0u : 0xFFFFFFF0u;
 }
 
@@ -306,7 +303,6 @@ void Dmac::start(usize index) {
     } else if (mode == kInterleaveMode) {
         interleave(index);
     } else if (mode == kNormalMode) {
-        // A count of zero is the whole of the field's range rather than nothing.
         // A count of zero is the whole of the field's range rather than nothing.
         const u32 count = channel.quadwords == 0 ? 0x10000u : channel.quadwords;
         channel.retiredAddress = transfer(index, channel.address, count);
@@ -395,8 +391,8 @@ u32 Dmac::transfer(usize index, u32 address, u32 quadwords) {
     }
     Channel& channel = mChannels[index];
     // The ring size is a mask, so the address it wraps is the offset into it.
-    const u32 ringSize = mInterrupts->ringSize();
-    const u32 ringBase = mInterrupts->ringBase();
+    const u32 ringSize = mInterrupts->getRingSize();
+    const u32 ringBase = mInterrupts->getRingBase();
     u32 cursor = address;
     for (u32 moved = 0; moved < quadwords; ++moved) {
         const u32 main = resolve(cursor);

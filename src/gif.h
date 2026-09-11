@@ -78,7 +78,7 @@ private:
 
     Packet mPackets[4];
 
-    Packet& packet() { return mPackets[mActivePath & 3u]; }
+    Packet& getPacket() { return mPackets[mActivePath & 3u]; }
 };
 
 }  // namespace uee

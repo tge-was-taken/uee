@@ -57,13 +57,13 @@ TranslatedIrx* Iop::translationOf(const std::string& name) const {
 }
 
 // A started thread only runs once the entry that started it is out of the way.
-bool Iop::settle(IopScheduler::Skipping skipping) {
+bool Iop::sync(IopScheduler::Skipping skipping) {
     mKernel.exitHostThread();
     const Stop stop = mScheduler.run(kInstructionLimit, skipping);
     if (stop.reason == StopReason::Deadlocked) {
         return true;
     }
-    log.stub("iop settle: {}", describe(stop));
+    log.stub("iop sync: {}", describe(stop));
     return false;
 }
 
@@ -172,7 +172,7 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
     mKernel.enterHostThread();
     enterModule(mInterpreter.iop, module);
     const Stop stop = enter();
-    if (stop.reason != StopReason::Exited || !settle()) {
+    if (stop.reason != StopReason::Exited || !sync()) {
         log.stub("iop module entry: {}", describe(stop));
         mKernel.dropThreadsAbove(sequence);
         if (translated != nullptr) {
@@ -238,7 +238,7 @@ u32 Iop::callFunction(u32 address, u32 gp, std::span<const u32> arguments) {
         return 0;
     }
     const u32 result = cpu.gpr[kResultRegister];
-    settle();
+    sync();
     return result;
 }
 

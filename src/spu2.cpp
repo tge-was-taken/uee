@@ -82,7 +82,7 @@ struct RateStep {
 
 // A rate's low two bits pick how much is added and the rest how often, so one
 // step up takes twice as long to cross the same range.
-RateStep stepOf(u32 rate, bool rising, bool exponential, s32 level) {
+RateStep getRateStep(u32 rate, bool rising, bool exponential, s32 level) {
     const s32 shift = static_cast<s32>(rate >> 2);
     const s32 step = rising ? 7 - static_cast<s32>(rate & 3) : -8 + static_cast<s32>(rate & 3);
     RateStep result;
@@ -98,7 +98,7 @@ RateStep stepOf(u32 rate, bool rising, bool exponential, s32 level) {
     return result;
 }
 
-u32 addressOf(u16 high, u16 low) {
+u32 joinAddress(u16 high, u16 low) {
     return (static_cast<u32>(high & 0x3F) << 16) | low;
 }
 
@@ -110,7 +110,7 @@ s16 clampToSample(s32 value) {
 
 Spu2::Spu2() : mMemory(kMemoryHalves, 0) {}
 
-Spu2::Voice* Spu2::voiceAt(u32 core, u32 offset, u32 base, u32 stride) {
+Spu2::Voice* Spu2::findVoice(u32 core, u32 offset, u32 base, u32 stride) {
     if (offset < base) {
         return nullptr;
     }
@@ -118,8 +118,8 @@ Spu2::Voice* Spu2::voiceAt(u32 core, u32 offset, u32 base, u32 stride) {
     return index < kVoices ? &mCores[core].voices[index] : nullptr;
 }
 
-const Spu2::Voice* Spu2::voiceAt(u32 core, u32 offset, u32 base, u32 stride) const {
-    return const_cast<Spu2*>(this)->voiceAt(core, offset, base, stride);
+const Spu2::Voice* Spu2::findVoice(u32 core, u32 offset, u32 base, u32 stride) const {
+    return const_cast<Spu2*>(this)->findVoice(core, offset, base, stride);
 }
 
 std::optional<u16> Spu2::readHalf(u32 offset) const {
@@ -142,7 +142,7 @@ std::optional<u16> Spu2::readHalf(u32 offset) const {
     }
 
     if (local < kVoiceRegisters) {
-        const Voice* voice = voiceAt(core, local, 0, kVoiceStride);
+        const Voice* voice = findVoice(core, local, 0, kVoiceStride);
         switch (local % kVoiceStride) {
             case kVolumeLeft: return voice->volumeLeft;
             case kVolumeRight: return voice->volumeRight;
@@ -156,7 +156,7 @@ std::optional<u16> Spu2::readHalf(u32 offset) const {
     }
 
     if (local >= kVoiceAddresses && local < kEndAddresses) {
-        const Voice* voice = voiceAt(core, local, kVoiceAddresses, kAddressStride);
+        const Voice* voice = findVoice(core, local, kVoiceAddresses, kAddressStride);
         const u32 field = (local - kVoiceAddresses) % kAddressStride;
         // The address a voice is playing from is what the host polls.
         const u32 address = field < 4 ? voice->startAddress
@@ -193,7 +193,7 @@ bool Spu2::writeHalf(u32 offset, u16 value) {
     }
 
     if (local < kVoiceRegisters) {
-        Voice* voice = voiceAt(core, local, 0, kVoiceStride);
+        Voice* voice = findVoice(core, local, 0, kVoiceStride);
         switch (local % kVoiceStride) {
             case kVolumeLeft: voice->volumeLeft = value; return true;
             case kVolumeRight: voice->volumeRight = value; return true;
@@ -206,12 +206,12 @@ bool Spu2::writeHalf(u32 offset, u16 value) {
     }
 
     if (local >= kVoiceAddresses && local < kEndAddresses) {
-        Voice* voice = voiceAt(core, local, kVoiceAddresses, kAddressStride);
+        Voice* voice = findVoice(core, local, kVoiceAddresses, kAddressStride);
         const u32 field = (local - kVoiceAddresses) % kAddressStride;
         u32& address = field < 4 ? voice->startAddress
                                  : (field < 8 ? voice->loopAddress : voice->nextAddress);
-        address = (field % 4) == 0 ? addressOf(value, static_cast<u16>(address))
-                                   : addressOf(static_cast<u16>(address >> 16), value);
+        address = (field % 4) == 0 ? joinAddress(value, static_cast<u16>(address))
+                                   : joinAddress(static_cast<u16>(address >> 16), value);
         // A loop address written by the host outlasts the flag in the waveform
         // data until the voice is keyed on again.
         if (field >= 4 && field < 8) {
@@ -231,11 +231,11 @@ bool Spu2::writeHalf(u32 offset, u16 value) {
         case kKeyOff: keyOff(mCores[core], value); return true;
         case kKeyOff + 2: keyOff(mCores[core], static_cast<u32>(value) << 16); return true;
         case kTransferAddress:
-            mCores[core].transferAddress = addressOf(value, static_cast<u16>(mCores[core].transferAddress));
+            mCores[core].transferAddress = joinAddress(value, static_cast<u16>(mCores[core].transferAddress));
             return true;
         case kTransferAddress + 2:
             mCores[core].transferAddress =
-                addressOf(static_cast<u16>(mCores[core].transferAddress >> 16), value);
+                joinAddress(static_cast<u16>(mCores[core].transferAddress >> 16), value);
             return true;
         // A written one clears the bit of a voice that has ended.
         case kEndx: mCores[core].endx &= ~static_cast<u32>(value); return true;
@@ -335,7 +335,7 @@ s32 Spu2::applyVolume(s32 sample, u16 volume, Sweep& sweep) {
     }
     const bool rising = (volume & 0x2000) == 0;
     const bool exponential = (volume & 0x4000) != 0;
-    const RateStep step = stepOf(volume & 0x7F, rising, exponential, std::abs(sweep.level));
+    const RateStep step = getRateStep(volume & 0x7F, rising, exponential, std::abs(sweep.level));
     sweep.counter += step.period;
     while (sweep.counter >= kRatePeriod) {
         sweep.counter -= kRatePeriod;
@@ -360,17 +360,17 @@ void stepEnvelope(Envelope& envelope, u16 adsr1, u16 adsr2) {
     RateStep step;
     switch (envelope.phase) {
         case EnvelopePhase::Attack:
-            step = stepOf(attackRate, true, attackExponential, envelope.level);
+            step = getRateStep(attackRate, true, attackExponential, envelope.level);
             break;
         case EnvelopePhase::Decay:
-            step = stepOf(decayRate << 2, false, true, envelope.level);
+            step = getRateStep(decayRate << 2, false, true, envelope.level);
             break;
         case EnvelopePhase::Sustain:
-            step = stepOf(sustainRate, (sustainMode & 2) == 0, (sustainMode & 4) != 0,
+            step = getRateStep(sustainRate, (sustainMode & 2) == 0, (sustainMode & 4) != 0,
                           envelope.level);
             break;
         case EnvelopePhase::Release:
-            step = stepOf(releaseRate << 2, false, releaseExponential, envelope.level);
+            step = getRateStep(releaseRate << 2, false, releaseExponential, envelope.level);
             break;
         case EnvelopePhase::Off: return;
     }

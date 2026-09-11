@@ -27,7 +27,7 @@ void fail(spdlog::format_string_t<Args...> what, Args&&... args) {
     pending.push_back(std::vformat(what, std::make_format_args(args...)));
 }
 
-void settle(std::map<std::string, s32>& diverged, std::string_view op, bool divergent) {
+void sync(std::map<std::string, s32>& diverged, std::string_view op, bool divergent) {
     for (const std::string& message : pending) {
         if (divergent) {
             ++diverged[std::string(op)];
@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
         }
         if (status == Status::Undecodable) {
             fail("{:08x}: no slot names this encoding", k.word);
-            settle(diverged, "", false);
+            sync(diverged, "", false);
             continue;
         }
         ++ran;
@@ -430,7 +430,7 @@ int main(int argc, char** argv) {
         }
 
         const Op op = decode(insn).op;
-        settle(diverged, lookupName(op), oracleFollowsHost(op));
+        sync(diverged, lookupName(op), oracleFollowsHost(op));
     }
 
     s32 skipped = 0;
