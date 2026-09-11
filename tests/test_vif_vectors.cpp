@@ -1,32 +1,27 @@
 #include "gif.h"
 #include "gs.h"
-#include "json.h"
 #include "memory.h"
-#include "vector_memory.h"
+#include "vectors.h"
 #include "vif.h"
 #include "vu.h"
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <format>
-#include <fstream>
-#include <map>
-#include <set>
 #include <string>
 #include <vector>
 
 namespace {
 
 using namespace uee;
-using test::Json;
+using namespace uee::test;
 
-// One VIFcode as PCSX2 ran it, from pcsx2-hook's PCSX2HOOK_VIF_CMD_TRACE: the
-// registers either side, every word it consumed and the VU memory it wrote.
-// The registers go in the way a program sets them, through codes of their own.
+// Each record is one VIFcode as PCSX2 ran it. The registers it starts from go in
+// the way a program sets them, through codes of their own.
 
 constexpr u32 kStcycl = 0x01, kOffset = 0x02, kBase = 0x03, kItop = 0x04, kStmod = 0x05;
-constexpr u32 kMskpath3 = 0x06, kMscal = 0x14, kStmask = 0x20, kStrow = 0x30, kStcol = 0x31;
+constexpr u32 kMskpath3 = 0x06, kMscal = 0x14, kMscnt = 0x17;
+constexpr u32 kStmask = 0x20, kStrow = 0x30, kStcol = 0x31;
 
 constexpr u32 kEndBit = 1u << 30;
 constexpr u32 kNopUpper = 0x000002FF;
@@ -37,31 +32,13 @@ constexpr u32 kStat = 0x00, kCycle = 0x40, kMode = 0x50, kNum = 0x60, kMask = 0x
 constexpr u32 kCode = 0x80, kItops = 0x90, kBaseRegister = 0xA0, kOffsetRegister = 0xB0;
 constexpr u32 kTops = 0xC0, kItopRegister = 0xD0, kTop = 0xE0, kRow = 0x100, kColumn = 0x140;
 
-constexpr u32 code(u32 command, u32 immediate = 0) { return (command << 24) | immediate; }
-
-struct Unit {
-    u32 index;
-    u32 registers;
-    u32 data;
-    u32 micro;
-    u32 instructions;
-};
-
-Unit getUnit(u32 index) {
-    if (index == 0) {
-        return {0, 0x10003800, kVu0DataBase, kVu0MicroBase, kVu0MemorySize / 8};
-    }
-    return {1, 0x10003C00, kVu1DataBase, kVu1MicroBase, kVu1MemorySize / 8};
-}
-
-u32 hex(const Json& value) { return static_cast<u32>(value.getHex()); }
-u32 integer(const Json& value) { return static_cast<u32>(value.getInteger()); }
+constexpr u32 encodeCode(u32 command, u32 immediate = 0) { return (command << 24) | immediate; }
 
 // A program that ends at once, so starting one changes nothing but the buffer
 // it points the next unpack at.
-void plantEmptyProgram(Memory& memory, const Unit& unit, u32 start) {
+void plantEmptyProgram(Memory& memory, const VuUnit& unit, u32 start) {
     for (u32 i = 0; i < 2; ++i) {
-        const u32 at = unit.micro + ((start + i) % unit.instructions) * 8;
+        const u32 at = unit.micro + ((start + i) % unit.getInstructionCount()) * 8;
         memory.write32(at, kNopLower);
         memory.write32(at + 4, i == 0 ? (kNopUpper | kEndBit) : kNopUpper);
     }
@@ -75,9 +52,8 @@ bool startsProgram(const std::string& form) {
     return form.find(":MSCAL") != std::string::npos || form.find(":MSCNT") != std::string::npos;
 }
 
-// The codes that set the registers the record starts from, and then the code
-// under test. Each fills whole quadwords, so the memory the code writes can be
-// put back to how the record found it once the setup has run.
+// Both fill whole quadwords, so the memory can be put back to how the record
+// found it between the setup and the code under test.
 struct Stream {
     std::vector<u32> setup;
     std::vector<u32> command;
@@ -95,51 +71,51 @@ void padToQuadword(std::vector<u32>& words) {
     }
 }
 
-Stream buildStream(const Json& row, const Unit& unit) {
+Stream buildStream(const Json& row, const VuUnit& unit) {
     const Json& in = row["regsIn"];
     Stream stream;
     std::vector<u32>& words = stream.setup;
-    words.push_back(code(kStcycl, (integer(in["wl"]) << 8) | integer(in["cl"])));
-    words.push_back(code(kStmod, integer(in["mode"])));
-    words.push_back(code(kStmask));
-    words.push_back(hex(in["mask"]));
-    words.push_back(code(kStrow));
+    words.push_back(encodeCode(kStcycl, (readInteger(in["wl"]) << 8) | readInteger(in["cl"])));
+    words.push_back(encodeCode(kStmod, readInteger(in["mode"])));
+    words.push_back(encodeCode(kStmask));
+    words.push_back(readHex(in["mask"]));
+    words.push_back(encodeCode(kStrow));
     for (u32 i = 0; i < 4; ++i) {
-        words.push_back(hex(in["maskRow"][i]));
+        words.push_back(readHex(in["maskRow"][i]));
     }
-    words.push_back(code(kStcol));
+    words.push_back(encodeCode(kStcol));
     for (u32 i = 0; i < 4; ++i) {
-        words.push_back(hex(in["maskCol"][i]));
+        words.push_back(readHex(in["maskCol"][i]));
     }
     if (unit.index == 1) {
         // An offset starts the first buffer at the base, and a swap moves on
         // by the offset; the base itself can change after either.
-        const bool second = (hex(in["stat"]) & kDoubleBuffer) != 0;
-        const u32 offset = hex(in["ofst"]);
-        const u32 start = (hex(in["tops"]) - (second ? offset : 0)) & 0x3FFu;
-        words.push_back(code(kBase, start));
-        words.push_back(code(kOffset, offset));
+        const bool second = (readHex(in["stat"]) & kDoubleBuffer) != 0;
+        const u32 offset = readHex(in["ofst"]);
+        const u32 start = (readHex(in["tops"]) - (second ? offset : 0)) & 0x3FFu;
+        words.push_back(encodeCode(kBase, start));
+        words.push_back(encodeCode(kOffset, offset));
         if (second) {
-            words.push_back(code(kMscal, unit.instructions - 4));
+            words.push_back(encodeCode(kMscal, unit.getInstructionCount() - 4));
         }
-        words.push_back(code(kBase, hex(in["base"])));
-        words.push_back(code(kMskpath3, hex(in["mskpath3"]) != 0 ? 0x8000u : 0u));
+        words.push_back(encodeCode(kBase, readHex(in["base"])));
+        words.push_back(encodeCode(kMskpath3, readHex(in["mskpath3"]) != 0 ? 0x8000u : 0u));
     }
-    words.push_back(code(kItop, hex(in["itops"])));
+    words.push_back(encodeCode(kItop, readHex(in["itops"])));
     padToQuadword(words);
 
     // Data behind a DIRECT or MPG starts on a quadword, so the code goes last
     // in one.
     stream.command.assign(3, 0);
     for (const Json& word : row["payload"].getItems()) {
-        stream.command.push_back(hex(word));
+        stream.command.push_back(readHex(word));
     }
     // The last element of a three-lane unpack takes its fourth from what
     // follows.
     const usize end = stream.command.size();
     if (isThreeElementUnpack(row["form"].getText())) {
         if (const Json* tail = row.find("tail")) {
-            stream.command.push_back(test::readLittleEndianWord(tail->getText(), 0));
+            stream.command.push_back(readLittleEndianWord(tail->getText(), 0));
             stream.hasTail = true;
         }
     }
@@ -148,19 +124,8 @@ Stream buildStream(const Json& row, const Unit& unit) {
     return stream;
 }
 
-// A mismatch with a reason is a known disagreement between PCSX2 and this
-// runtime; one without is a failure.
-struct Mismatch {
-    std::string field;
-    std::string expected;
-    std::string actual;
-    std::string reason;
-};
-
-// PCSX2's recompiled unpacker zeroes the lane after a two or three element
-// vector depending on where the element sits in the data. The console records
-// the next value there for the placements it has been tried at, and for V3-8
-// contradicts the rule outright, so this runtime writes the next value.
+// PCSX2's recompiled unpacker zeroes the lane after a V2 or V3 element by where
+// it sits in the data; the console writes the next value, as we do.
 bool isZeroedFourthLane(const std::string& form, const std::string& expected,
                         const std::string& actual) {
     const bool shortVector = form.find("UNPACK_V2") != std::string::npos ||
@@ -169,8 +134,71 @@ bool isZeroedFourthLane(const std::string& form, const std::string& expected,
            expected.substr(24) == "00000000";
 }
 
+void writeQuadwords(Vif& vif, const std::vector<u32>& words) {
+    for (usize i = 0; i < words.size(); i += 4) {
+        vif.writeQuadword(static_cast<u64>(words[i]) | static_cast<u64>(words[i + 1]) << 32,
+                          static_cast<u64>(words[i + 2]) | static_cast<u64>(words[i + 3]) << 32);
+    }
+}
+
+void restoreMemory(Memory& memory, u32 base, const Json& quads) {
+    for (const Json& quad : quads.getItems()) {
+        writeQuadword(memory, base + readHex(quad["addr"]) * 16, quad["before"].getText());
+    }
+}
+
+void checkMemory(Memory& memory, u32 base, const Json& quads, const std::string& field,
+                 const std::string& form, std::vector<Mismatch>& found) {
+    for (const Json& quad : quads.getItems()) {
+        const std::string actual = readQuadword(memory, base + readHex(quad["addr"]) * 16);
+        const std::string& expected = quad["after"].getText();
+        if (actual != expected) {
+            found.push_back({field + quad["addr"].getText(), expected, actual,
+                             isZeroedFourthLane(form, expected, actual) ? "zeroed fourth lane" : ""});
+        }
+    }
+}
+
+void checkRegisters(Vif& vif, const VuUnit& unit, const Json& row, const Stream& stream,
+                    std::vector<Mismatch>& found) {
+    const std::string reason = stream.hasTail ? "tail runs as a code" : "";
+    auto compare = [&](const std::string& field, u32 expected, u32 actual) {
+        if (expected != actual) {
+            found.push_back({field, std::format("{:08X}", expected), std::format("{:08X}", actual),
+                             reason});
+        }
+    };
+    auto readRegister = [&](u32 offset) { return vif.read(unit.interface + offset).value(); };
+
+    const Json& out = row["regsOut"];
+    const u32 cycle = readRegister(kCycle);
+    compare("cl", readInteger(out["cl"]), cycle & 0xFFu);
+    compare("wl", readInteger(out["wl"]), (cycle >> 8) & 0xFFu);
+    compare("mode", readInteger(out["mode"]), readRegister(kMode));
+    compare("mask", readHex(out["mask"]), readRegister(kMask));
+    compare("itops", readHex(out["itops"]), readRegister(kItops));
+    for (u32 i = 0; i < 4; ++i) {
+        compare(std::format("row{}", i), readHex(out["maskRow"][i]), readRegister(kRow + i * 0x10));
+        compare(std::format("col{}", i), readHex(out["maskCol"][i]), readRegister(kColumn + i * 0x10));
+    }
+    if (!stream.hasTrailingWords) {
+        compare("num", readInteger(out["num"]), readRegister(kNum));
+        compare("code", readHex(out["code"]), readRegister(kCode));
+    }
+    if (unit.index == 1) {
+        compare("base", readHex(out["base"]), readRegister(kBaseRegister));
+        compare("ofst", readHex(out["ofst"]), readRegister(kOffsetRegister));
+        compare("tops", readHex(out["tops"]), readRegister(kTops));
+        compare("dbf", readHex(out["stat"]) & kDoubleBuffer, readRegister(kStat) & kDoubleBuffer);
+    }
+    if (startsProgram(row["form"].getText())) {
+        compare("top", readHex(out["top"]), readRegister(kTop));
+        compare("itop", readHex(out["itop"]), readRegister(kItopRegister));
+    }
+}
+
 std::vector<Mismatch> run(Memory& memory, const Json& row) {
-    const Unit unit = getUnit(integer(row["vif"]));
+    const VuUnit unit = getVuUnit(readInteger(row["vif"]));
     Gs gs;
     Gif gif;
     gif.attach(memory, gs);
@@ -178,83 +206,26 @@ std::vector<Mismatch> run(Memory& memory, const Json& row) {
     Vif vif;
     vif.attach(memory, gif, unit.index, &vu);
 
-    plantEmptyProgram(memory, unit, unit.instructions - 4);
-    plantEmptyProgram(memory, unit, unit.instructions - 2);
+    plantEmptyProgram(memory, unit, unit.getInstructionCount() - 4);
+    plantEmptyProgram(memory, unit, unit.getInstructionCount() - 2);
     // MSCNT carries on from where the last program stopped.
-    vu.vi[Vu::kTpc] = unit.instructions - 2;
+    vu.vi[Vu::kTpc] = unit.getInstructionCount() - 2;
     const std::string& form = row["form"].getText();
-    const u32 command = hex(row["code"]) >> 24 & 0x7Fu;
-    if (startsProgram(form) && command != 0x17) {
-        plantEmptyProgram(memory, unit, hex(row["code"]) & 0xFFFFu);
+    const u32 code = readHex(row["code"]);
+    if (startsProgram(form) && (code >> 24 & 0x7Fu) != kMscnt) {
+        plantEmptyProgram(memory, unit, code & 0xFFFFu);
     }
 
     const Stream stream = buildStream(row, unit);
-    auto feed = [&](const std::vector<u32>& words) {
-        for (usize i = 0; i < words.size(); i += 4) {
-            vif.writeQuadword(static_cast<u64>(words[i]) | static_cast<u64>(words[i + 1]) << 32,
-                              static_cast<u64>(words[i + 2]) | static_cast<u64>(words[i + 3]) << 32);
-        }
-    };
-    feed(stream.setup);
-
-    for (const Json& quad : row["mem"].getItems()) {
-        test::writeQuadword(memory, unit.data + hex(quad["addr"]) * 16, quad["before"].getText());
-    }
-    for (const Json& quad : row["micro"].getItems()) {
-        test::writeQuadword(memory, unit.micro + hex(quad["addr"]) * 16, quad["before"].getText());
-    }
-    feed(stream.command);
+    writeQuadwords(vif, stream.setup);
+    restoreMemory(memory, unit.data, row["mem"]);
+    restoreMemory(memory, unit.micro, row["micro"]);
+    writeQuadwords(vif, stream.command);
 
     std::vector<Mismatch> found;
-    const std::string registerReason = stream.hasTail ? "tail runs as a code" : "";
-    auto compare = [&](const std::string& field, u32 expected, u32 actual) {
-        if (expected != actual) {
-            found.push_back({field, std::format("{:08X}", expected), std::format("{:08X}", actual),
-                             registerReason});
-        }
-    };
-    auto readRegister = [&](u32 offset) { return vif.read(unit.registers + offset).value_or(0xDEADBEEF); };
-
-    for (const Json& quad : row["mem"].getItems()) {
-        const std::string actual = test::readQuadword(memory, unit.data + hex(quad["addr"]) * 16);
-        const std::string& expected = quad["after"].getText();
-        if (actual != expected) {
-            found.push_back({"mem" + quad["addr"].getText(), expected, actual,
-                             isZeroedFourthLane(form, expected, actual) ? "zeroed fourth lane" : ""});
-        }
-    }
-    for (const Json& quad : row["micro"].getItems()) {
-        const std::string actual = test::readQuadword(memory, unit.micro + hex(quad["addr"]) * 16);
-        if (actual != quad["after"].getText()) {
-            found.push_back({"micro" + quad["addr"].getText(), quad["after"].getText(), actual, ""});
-        }
-    }
-
-    const Json& out = row["regsOut"];
-    const u32 cycle = readRegister(kCycle);
-    compare("cl", integer(out["cl"]), cycle & 0xFFu);
-    compare("wl", integer(out["wl"]), (cycle >> 8) & 0xFFu);
-    compare("mode", integer(out["mode"]), readRegister(kMode));
-    compare("mask", hex(out["mask"]), readRegister(kMask));
-    compare("itops", hex(out["itops"]), readRegister(kItops));
-    for (u32 i = 0; i < 4; ++i) {
-        compare(std::format("row{}", i), hex(out["maskRow"][i]), readRegister(kRow + i * 0x10));
-        compare(std::format("col{}", i), hex(out["maskCol"][i]), readRegister(kColumn + i * 0x10));
-    }
-    if (!stream.hasTrailingWords) {
-        compare("num", integer(out["num"]), readRegister(kNum));
-        compare("code", hex(out["code"]), readRegister(kCode));
-    }
-    if (unit.index == 1) {
-        compare("base", hex(out["base"]), readRegister(kBaseRegister));
-        compare("ofst", hex(out["ofst"]), readRegister(kOffsetRegister));
-        compare("tops", hex(out["tops"]), readRegister(kTops));
-        compare("dbf", hex(out["stat"]) & kDoubleBuffer, readRegister(kStat) & kDoubleBuffer);
-    }
-    if (startsProgram(form)) {
-        compare("top", hex(out["top"]), readRegister(kTop));
-        compare("itop", hex(out["itop"]), readRegister(kItopRegister));
-    }
+    checkMemory(memory, unit.data, row["mem"], "mem", form, found);
+    checkMemory(memory, unit.micro, row["micro"], "micro", form, found);
+    checkRegisters(vif, unit, row, stream, found);
     return found;
 }
 
@@ -265,87 +236,17 @@ int main(int argc, char** argv) {
         spdlog::error("usage: test_vif_vectors <vif_vectors.jsonl> [examples per form]");
         return 2;
     }
-    const usize examples = argc > 2 ? std::stoul(argv[2]) : 2;
-    std::ifstream file(argv[1]);
-    if (!file) {
-        spdlog::error("cannot open {}", argv[1]);
-        return 2;
-    }
-
     Memory memory = makeMainMemory();
-    std::map<std::string, usize> failuresByKey;
-    std::map<std::string, usize> knownByReason;
-    std::map<std::string, std::vector<std::string>> examplesByKey;
-    usize cases = 0, failed = 0;
-
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty()) {
-            continue;
-        }
-        const Json row = Json::parse(line);
+    Report report(argc > 2 ? std::stoul(argv[2]) : 2);
+    readRecords(argv[1], [&](const Json& row) {
         if (row["payloadTruncated"].getBool()) {
-            continue;
+            return;
         }
-        const std::vector<Mismatch> found = run(memory, row);
-        ++cases;
-        std::set<std::string> fields;
-        std::set<std::string> reasons;
-        for (const Mismatch& m : found) {
-            if (!m.reason.empty()) {
-                reasons.insert(m.reason);
-                continue;
-            }
-            std::string category;
-            for (const char c : m.field) {
-                if (c < '0' || c > '9') {
-                    category += c;
-                }
-            }
-            fields.insert(m.field.starts_with("mem") ? "mem" : m.field.starts_with("micro") ? "micro" : category);
-        }
-        for (const std::string& reason : reasons) {
-            ++knownByReason[reason];
-        }
-        if (fields.empty()) {
-            continue;
-        }
-        ++failed;
-        for (const std::string& field : fields) {
-            const std::string key = row["form"].getText() + " " + field;
-            ++failuresByKey[key];
-            std::vector<std::string>& list = examplesByKey[key];
-            if (list.size() < examples) {
-                std::string text = std::format("code {} cl {} wl {} mode {}", row["code"].getText(),
-                                               integer(row["regsIn"]["cl"]),
-                                               integer(row["regsIn"]["wl"]),
-                                               integer(row["regsIn"]["mode"]));
-                usize shown = 0;
-                for (const Mismatch& m : found) {
-                    if (shown++ == 6) {
-                        text += std::format("\n      ... {} more", found.size() - 6);
-                        break;
-                    }
-                    text += std::format("\n      {}: expected {} got {}{}", m.field, m.expected,
-                                        m.actual, m.reason.empty() ? "" : " (" + m.reason + ")");
-                }
-                list.push_back(text);
-            }
-        }
-    }
-
-    std::vector<std::pair<std::string, usize>> sorted(failuresByKey.begin(), failuresByKey.end());
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (const auto& [key, count] : sorted) {
-        std::printf("%5zu  %s\n", count, key.c_str());
-        for (const std::string& text : examplesByKey[key]) {
-            std::printf("    %s\n", text.c_str());
-        }
-    }
-    for (const auto& [reason, count] : knownByReason) {
-        std::printf("known: %zu cases differ by %s\n", count, reason.c_str());
-    }
-    std::printf("%zu of %zu cases fail\n", failed, cases);
-    return failed == 0 ? 0 : 1;
+        const Json& in = row["regsIn"];
+        report.addCase(row["form"].getText(),
+                       std::format("code {} cl {} wl {} mode {}", row["code"].getText(),
+                                   readInteger(in["cl"]), readInteger(in["wl"]), readInteger(in["mode"])),
+                       run(memory, row));
+    });
+    return report.finish("cases");
 }
