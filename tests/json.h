@@ -16,8 +16,6 @@ namespace uee::test {
 // and no escapes beyond the ones a hex string or a mnemonic never needs.
 class Json {
 public:
-    enum class Kind { Null, Bool, Number, String, Array, Object };
-
     static Json parse(std::string_view text) {
         Json value;
         usize at = 0;
@@ -25,14 +23,12 @@ public:
         return value;
     }
 
-    Kind getKind() const { return mKind; }
-    bool isNull() const { return mKind == Kind::Null; }
     bool getBool() const {
         expect(Kind::Bool);
         return mText == "true";
     }
     const std::string& getText() const { return mText; }
-    usize size() const { return mItems.size(); }
+    const std::vector<Json>& getItems() const { return mItems; }
 
     const Json& operator[](usize index) const {
         expect(Kind::Array);
@@ -61,23 +57,19 @@ public:
         return *value;
     }
 
-    const std::vector<Json>& getItems() const { return mItems; }
-
     u64 getInteger() const {
         expect(Kind::Number);
-        return parseNumber(mText, 10);
+        return parseNumber<u64>(mText, 10);
     }
 
     s64 getSigned() const {
         expect(Kind::Number);
-        s64 value = 0;
-        std::from_chars(mText.data(), mText.data() + mText.size(), value);
-        return value;
+        return parseNumber<s64>(mText, 10);
     }
 
     u64 getHex() const {
         expect(Kind::String);
-        return parseNumber(mText, 16);
+        return parseNumber<u64>(mText, 16);
     }
 
     // A 128-bit value written as 32 hex digits, most significant first.
@@ -86,10 +78,12 @@ public:
         if (mText.size() != 32) {
             die("expected 32 hex digits, got \"" + mText + "\"");
         }
-        return {parseNumber(mText.substr(16), 16), parseNumber(mText.substr(0, 16), 16)};
+        return {parseNumber<u64>(mText.substr(16), 16), parseNumber<u64>(mText.substr(0, 16), 16)};
     }
 
 private:
+    enum class Kind { Null, Bool, Number, String, Array, Object };
+
     [[noreturn]] static void die(const std::string& message) {
         std::fprintf(stderr, "json: %s\n", message.c_str());
         std::abort();
@@ -102,8 +96,9 @@ private:
         }
     }
 
-    static u64 parseNumber(std::string_view digits, int base) {
-        u64 value = 0;
+    template <typename T>
+    static T parseNumber(std::string_view digits, int base) {
+        T value = 0;
         const auto result = std::from_chars(digits.data(), digits.data() + digits.size(), value, base);
         if (result.ec != std::errc{} || result.ptr != digits.data() + digits.size()) {
             die("not a base " + std::to_string(base) + " number: \"" + std::string(digits) + "\"");
@@ -118,66 +113,75 @@ private:
         }
     }
 
+    static char takeChar(std::string_view text, usize& at) {
+        skipSpace(text, at);
+        if (at >= text.size()) {
+            die("unexpected end of input");
+        }
+        return text[at++];
+    }
+
+    static void takeExpected(std::string_view text, usize& at, char expected) {
+        const char c = takeChar(text, at);
+        if (c != expected) {
+            die(std::string("expected '") + expected + "' at " + std::to_string(at - 1) +
+                ", found '" + c + "'");
+        }
+    }
+
     static std::string readString(std::string_view text, usize& at) {
+        takeExpected(text, at, '"');
         std::string out;
-        ++at;
         while (at < text.size() && text[at] != '"') {
             if (text[at] == '\\') {
                 ++at;
             }
             out += text[at++];
         }
-        ++at;
+        takeExpected(text, at, '"');
         return out;
     }
 
-    void read(std::string_view text, usize& at) {
+    bool takeEmpty(std::string_view text, usize& at, char close) {
         skipSpace(text, at);
-        if (at >= text.size()) {
-            die("unexpected end of input");
-        }
-        const char c = text[at];
-        if (c == '{') {
-            mKind = Kind::Object;
+        if (at < text.size() && text[at] == close) {
             ++at;
-            skipSpace(text, at);
-            if (text[at] == '}') {
-                ++at;
-                return;
-            }
-            for (;;) {
-                skipSpace(text, at);
-                mKeys.push_back(readString(text, at));
-                skipSpace(text, at);
-                ++at;  // ':'
-                mItems.emplace_back().read(text, at);
-                skipSpace(text, at);
-                if (text[at++] == '}') {
-                    return;
-                }
-            }
+            return true;
         }
-        if (c == '[') {
-            mKind = Kind::Array;
-            ++at;
-            skipSpace(text, at);
-            if (text[at] == ']') {
-                ++at;
-                return;
-            }
-            for (;;) {
-                mItems.emplace_back().read(text, at);
-                skipSpace(text, at);
-                if (text[at++] == ']') {
-                    return;
-                }
-            }
+        return false;
+    }
+
+    bool takeSeparator(std::string_view text, usize& at, char close) {
+        const char c = takeChar(text, at);
+        if (c != ',' && c != close) {
+            die(std::string("expected ',' or '") + close + "', found '" + c + "'");
         }
-        if (c == '"') {
-            mKind = Kind::String;
-            mText = readString(text, at);
+        return c == ',';
+    }
+
+    void readObject(std::string_view text, usize& at) {
+        mKind = Kind::Object;
+        if (takeEmpty(text, at, '}')) {
             return;
         }
+        do {
+            mKeys.push_back(readString(text, at));
+            takeExpected(text, at, ':');
+            mItems.emplace_back().read(text, at);
+        } while (takeSeparator(text, at, '}'));
+    }
+
+    void readArray(std::string_view text, usize& at) {
+        mKind = Kind::Array;
+        if (takeEmpty(text, at, ']')) {
+            return;
+        }
+        do {
+            mItems.emplace_back().read(text, at);
+        } while (takeSeparator(text, at, ']'));
+    }
+
+    void readScalar(std::string_view text, usize& at) {
         const usize start = at;
         while (at < text.size() && text[at] != ',' && text[at] != '}' && text[at] != ']' &&
                text[at] != ' ') {
@@ -190,6 +194,29 @@ private:
             mKind = Kind::Null;
         } else {
             mKind = Kind::Number;
+        }
+    }
+
+    void read(std::string_view text, usize& at) {
+        skipSpace(text, at);
+        if (at >= text.size()) {
+            die("unexpected end of input");
+        }
+        switch (text[at]) {
+            case '{':
+                ++at;
+                readObject(text, at);
+                return;
+            case '[':
+                ++at;
+                readArray(text, at);
+                return;
+            case '"':
+                mKind = Kind::String;
+                mText = readString(text, at);
+                return;
+            default:
+                readScalar(text, at);
         }
     }
 
