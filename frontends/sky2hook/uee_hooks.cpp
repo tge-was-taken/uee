@@ -16,9 +16,8 @@ struct HookPair {
     Hooks::PostHandler post = nullptr;
 };
 
-// One in-flight post-hooked call: the callee, the handler to run on return, the
-// real return address, and $sp at entry, which $sp equals again on return, so
-// nested calls match the right frame.
+// $sp at entry is $sp again on return, which is how nested calls find their
+// own frame.
 struct PendingReturn {
     std::uint32_t callee;
     Hooks::PostHandler post;
@@ -46,7 +45,7 @@ void markHooked(std::uint32_t pc) {
 
 // gpr[] is Reg128[32] and fpr[] is u32[32], which is the stride pair
 // Hooks::Context expects.
-Hooks::Context liveContext(uee::EeContext& ee, std::uint32_t pc) {
+Hooks::Context makeContext(uee::EeContext& ee, std::uint32_t pc) {
     return Hooks::Context{reinterpret_cast<std::uint32_t*>(ee.cpu.gpr),
                           reinterpret_cast<float*>(ee.fpu.fpr), pc};
 }
@@ -83,7 +82,7 @@ public:
         }
         const HookPair& hook = found->second;
 
-        Hooks::Context ctx = liveContext(ee, pc);
+        Hooks::Context ctx = makeContext(ee, pc);
         if (s_observer != nullptr) {
             s_observer(ctx);
         }
@@ -100,7 +99,7 @@ public:
 
 private:
     bool leaveHookedCall(uee::EeContext& ee, std::uint32_t pc) {
-        Hooks::Context here = liveContext(ee, pc);
+        Hooks::Context here = makeContext(ee, pc);
         for (std::size_t i = s_returnStack.size(); i-- > 0;) {
             if (s_returnStack[i].sp != here.sp) {
                 continue;
@@ -111,7 +110,7 @@ private:
             // rather than the sentinel. $v0 already holds the return value.
             here.ra = pending.realRa;
             if (pending.post != nullptr) {
-                Hooks::Context ctx = liveContext(ee, pending.callee);
+                Hooks::Context ctx = makeContext(ee, pending.callee);
                 pending.post(ctx);
             }
             ee.cpu.pc = pending.realRa;
@@ -160,8 +159,7 @@ void Hooks::SetObserver(Observer observer) {
 }
 
 // Calling back into the guest needs a nested run loop the hook dispatch has no
-// handle on. Nothing in the renderer uses it; a caller that starts to gets a
-// zero rather than a hang.
+// handle on, and nothing in the renderer does it.
 Hooks::u32 Hooks::CallEE(u32, std::initializer_list<u32>, std::initializer_list<float>) {
     return 0;
 }
@@ -170,9 +168,8 @@ int Hooks::Dispatch() {
     return 0;
 }
 
-// Hardware watches the diagnostics arm. They are PCSX2 patches with no
-// counterpart here, so a diagnostic that arms one records nothing instead of
-// failing to link.
+// Hardware watches the port's diagnostics arm through PCSX2 patches; here they
+// record nothing.
 void Hooks::SetDmaKickSink(DmaKickSink) {}
 void Hooks::OnDmaKick(u32, u32, u32, u32) {}
 void Hooks::SetGsVSyncSink(GsVSyncSink) {}

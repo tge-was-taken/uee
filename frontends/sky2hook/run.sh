@@ -1,8 +1,6 @@
 #!/bin/sh
-# Run P3FES with the native renderer. SKY2HOOK_DIR must name the P3FES PC port
-# working copy the renderer is compiled from. The disc is yours: pass an image or
-# an extracted directory as the first argument, or set P3FES_DISC. Anything else
-# passes through to the binary (-surfaceless for a headless run).
+# usage: run.sh <disc image or directory> [p3fes args], with SKY2HOOK_DIR naming
+# the P3FES PC port working copy. P3FES_DISC can stand in for the disc.
 set -e
 cd "$(dirname "$0")/../.."
 
@@ -27,9 +25,8 @@ if [ ! -f "$elf" ]; then
     exit 2
 fi
 
-# Under WSL, Mesa reaches the host GPU through its d3d12 driver; without this GL
-# falls back to llvmpipe, which is several times slower. Both variables are
-# needed. Set GALLIUM_DRIVER yourself to opt out.
+# Under WSL, Mesa reaches the host GPU only through its d3d12 driver and
+# otherwise falls back to llvmpipe. Setting GALLIUM_DRIVER opts out.
 if [ -z "$GALLIUM_DRIVER" ] && [ -e /dev/dxg ] && [ -e /usr/lib/wsl/lib/libd3d12.so ]; then
     export GALLIUM_DRIVER=d3d12 MESA_LOADER_DRIVER_OVERRIDE=d3d12
     export LD_LIBRARY_PATH=/usr/lib/wsl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}

@@ -1,8 +1,5 @@
-# The native RenderWare renderer from the P3FES PC port, running on this
-# runtime instead of an emulator. Its sources are compiled from a working copy
-# elsewhere on disk rather than vendored: the port is still moving, and the two
-# trees are developed together. SKY2HOOK_DIR says where that copy is, from the
-# environment or -DSKY2HOOK_DIR; without it there is no target.
+# The P3FES PC port's renderer on this runtime, compiled from the working copy
+# SKY2HOOK_DIR names, since the two trees move together.
 set(SKY2HOOK_DIR "" CACHE PATH "P3FES PC port working copy the renderer is compiled from")
 if(DEFINED ENV{SKY2HOOK_DIR})
     set(SKY2HOOK_DIR "$ENV{SKY2HOOK_DIR}")
@@ -30,10 +27,6 @@ find_package(Threads REQUIRED)
 set(PORT "${SKY2HOOK_DIR}/src")
 set(SKY "${PORT}/runtime/renderware/sky2")
 
-# On the default build, so that building the repository cannot leave this binary
-# behind: a target skipped in silence is a stale binary run by mistake. The
-# target only exists once SKY2HOOK_DIR names a working copy, so nothing that has
-# no renderer to compile builds it.
 FetchContent_Declare(pl_mpeg
     GIT_REPOSITORY https://github.com/phoboslab/pl_mpeg.git
     GIT_TAG c871f2be022ece7ef4f64230b4fb8e1fb9eb6023
@@ -106,8 +99,7 @@ set_source_files_properties(uee_hooks.cpp uee_runtime.cpp PROPERTIES
 # The port is C++20 and this runtime is C++23; each half keeps its own.
 set_target_properties(p3fes PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 
-# The shaders and the per-serial address files are read at runtime, from the
-# working copy they belong to.
+# The shaders and per-serial address files are read at runtime from the port.
 target_compile_definitions(p3fes PRIVATE
     SKYGL_SHADER_DIR="${SKY}/shaders"
     GAME_CONFIG_DIR="${SKY2HOOK_DIR}/config")
@@ -126,9 +118,7 @@ target_include_directories(p3fes PRIVATE
     "${SKY2HOOK_DIR}/thirdparty/imgui/include"
     "${SKY2HOOK_DIR}/thirdparty/tomlplusplus")
 
-# The same program the benchmark translates, so the renderer can be driven by
-# translated code instead of the interpreter. Without the benchmark targets
-# there is nothing translated to link, and it runs interpreted.
+# The translated game, when the benchmark targets built one.
 if(TARGET translated_p3fes)
     translated_unit_names(P3FES_UNITS ${TRANSLATED_DIR}/p3fes ${BENCH_UNITS})
     target_sources(p3fes PRIVATE ${P3FES_UNITS}
@@ -137,8 +127,7 @@ if(TARGET translated_p3fes)
     target_include_directories(p3fes PRIVATE ${TRANSLATED_DIR})
     target_compile_definitions(p3fes PRIVATE UEE_TRANSLATED_P3FES)
     # The rules that write these sources live in the top-level directory, and a
-    # custom command only orders the directory it was declared in. Without this
-    # the build compiles them before they are written, or links the last ones.
+    # custom command only orders the directory it was declared in.
     add_dependencies(p3fes translated_p3fes)
 endif()
 

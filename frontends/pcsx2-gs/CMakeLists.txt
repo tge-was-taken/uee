@@ -1,6 +1,5 @@
-# Draws the graphics stream with PCSX2's software rasteriser, which it loads at
-# run time rather than linking: the library is PCSX2's and under PCSX2's
-# licence, and this only calls its C interface. UEE_PCSX2HOOK names the file.
+# PCSX2's GS is loaded at run time rather than linked, since it is under PCSX2's
+# licence; UEE_PCSX2HOOK names the file.
 find_package(SDL3 3.2 QUIET)
 if(NOT SDL3_FOUND)
     message(STATUS "pcsx2-gs target skipped: no SDL3")
@@ -9,9 +8,7 @@ endif()
 
 add_executable(pcsx2-gs main.cpp)
 
-# The recompiled game rather than the interpreter, when the benchmark targets
-# built one. Nothing here stands in for the game's own functions, so this is the
-# emulated path at translated speed.
+# The translated game, when the benchmark targets built one.
 if(TARGET translated_p3fes)
     translated_unit_names(P3FES_UNITS ${TRANSLATED_DIR}/p3fes ${BENCH_UNITS})
     target_sources(pcsx2-gs PRIVATE ${P3FES_UNITS})

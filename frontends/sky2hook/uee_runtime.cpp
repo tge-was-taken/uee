@@ -25,21 +25,20 @@
 
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
-#include <limits>
 #include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
-#include <unordered_map>
-#include <cstdio>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifdef UEE_TRANSLATED_P3FES
@@ -56,11 +55,11 @@ UEE_IOP_MODULE_DECLARATIONS
 
 namespace {
 
-uee::LoggerChannel log("p3fes");
+uee::LoggerChannel logger("p3fes");
 
 // What the build translated for this program, or nothing at all, in which case
 // the interpreter runs it.
-uee::FunctionRunner translatedRunner() {
+uee::FunctionRunner getTranslatedRunner() {
 #ifdef UEE_TRANSLATED_P3FES
     return uee::runFunction;
 #else
@@ -68,7 +67,7 @@ uee::FunctionRunner translatedRunner() {
 #endif
 }
 
-std::span<uee::TranslatedIrx* const> translatedIopModules() {
+std::span<uee::TranslatedIrx* const> getTranslatedIopModules() {
 #ifdef UEE_IOP_MODULES
     static uee::TranslatedIrx* const kModules[] = {UEE_IOP_MODULE_LIST};
     return kModules;
@@ -77,10 +76,9 @@ std::span<uee::TranslatedIrx* const> translatedIopModules() {
 #endif
 }
 
-
 // libpad reports the buttons as one active-low halfword, the poll response's
 // first data byte in the high half.
-u16 toPadMask(core::PadButton bind) {
+u16 getPadMask(core::PadButton bind) {
     switch (bind) {
         case core::PAD_LEFT: return 0x8000;
         case core::PAD_DOWN: return 0x4000;
@@ -102,7 +100,7 @@ u16 toPadMask(core::PadButton bind) {
     }
 }
 
-core::PadButton toPadButton(std::string_view name) {
+core::PadButton findPadButton(std::string_view name) {
     static const std::unordered_map<std::string_view, core::PadButton> kNames{
         {"up", core::PAD_UP},         {"down", core::PAD_DOWN},
         {"left", core::PAD_LEFT},     {"right", core::PAD_RIGHT},
@@ -141,7 +139,7 @@ std::vector<PadStep> readPadScript(const std::filesystem::path& path) {
         }
         u16 mask = 0;
         for (std::string name; fields >> name;) {
-            mask = static_cast<u16>(mask | toPadMask(toPadButton(name)));
+            mask = static_cast<u16>(mask | getPadMask(findPadButton(name)));
         }
         endsAt += polls;
         steps.push_back({endsAt, mask});
@@ -151,7 +149,7 @@ std::vector<PadStep> readPadScript(const std::filesystem::path& path) {
 
 // The boot ELF is named after the disc serial, which is what the per-version
 // address file is named after in the other spelling: SLUS_216.21 is SLUS-21621.
-std::string serialOf(const std::filesystem::path& elf) {
+std::string getSerial(const std::filesystem::path& elf) {
     std::string serial;
     for (const char c : elf.filename().string()) {
         if (c == '_') {
@@ -171,8 +169,7 @@ std::vector<u8> readFile(const std::filesystem::path& path) {
     return std::vector<u8>(std::istreambuf_iterator<char>(file), {});
 }
 
-// Runs the game on the uee interpreter, which HLEs the PS2 kernel and so boots
-// the ELF directly. The emulation thread owns the machine; this drives boot and
+// The kernel is HLE, so the game boots straight from its ELF.
 class UeeRuntime final : public core::Runtime, private uee::PadSource, private uee::StopRequest {
 public:
     bool init(int argc, char** argv) override {
@@ -192,7 +189,7 @@ public:
             }
         }
         if (positional.empty()) {
-            log.fatal("usage: p3fes <elf> [disc] [patches.toml] [card.mc2] "
+            logger.fatal("usage: p3fes <elf> [disc] [patches.toml] [card.mc2] "
                       "[-surfaceless] [-advance]");
             return false;
         }
@@ -220,7 +217,7 @@ public:
     void shutdown() override {}
 
     void setPadButton(core::PadButton bind, bool pressed) override {
-        const u16 mask = toPadMask(bind);
+        const u16 mask = getPadMask(bind);
         if (pressed) {
             mHeld.fetch_or(mask);
         } else {
@@ -233,34 +230,29 @@ public:
     void setSpeedLimit(bool) override {}
 
 private:
-    // Cross, over and over, which is what walks the boot prompts through with
-    // nobody at the pad. It is held for a few polls because the game reads the
-    // pad once a field and wants to see an edge. No direction is pressed: a
-    // character that walks makes every run a different scene, and a run that
-    // is measured has to be the same one twice.
-    u16 heldForAdvance() const {
+    // Cross every fourth poll walks the boot prompts with nobody at the pad. No
+    // direction, so that a measured run is the same scene twice.
+    u16 getAdvanceButtons() const {
         constexpr u16 kPollsPerStep = 4;
         const u16 step = static_cast<u16>(mPolls / kPollsPerStep % 4);
-        return step == 0 ? toPadMask(core::PAD_CROSS) : 0;
+        return step == 0 ? getPadMask(core::PAD_CROSS) : 0;
     }
 
-    // A direction makes every run a different scene, which is the point when
-    // the question is what the renderer draws rather than how fast. Cross still
-    // answers the boot prompts, since the save will not load without it.
-    u16 heldForWalk() const {
+    // Walks in a square once the save has loaded, for a scene that changes.
+    u16 getWalkButtons() const {
         constexpr u64 kPollsToLoad = 2400;
         if (mPolls < kPollsToLoad) {
-            return heldForAdvance();
+            return getAdvanceButtons();
         }
         constexpr u64 kPollsPerLeg = 240;
         constexpr core::PadButton kLegs[] = {core::PAD_UP, core::PAD_RIGHT, core::PAD_DOWN,
                                              core::PAD_LEFT};
-        return toPadMask(kLegs[(mPolls - kPollsToLoad) / kPollsPerLeg % 4]);
+        return getPadMask(kLegs[(mPolls - kPollsToLoad) / kPollsPerLeg % 4]);
     }
 
     // Steps run in order and the last one holds once the script runs out, so a
     // script that ends on nothing leaves the pad alone.
-    u16 heldForScript() {
+    u16 getScriptButtons() {
         while (mStep < mScript.size() && mPolls >= mScript[mStep].endsAt) {
             ++mStep;
         }
@@ -269,9 +261,9 @@ private:
 
     u16 buttons() override {
         ++mPolls;
-        const u16 driven = !mScript.empty() ? heldForScript()
-                                            : (mWalk ? heldForWalk()
-                                                     : (mAdvance ? heldForAdvance() : 0));
+        const u16 driven = !mScript.empty() ? getScriptButtons()
+                                            : (mWalk ? getWalkButtons()
+                                                     : (mAdvance ? getAdvanceButtons() : 0));
         const u16 held = mHeld.load(std::memory_order_relaxed) | driven;
         return static_cast<u16>(~held);
     }
@@ -287,7 +279,7 @@ private:
     int boot() {
         const std::vector<u8> image = readFile(mElf);
         if (image.empty()) {
-            log.fatal("cannot read {}", mElf.string());
+            logger.fatal("cannot read {}", mElf.string());
             return EXIT_FAILURE;
         }
 
@@ -296,14 +288,14 @@ private:
             try {
                 config = uee::loadGameConfig(mPatches.string());
             } catch (const std::exception& error) {
-                log.fatal("{}", error.what());
+                logger.fatal("{}", error.what());
                 return EXIT_FAILURE;
             }
         }
 
         uee::Memory memory = uee::makeMainMemory();
         uee::Interpreter interpreter(memory);
-        uee::Kernel kernel(interpreter.ee, memory, config, translatedIopModules());
+        uee::Kernel kernel(interpreter.ee, memory, config, getTranslatedIopModules());
         interpreter.ee.cpu.pc = uee::loadElf(image, memory).entry;
         uee::applyPatches(memory, config.patches);
         guest::setRam(memory.regionAt(0).data(), guest::RAM_SIZE);
@@ -313,14 +305,14 @@ private:
             const std::filesystem::path path = root / module;
             const std::vector<u8> bytes = readFile(path);
             if (bytes.empty() || !kernel.iop().loadModule(path.stem().string(), bytes)) {
-                log.fatal("preloaded module {} did not start", module);
+                logger.fatal("preloaded module {} did not start", module);
                 return EXIT_FAILURE;
             }
         }
 
         const std::unique_ptr<uee::Disc> disc = uee::openDisc(mDisc.string());
         if (!mDisc.empty() && !disc->isOpen()) {
-            log.fatal("cannot open disc {}", mDisc.string());
+            logger.fatal("cannot open disc {}", mDisc.string());
             return EXIT_FAILURE;
         }
         if (disc->isOpen()) {
@@ -332,7 +324,7 @@ private:
         if (!mCard.empty()) {
             card.emplace(mCard.string());
             if (!card->isOpen()) {
-                log.fatal("cannot open memory card image {}", mCard.string());
+                logger.fatal("cannot open memory card image {}", mCard.string());
                 return EXIT_FAILURE;
             }
             kernel.attachCard(&*card);
@@ -355,9 +347,8 @@ private:
         sky2::MovieDecoder video;
         uee::Movie movie{kernel.mmio().ipu(), config.mpegGetPicture};
         movie.attach(&video);
-        // The port's own sceMpegGetPicture only records where the picture was
-        // going and lets the call continue, and the renderer draws nothing
-        // until it has. Answering the call first would skip it.
+        // The port's own sceMpegGetPicture only records where the picture goes,
+        // and the renderer draws nothing until it has, so it runs first.
         uee::Hook* hooks[] = {&sky2::getHook(), &movie};
 
         uee::Machine machine{.interpreter = interpreter,
@@ -365,29 +356,29 @@ private:
                              .mmio = kernel.mmio(),
                              .kernel = kernel,
                              .budget = kernel.budget(),
-                             .functions = translatedRunner(),
+                             .functions = getTranslatedRunner(),
                              .hooks = hooks,
                              .stopRequest = this};
         // No time limit: the run ends when the guest exits or the window closes.
         const uee::Stop stop = uee::run(machine);
         std::fputs(kernel.readOutput().c_str(), stdout);
         if (stop.reason == uee::StopReason::Exited || stop.reason == uee::StopReason::Stopped) {
-            log.info("{}", uee::describe(stop));
+            logger.info("{}", uee::describe(stop));
             return EXIT_SUCCESS;
         }
-        log.error("{}", uee::describe(stop));
+        logger.error("{}", uee::describe(stop));
         kernel.reportThreads();
         return EXIT_FAILURE;
     }
 
     bool armRenderer() {
-        game::loadAddresses(serialOf(mElf));
+        game::loadAddresses(getSerial(mElf));
         if (!app::Config::get().nativeRenderer) {
             return true;
         }
         skygl::hooks::setGameResolution(skygl::GAME_WIDTH, skygl::GAME_HEIGHT);
         if (!skygl::hooks::open()) {
-            log.fatal("the renderer could not open its device");
+            logger.fatal("the renderer could not open its device");
             return false;
         }
         hooks::install(/*hookRender=*/true, /*renderActive=*/true);

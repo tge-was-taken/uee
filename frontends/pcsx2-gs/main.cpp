@@ -14,6 +14,20 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
+
 #include <dlfcn.h>
 
 #ifdef UEE_TRANSLATED_P3FES
@@ -24,20 +38,6 @@ constexpr uee::FunctionRunner kTranslated = uee::runFunction;
 #else
 constexpr uee::FunctionRunner kTranslated = nullptr;
 #endif
-
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cstdlib>
-#include <format>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
-#include <memory>
-#include <optional>
-#include <span>
-#include <string>
-#include <vector>
 
 namespace {
 
@@ -71,7 +71,6 @@ public:
     void write(std::span<const u8>) override {}
 };
 
-
 uee::LoggerChannel logger("gs");
 
 constexpr int kMaxWidth = 1024;
@@ -98,18 +97,17 @@ public:
             logger.fatal("cannot load {}: {}", path, dlerror());
             return false;
         }
-        open = symbol<int (*)(u8*, int, const BorrowedWindow*, const char*, int)>(
+        open = findSymbol<int (*)(u8*, int, const BorrowedWindow*, const char*, int)>(
             "pcsx2hook_gs_open");
-        closeRenderer = symbol<void (*)()>("pcsx2hook_gs_close");
-        transfer = symbol<void (*)(int, const u8*, u32)>("pcsx2hook_gs_transfer");
-        endField = symbol<void (*)(int)>("pcsx2hook_gs_end_field");
-        readDisplay = symbol<int (*)(u32*, int, int*, int*)>("pcsx2hook_gs_read_display");
-        snapshot = symbol<int (*)(u32*, int, int*, int*)>("pcsx2hook_gs_snapshot");
-        resize = symbol<void (*)(u32, u32, float)>("pcsx2hook_gs_resize");
-        writeDisplay = symbol<int (*)(const char*)>("pcsx2hook_gs_write_display");
+        closeRenderer = findSymbol<void (*)()>("pcsx2hook_gs_close");
+        transfer = findSymbol<void (*)(int, const u8*, u32)>("pcsx2hook_gs_transfer");
+        endField = findSymbol<void (*)(int)>("pcsx2hook_gs_end_field");
+        readDisplay = findSymbol<int (*)(u32*, int, int*, int*)>("pcsx2hook_gs_read_display");
+        resize = findSymbol<void (*)(u32, u32, float)>("pcsx2hook_gs_resize");
+        writeDisplay = findSymbol<int (*)(const char*)>("pcsx2hook_gs_write_display");
         return open != nullptr && closeRenderer != nullptr && transfer != nullptr &&
                endField != nullptr && readDisplay != nullptr && writeDisplay != nullptr &&
-               snapshot != nullptr && resize != nullptr;
+               resize != nullptr;
     }
 
     int (*open)(u8* registers, int renderer, const BorrowedWindow* window,
@@ -118,13 +116,12 @@ public:
     void (*transfer)(int path, const u8* data, u32 bytes) = nullptr;
     void (*endField)(int field) = nullptr;
     int (*readDisplay)(u32* pixels, int capacity, int* width, int* height) = nullptr;
-    int (*snapshot)(u32* pixels, int capacity, int* width, int* height) = nullptr;
     void (*resize)(u32 width, u32 height, float scale) = nullptr;
     int (*writeDisplay)(const char* path) = nullptr;
 
 private:
     template <typename Function>
-    Function symbol(const char* name) {
+    Function findSymbol(const char* name) {
         void* found = dlsym(mLibrary, name);
         if (found == nullptr) {
             logger.fatal("the graphics library does not answer {}", name);
@@ -196,10 +193,8 @@ public:
 
     // What the renderer needs to draw into this window, per platform. Anything
     // not named here shows nothing and the picture is read back instead.
-    BorrowedWindow borrow() const {
+    BorrowedWindow getBorrowedWindow() const {
         BorrowedWindow window;
-        window.width = static_cast<u32>(mWidth == 0 ? 640 : mWidth);
-        window.height = static_cast<u32>(mHeight == 0 ? 448 : mHeight);
         window.scale = SDL_GetWindowDisplayScale(mWindow);
         int width = 0;
         int height = 0;
@@ -233,7 +228,7 @@ public:
         return window;
     }
 
-    void pump() {
+    void pollEvents() {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
@@ -283,9 +278,7 @@ private:
     bool mClosing = false;
 };
 
-// The graphics stream, handed over as it arrives. The registers are kept here
-// because the unit reads them while it draws. A hardware renderer draws into
-// the window itself; the software one hands back pixels for this to show.
+// The registers are kept here because the unit reads them while it draws.
 class Graphics : public uee::GsHandler {
 public:
     Graphics(GsLibrary& gs, Window& window, int renderer,
@@ -303,11 +296,10 @@ public:
         mRegisters.assign(registers.begin(), registers.end());
         // The software renderer hands its picture back and this shows it; a
         // hardware one is given the window and draws into it.
-        const BorrowedWindow window = mWindow.borrow();
+        const BorrowedWindow window = mWindow.getBorrowedWindow();
         const bool presents = mRenderer != 0;
-        mOpen = mGs.open(mRegisters.data(), mRenderer,
-                                 presents ? &window : nullptr,
-                                 mResources.empty() ? nullptr : mResources.c_str(), 0) != 0;
+        mOpen = mGs.open(mRegisters.data(), mRenderer, presents ? &window : nullptr,
+                         mResources.empty() ? nullptr : mResources.c_str(), 0) != 0;
         mPresents = mOpen && presents;
         if (!mOpen) {
             logger.fatal("the renderer did not open");
@@ -315,11 +307,10 @@ public:
     }
 
     void transfer(u32 path, std::span<const u8> data) override {
-        mGs.transfer(static_cast<int>(path), data.data(),
-                             static_cast<u32>(data.size()));
+        mGs.transfer(static_cast<int>(path), data.data(), static_cast<u32>(data.size()));
     }
 
-    u32 fields() const { return mFields; }
+    u32 getFieldCount() const { return mFields; }
 
     void vsync(u32 field, std::span<const u8> registers) override {
         std::copy(registers.begin(), registers.end(), mRegisters.begin());
@@ -327,9 +318,8 @@ public:
 
         int width = 0;
         int height = 0;
-        if (!mPresents && mGs.readDisplay(mPixels.data(),
-                                                  static_cast<int>(mPixels.size()), &width,
-                                                  &height) != 0) {
+        if (!mPresents && mGs.readDisplay(mPixels.data(), static_cast<int>(mPixels.size()),
+                                          &width, &height) != 0) {
             mWindow.show(mPixels.data(), width, height);
         }
         if (!mFrameDirectory.empty()) {
@@ -338,9 +328,9 @@ public:
         }
         ++mFields;
 
-        mWindow.pump();
+        mWindow.pollEvents();
         if (mWindow.takeResize()) {
-            const BorrowedWindow window = mWindow.borrow();
+            const BorrowedWindow window = mWindow.getBorrowedWindow();
             mGs.resize(window.width, window.height, window.scale);
         }
     }
@@ -439,9 +429,8 @@ int main(int argc, char** argv) {
         kernel.attachCard(&*card);
     }
 
-    // Nothing here presents a decoded picture, and without a sink the game's own
-    // sceMpegGetPicture runs and drives an IPU this does not implement. Dropping
-    // the stream answers the call and lets the movie pass.
+    // Without a sink the game's sceMpegGetPicture drives an IPU that cannot
+    // decode; dropping the stream answers the call.
     DroppedVideo video;
     uee::Movie movie{kernel.mmio().ipu(), config.mpegGetPicture};
     movie.attach(&video);
@@ -461,7 +450,7 @@ int main(int argc, char** argv) {
     }
 
     const uee::Stop stop = uee::run(machine, limit);
-    logger.info("{} after {} fields", uee::describe(stop), graphics.fields());
+    logger.info("{} after {} fields", uee::describe(stop), graphics.getFieldCount());
 
     window.close();
     return 0;
