@@ -67,9 +67,8 @@ constexpr s32 kEnvelopeKnee = 0x6000;
 constexpr u32 kPitchUnity = 0x1000;
 constexpr u32 kPitchLimit = 0x3FFF;
 
-// MODHSYN treats the sustain level as four bits. The level each of its sixteen
-// values stands for is not attested by anything cited here.
-constexpr s32 kSustainSteps = 16;
+// MODHSYN treats the sustain level as four bits, each step of it 0x800.
+constexpr s32 kSustainStepShift = 11;
 
 // A rate counts down from this, so a rate whose period is longer than one
 // sample only steps every few of them.
@@ -87,7 +86,8 @@ RateStep stepOf(u32 rate, bool rising, bool exponential, s32 level) {
     const s32 shift = static_cast<s32>(rate >> 2);
     const s32 step = rising ? 7 - static_cast<s32>(rate & 3) : -8 + static_cast<s32>(rate & 3);
     RateStep result;
-    result.period = kRatePeriod >> std::max(0, shift - kRateShiftLimit);
+    // The slowest rates still move, one count per sample.
+    result.period = std::max(1, kRatePeriod >> std::max(0, shift - kRateShiftLimit));
     result.value = step << std::max(0, kRateShiftLimit - shift);
     if (exponential && rising && level > kEnvelopeKnee) {
         result.period >>= 2;
@@ -150,7 +150,7 @@ std::optional<u16> Spu2::readHalf(u32 offset) const {
             case kAdsr1: return voice->adsr1;
             case kAdsr2: return voice->adsr2;
             // The envelope's current value is readable while it runs.
-            case kEnvelopeValue: return static_cast<u16>(voice->envelope);
+            case kEnvelopeValue: return static_cast<u16>(voice->envelope.level);
             default: return 0;
         }
     }
@@ -200,7 +200,7 @@ bool Spu2::writeHalf(u32 offset, u16 value) {
             case kPitch: voice->pitch = value; return true;
             case kAdsr1: voice->adsr1 = value; return true;
             case kAdsr2: voice->adsr2 = value; return true;
-            case kEnvelopeValue: voice->envelope = value; return true;
+            case kEnvelopeValue: voice->envelope.level = value; return true;
             default: return true;
         }
     }
@@ -273,8 +273,9 @@ void Spu2::keyOn(Core& core, u32 voices) {
 void Spu2::keyOff(Core& core, u32 voices) {
     log.trace("key off {:06x}", voices);
     for (u32 i = 0; i < kVoices; ++i) {
-        if ((voices & (1u << i)) != 0 && core.voices[i].phase != Phase::Off) {
-            core.voices[i].phase = Phase::Release;
+        if ((voices & (1u << i)) != 0 && core.voices[i].envelope.phase != EnvelopePhase::Off) {
+            core.voices[i].envelope.phase = EnvelopePhase::Release;
+            core.voices[i].envelope.counter = 0;
         }
     }
 }
@@ -287,13 +288,11 @@ void Spu2::startVoice(Voice& voice) {
     voice.previous = 0;
     voice.older = 0;
     voice.history = 0;
-    voice.envelope = 0;
-    voice.envelopeCounter = 0;
+    voice.envelope = {EnvelopePhase::Attack, 0, 0};
     voice.left = {};
     voice.right = {};
     voice.loopSet = false;
     voice.ended = false;
-    voice.phase = Phase::Attack;
     decodeBlock(voice);
 }
 
@@ -348,51 +347,54 @@ s32 Spu2::applyVolume(s32 sample, u16 volume, Sweep& sweep) {
 // MODHSYN: HSynBuildAdsr1 @ 0x40ac, HSynBuildAdsr2 @ 0x4150, HSynLfoApply @ 0x7834
 // Adsr1 patches 7 bits at 8, 4 at 4, 4 at 0; Adsr2 7 at 6 and 5 at 0. A
 // release writes 0xc021: curve in the top three bits, release curve at bit 5.
-void Spu2::stepEnvelope(Voice& voice) {
-    if (voice.phase == Phase::Off) {
-        return;
-    }
-    const u32 attackRate = (voice.adsr1 >> 8) & 0x7F;
-    const bool attackExponential = (voice.adsr1 & 0x8000) != 0;
-    const u32 decayRate = (voice.adsr1 >> 4) & 0x0F;
-    const s32 sustainLevel = static_cast<s32>((voice.adsr1 & 0x0F) + 1) * kEnvelopeFull /
-                             kSustainSteps;
-    const u32 sustainRate = (voice.adsr2 >> 6) & 0x7F;
-    const u32 sustainMode = (voice.adsr2 >> 13) & 0x07;
-    const u32 releaseRate = voice.adsr2 & 0x1F;
-    const bool releaseExponential = (voice.adsr2 & 0x20) != 0;
+void stepEnvelope(Envelope& envelope, u16 adsr1, u16 adsr2) {
+    const u32 attackRate = (adsr1 >> 8) & 0x7F;
+    const bool attackExponential = (adsr1 & 0x8000) != 0;
+    const u32 decayRate = (adsr1 >> 4) & 0x0F;
+    const s32 sustainLevel = static_cast<s32>((adsr1 & 0x0F) + 1) << kSustainStepShift;
+    const u32 sustainRate = (adsr2 >> 6) & 0x7F;
+    const u32 sustainMode = (adsr2 >> 13) & 0x07;
+    const u32 releaseRate = adsr2 & 0x1F;
+    const bool releaseExponential = (adsr2 & 0x20) != 0;
 
     RateStep step;
-    switch (voice.phase) {
-        case Phase::Attack: step = stepOf(attackRate, true, attackExponential, voice.envelope); break;
-        case Phase::Decay: step = stepOf(decayRate << 2, false, true, voice.envelope); break;
-        case Phase::Sustain:
+    switch (envelope.phase) {
+        case EnvelopePhase::Attack:
+            step = stepOf(attackRate, true, attackExponential, envelope.level);
+            break;
+        case EnvelopePhase::Decay:
+            step = stepOf(decayRate << 2, false, true, envelope.level);
+            break;
+        case EnvelopePhase::Sustain:
             step = stepOf(sustainRate, (sustainMode & 2) == 0, (sustainMode & 4) != 0,
-                          voice.envelope);
+                          envelope.level);
             break;
-        case Phase::Release:
-            step = stepOf(releaseRate << 2, false, releaseExponential, voice.envelope);
+        case EnvelopePhase::Release:
+            step = stepOf(releaseRate << 2, false, releaseExponential, envelope.level);
             break;
-        case Phase::Off: return;
+        case EnvelopePhase::Off: return;
     }
 
-    voice.envelopeCounter += step.period;
-    while (voice.envelopeCounter >= kRatePeriod) {
-        voice.envelopeCounter -= kRatePeriod;
-        voice.envelope = std::clamp(voice.envelope + step.value, 0, kEnvelopeFull);
+    envelope.counter += step.period;
+    if (envelope.counter >= kRatePeriod) {
+        envelope.counter = 0;
+        envelope.level = std::clamp(envelope.level + step.value, 0, kEnvelopeFull);
     }
 
-    if (voice.phase == Phase::Attack && voice.envelope >= kEnvelopeFull) {
-        voice.phase = Phase::Decay;
-    } else if (voice.phase == Phase::Decay && voice.envelope <= sustainLevel) {
-        voice.phase = Phase::Sustain;
-    } else if (voice.phase == Phase::Release && voice.envelope == 0) {
-        voice.phase = Phase::Off;
+    // A sustain that falls to nothing ends the voice the way a release does.
+    if (envelope.phase == EnvelopePhase::Attack && envelope.level >= kEnvelopeFull) {
+        envelope.phase = EnvelopePhase::Decay;
+    } else if (envelope.phase == EnvelopePhase::Decay && envelope.level <= sustainLevel) {
+        envelope.phase = EnvelopePhase::Sustain;
+    } else if ((envelope.phase == EnvelopePhase::Release ||
+                envelope.phase == EnvelopePhase::Sustain) &&
+               envelope.level == 0) {
+        envelope.phase = EnvelopePhase::Off;
     }
 }
 
 s32 Spu2::stepVoice(Core& core, Voice& voice, u32 index) {
-    if (voice.phase == Phase::Off) {
+    if (voice.envelope.phase == EnvelopePhase::Off) {
         return 0;
     }
 
@@ -408,8 +410,7 @@ s32 Spu2::stepVoice(Core& core, Voice& voice, u32 index) {
                 // Waveform data with no loop stops the voice and leaves the
                 // envelope reading zero.
                 if (!voice.repeats) {
-                    voice.phase = Phase::Off;
-                    voice.envelope = 0;
+                    voice.envelope = {};
                     return 0;
                 }
             }
@@ -420,8 +421,8 @@ s32 Spu2::stepVoice(Core& core, Voice& voice, u32 index) {
     const s32 sample = voice.history + (((voice.decoded[voice.sampleIndex] - voice.history) *
                                          static_cast<s32>(voice.counter)) >>
                                         12);
-    stepEnvelope(voice);
-    return (sample * voice.envelope) >> 15;
+    stepEnvelope(voice.envelope, voice.adsr1, voice.adsr2);
+    return (sample * voice.envelope.level) >> 15;
 }
 
 // A voice reaches a channel only through its own volume and the core's mixing

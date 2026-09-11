@@ -8,6 +8,18 @@
 
 namespace uee {
 
+// The volume a voice plays at, walked once per output sample through the four
+// phases its two ADSR registers describe.
+enum class EnvelopePhase { Off, Attack, Decay, Sustain, Release };
+
+struct Envelope {
+    EnvelopePhase phase = EnvelopePhase::Off;
+    s32 level = 0;
+    s32 counter = 0;
+};
+
+void stepEnvelope(Envelope& envelope, u16 adsr1, u16 adsr2);
+
 // The sound processor: two cores of 24 voices, reading ADPCM out of two
 // megabytes of local memory and mixing what they play into one stereo pair.
 class Spu2 {
@@ -27,10 +39,6 @@ private:
     static constexpr usize kCores = 2;
     static constexpr usize kVoices = 24;
     static constexpr usize kMemoryHalves = 1024 * 1024;
-
-    // The envelope runs to 0x7fff, and a pseudo exponential rise slows down
-    // once it passes three quarters of that.
-    enum class Phase { Off, Attack, Decay, Sustain, Release };
 
     // A rate can walk a volume over time, on the counter the envelope keeps.
     struct Sweep {
@@ -58,9 +66,7 @@ private:
         s32 older = 0;
         s32 history = 0;
 
-        Phase phase = Phase::Off;
-        s32 envelope = 0;
-        s32 envelopeCounter = 0;
+        Envelope envelope;
         Sweep left;
         Sweep right;
         bool loopSet = false;
@@ -89,7 +95,6 @@ private:
     void startVoice(Voice& voice);
     void decodeBlock(Voice& voice);
     s32 stepVoice(Core& core, Voice& voice, u32 index);
-    void stepEnvelope(Voice& voice);
     s32 applyVolume(s32 sample, u16 volume, Sweep& sweep);
 
     std::vector<u16> mMemory;
