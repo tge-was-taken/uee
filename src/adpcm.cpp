@@ -27,7 +27,8 @@ void decodeAdpcmBlock(std::span<const u8> block, AdpcmState& state, std::span<s1
         const u8 byte = block[2 + i / 2];
         const u32 nibble = (i % 2 == 0) ? (byte & 0x0Fu) : (byte >> 4);
         s32 sample = static_cast<s16>(nibble << 12) >> shift;
-        sample += (state.previous * kPrevious[filter] + state.older * kOlder[filter]) >> 6;
+        // The filter's sum rounds to nearest rather than down.
+        sample += (state.previous * kPrevious[filter] + state.older * kOlder[filter] + 32) >> 6;
         out[i] = clampToSample(sample);
         state.older = state.previous;
         state.previous = out[i];
