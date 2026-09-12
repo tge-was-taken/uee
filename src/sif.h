@@ -11,7 +11,6 @@
 
 #include <deque>
 #include <filesystem>
-#include <map>
 #include <set>
 #include <optional>
 #include <string>
@@ -20,6 +19,18 @@
 namespace uee {
 
 class Disc;
+
+// A server nothing here or on the IOP provides. Its calls answer -1, each kind
+// logged once, so a game that binds to it keeps going.
+class UnknownServer final : public SifServer {
+public:
+    std::string_view name() const override { return "unknown"; }
+    std::span<const u32> serverIds() const override { return {}; }
+    s32 call(u32 serverId, const RpcCall& call) override;
+
+private:
+    std::set<std::pair<u32, u32>> mReported;
+};
 
 namespace sifcmd {
 
@@ -50,10 +61,6 @@ public:
 
     void attachFiles(std::filesystem::path root) { mFileIo.attachFiles(std::move(root)); }
 
-    // A later registration takes the service ids off the one that held them,
-    // which is what a game shipping its own build of a module does.
-    void registerServer(SifServer& server);
-
     // What the reply queue looks like, for when the EE stops making progress.
     void report() const;
 
@@ -83,12 +90,7 @@ private:
     void passEndToIop(u32 packet);
     void takePacketsFromIop();
     void send(std::vector<u32> packet);
-    // Deduplicate stub logs to reduce spam
-    void reportOnce(u32 serverId, u32 number);
-
-    SifServer* serverFor(u32 serverId) const;
-    u32 serverAddress(u32 serverId);
-    u32 serverIdAt(u32 address) const;
+    void addHostServers(SifServer& server);
 
     Memory& mMemory;
     Sbus& mSbus;
@@ -96,14 +98,13 @@ private:
     IopHleFileio mFileIo;
     IopHleLoadfile mLoadFile;
     IopHleCdvdfsv mCdvd;
-    std::map<u32, SifServer*> mRegistered;
+    UnknownServer mUnknown;
     u32 mUndelivered = 0;
 
     u32 mEeCommandBuffer = 0;
     bool mRebooting = false;
     Disc* mDisc = nullptr;
-    std::map<u32, u32> mBound;
-    std::set<std::pair<u32, u32>> mReported;
+
     std::deque<std::vector<u32>> mPending;
 };
 

@@ -87,7 +87,7 @@ s32 IopHleLoadfile::loadModule(const RpcCall& call) {
     std::vector<u8> image;
     const u32 sectors = (file->size + kSectorBytes - 1) / kSectorBytes;
     const std::string module = file->name.substr(0, file->name.find(';'));
-    if (!mDisc->read(file->sector, sectors, image) || !mIop.loadModule(module, image)) {
+    if (!mDisc->read(file->sector, sectors, image) || !mIop.loadModuleOnThread(module, image)) {
         log.stub("module {}", path);
         return static_cast<s32>(++mModules);
     }
@@ -138,8 +138,8 @@ s32 IopHleLoadfile::loadModuleBuffer(const RpcCall& call) {
     // cannot be loaded is reported here and answered the way a stub is.
     std::optional<s32> result;
     try {
-        result = mIop.loadModule(name.empty() ? std::format("module@{:08x}", buffer) : name,
-                                 image, arguments);
+        result = mIop.loadModuleOnThread(
+            name.empty() ? std::format("module@{:08x}", buffer) : name, image, arguments);
     } catch (const std::exception& error) {
         log.stub("module {} at {:08x}: {}", name, buffer, error.what());
     }

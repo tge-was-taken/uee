@@ -22,9 +22,8 @@ constexpr u32 kIopStackTop = 0x001F0000;
 constexpr u32 kIopStackSize = 0x00010000;
 constexpr u32 kIopModuleReturn = 0x0FFFFFF0;
 constexpr u32 kIopThreadReturn = 0x0FFFFFE0;
-// A thread serving an RPC queue waits here, and a server's handler returns here.
-constexpr u32 kIopRpcLoop = 0x0FFFFFD0;
-constexpr u32 kIopRpcReturn = 0x0FFFFFC0;
+// Where guest code called from host code returns to.
+constexpr u32 kIopNestedReturn = 0x0FFFFFD0;
 
 // Where a module's argv sits; a module started with none sees a zero argc.
 struct ModuleArguments {
@@ -34,6 +33,15 @@ struct ModuleArguments {
 };
 
 void enterModule(IopContext& iop, const IrxModule& module, const ModuleArguments& arguments = {});
+
+// Host code running on a guest thread calls guest code the way guest code does,
+// on that thread and its slices, and gets back what it returned. The thread's
+// registers are as they were when the call comes back.
+u32 callGuest(IopMachine& machine, u32 function, u32 gp, std::span<const u32> arguments);
+
+// For host code that blocked the thread it runs on: returns once the thread runs
+// again.
+void waitUntilRunning(IopMachine& machine, usize thread);
 
 // One coroutine per guest thread.
 class IopScheduler {
@@ -50,6 +58,12 @@ public:
     enum class Skipping { Allowed, Blocked };
 
     Stop run(u64 budget, Skipping skipping = Skipping::Allowed);
+
+    // Runs the current thread until it reaches haltPc, giving up the slice
+    // whenever it runs out rather than ending the call.
+    Stop runNested(u32 haltPc);
+
+    u64 getExecuted() const { return mExecuted; }
 
 private:
     static void enter(mco_coro* coroutine);

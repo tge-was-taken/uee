@@ -16,6 +16,7 @@
 namespace uee {
 
 struct IopMachine;
+class IopScheduler;
 using IopFunctionRunner = bool (*)(IopMachine& machine, u32 pc);
 
 // Named by the module, not by a position the load order decides.
@@ -47,6 +48,7 @@ struct IopMachine {
     // instructions it ran, the way the interpreter counts each one it steps.
     u64* executed = nullptr;
     const u64* limit = nullptr;
+    IopScheduler* scheduler = nullptr;
 
     IopContext& iop() const { return interpreter.iop; }
 };

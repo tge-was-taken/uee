@@ -94,20 +94,6 @@ void reportUntranslated(IopMachine& machine, u32 pc) {
     log.warn("no translation for {:08x}, outside every translated module", pc);
 }
 
-// The kernel takes sceSifRpcLoop's steps here, and may put the thread to sleep,
-// the way a host call can.
-void serveRpc(IopMachine& machine) {
-    const usize self = machine.kernel.currentThread();
-    if (machine.iop().cpu.pc == kIopRpcLoop) {
-        machine.kernel.continueRpcLoop();
-    } else {
-        machine.kernel.finishRpcRequest();
-    }
-    while (!machine.kernel.isCurrent(self)) {
-        mco_yield(mco_running());
-    }
-}
-
 Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instructionLimit,
               Idle* idle = nullptr) {
     R3000A& cpu = machine.iop().cpu;
@@ -119,10 +105,6 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instruc
         if (cpu.pc == kIopThreadReturn) {
             log.trace("thread {} returned from its entry", machine.kernel.currentThread());
             machine.kernel.exitCurrentThread();
-        }
-        if (cpu.pc == kIopRpcLoop || cpu.pc == kIopRpcReturn) {
-            serveRpc(machine);
-            continue;
         }
 
         if (runTranslated(machine, cpu.pc)) {
@@ -191,6 +173,7 @@ Stop IopScheduler::run(u64 budget, Skipping skipping) {
         if (mExecuted >= mDeadline) {
             return Stop{StopReason::ReachedLimit, mMachine.iop().cpu.pc, {}};
         }
+        mMachine.kernel.switchToRunnable();
         mco_coro* coroutine = coroutineFor(mMachine.kernel.currentThread());
         if (mco_resume(coroutine) != MCO_SUCCESS) {
             return Stop{StopReason::Deadlocked, mMachine.iop().cpu.pc, "coroutine failed"};
@@ -198,6 +181,16 @@ Stop IopScheduler::run(u64 budget, Skipping skipping) {
         if (mStopped) {
             return mStop;
         }
+    }
+}
+
+Stop IopScheduler::runNested(u32 haltPc) {
+    for (;;) {
+        const Stop stop = runUntil(mMachine, haltPc, mExecuted, mDeadline, &mIdle);
+        if (stop.reason != StopReason::ReachedLimit) {
+            return stop;
+        }
+        mco_yield(mco_running());
     }
 }
 
@@ -235,6 +228,33 @@ void enterModule(IopContext& iop, const IrxModule& module, const ModuleArguments
     // CRI_ADXI.IRX md5 df850012de771767b5cd88b6263a25c1: module_start @ 0x57c
     iop.cpu.gpr[reg::a0] = arguments.count;
     iop.cpu.gpr[reg::a1] = arguments.vector;
+}
+
+u32 callGuest(IopMachine& machine, u32 function, u32 gp, std::span<const u32> arguments) {
+    // Room below the caller's frame for the four argument slots the callee owns.
+    constexpr u32 kArgumentSlots = 16;
+    R3000A& cpu = machine.iop().cpu;
+    const R3000A caller = cpu;
+    cpu.gpr[reg::sp] = (cpu.gpr[reg::sp] - kArgumentSlots) & ~7u;
+    for (usize i = 0; i < arguments.size() && i < 4; ++i) {
+        cpu.gpr[reg::a0 + i] = arguments[i];
+    }
+    cpu.gpr[reg::gp] = gp;
+    cpu.gpr[reg::ra] = kIopNestedReturn;
+    cpu.pc = function;
+    const Stop stop = machine.scheduler->runNested(kIopNestedReturn);
+    const u32 result = cpu.gpr[reg::v0];
+    if (stop.reason != StopReason::Returned) {
+        log.stub("call to {:08x}: {}", function, describe(stop));
+    }
+    cpu = caller;
+    return result;
+}
+
+void waitUntilRunning(IopMachine& machine, usize thread) {
+    while (!machine.kernel.isCurrent(thread)) {
+        mco_yield(mco_running());
+    }
 }
 
 // The caller commits the load delay, so $ra predates a load in the call's slot.

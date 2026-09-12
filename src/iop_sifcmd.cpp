@@ -79,6 +79,13 @@ constexpr u32 kCommandEnd = 0x80000008;
 constexpr u32 kCommandBind = 0x80000009;
 constexpr u32 kCommandCall = 0x8000000A;
 
+constexpr u32 kServerBytes = 0x44;
+
+// The servers answered here get what a small module would give itself.
+constexpr u32 kHostServerBuffer = 0x1000;
+constexpr u32 kHostServerStack = 0x4000;
+constexpr s32 kHostServerPriority = 0x40;
+
 constexpr u32 kNoWait = 0x1;
 constexpr u32 kNoThread = 0xFFFFFFFFu;
 constexpr u32 kNoPacket = 0xFFFFFFFFu;
@@ -138,8 +145,11 @@ std::vector<SifPacket> IopKernel::takePacketsForEe() {
 
 // SIFCMD: sceSifSetRpcQueue @ 0x1088
 void IopKernel::sifSetRpcQueue() {
-    const u32 queue = argument(0);
-    mMemory.write32(queue + kQueueThreadId, argument(1));
+    linkQueue(argument(0), argument(1));
+}
+
+void IopKernel::linkQueue(u32 queue, u32 thread) {
+    mMemory.write32(queue + kQueueThreadId, thread);
     for (u32 i = 1; i < kQueueWords; ++i) {
         mMemory.write32(queue + i * 4, 0);
     }
@@ -154,10 +164,18 @@ void IopKernel::sifSetRpcQueue() {
     mMemory.write32(last + kQueueNext, queue);
 }
 
-// SIFCMD: sceSifRegisterRpc @ 0x1130
+// SIFCMD: sceSifRegisterRpc @ 0x1130. A module registering an id a server
+// answered here holds takes it over, as the game's own build of a module does.
 void IopKernel::sifRegisterRpc() {
     const u32 server = argument(0);
     const u32 queue = argument(6);
+    const u32 id = argument(1);
+    const u32 held = findRpcServer(id);
+    if (const auto host = mHostServers.find(held); host != mHostServers.end()) {
+        log.info("a module takes server {:08x} over from {}", id, host->second.server->name());
+        unlinkServer(mMemory.read32(held + kServerQueue), held);
+        mHostServers.erase(host);
+    }
     mMemory.write32(server + kServerId, argument(1));
     mMemory.write32(server + kServerFunc, argument(2));
     mMemory.write32(server + kServerBuffer, argument(3));
@@ -180,13 +198,14 @@ void IopKernel::sifRegisterRpc() {
 // SIFCMD: sceSifRemoveRpc @ 0x1210 answers the server it unlinked when that was
 // the first, its predecessor otherwise, and zero when it was not there.
 void IopKernel::sifRemoveRpc() {
-    const u32 server = argument(0);
-    const u32 queue = argument(1);
+    returnValue(unlinkServer(argument(1), argument(0)));
+}
+
+u32 IopKernel::unlinkServer(u32 queue, u32 server) {
     u32 at = mMemory.read32(queue + kQueueServers);
     if (at == server) {
         mMemory.write32(queue + kQueueServers, mMemory.read32(at + kServerNextServer));
-        returnValue(at);
-        return;
+        return at;
     }
     while (at != 0 && mMemory.read32(at + kServerNextServer) != server) {
         at = mMemory.read32(at + kServerNextServer);
@@ -194,7 +213,7 @@ void IopKernel::sifRemoveRpc() {
     if (at != 0) {
         mMemory.write32(at + kServerNextServer, mMemory.read32(server + kServerNextServer));
     }
-    returnValue(at);
+    return at;
 }
 
 // SIFCMD: sceSifRemoveRpcQueue @ 0x12a8, answering the same way.
@@ -263,6 +282,10 @@ void IopKernel::receiveRpcCall(const SifRpcCall& call) {
     mMemory.write32(server + kServerReceive, call.receive);
     mMemory.write32(server + kServerReceiveSize, call.receiveSize);
     mMemory.write32(server + kServerReceiveMode, call.receiveMode);
+    mUnanswered.insert(server);
+    if (const auto host = mHostServers.find(server); host != mHostServers.end()) {
+        host->second.sendSource = call.sendSource;
+    }
     const u32 thread = mMemory.read32(queue + kQueueThreadId);
     if (static_cast<s32>(thread) >= 0 && mMemory.read32(queue + kQueueActive) == 0) {
         wakeThread(thread);
@@ -286,29 +309,40 @@ void IopKernel::sifGetNextRequest() {
 }
 
 // SIFCMD: sceSifExecRequest @ 0x13a4 calls the handler with the request number,
-// the buffer the caller wrote into and its size. The reply goes out when it
-// returns, at kIopRpcReturn.
-void IopKernel::startRequest(u32 server, u32 resume) {
-    IopThread& thread = mThreads[mCurrent];
-    thread.rpcServer = server;
-    thread.rpcResume = resume;
-    mIop.cpu.gpr[reg::a0] = mMemory.read32(server + kServerNumber);
-    mIop.cpu.gpr[reg::a1] = mMemory.read32(server + kServerBuffer);
-    mIop.cpu.gpr[reg::a2] = mMemory.read32(server + kServerSize);
-    mIop.cpu.gpr[reg::ra] = kIopRpcReturn;
-    mIop.cpu.pc = mMemory.read32(server + kServerFunc);
+// the buffer the caller wrote into and its size. A caller that waits takes the
+// end command; one that polls finds the end packet written over its own.
+void IopKernel::execRequest(u32 server) {
+    u32 reply = 0;
+    if (const auto host = mHostServers.find(server); host != mHostServers.end()) {
+        const s32 result = answerOnHost(server, host->second);
+        const u32 receive = mMemory.read32(server + kServerReceive);
+        if (mMemory.read32(server + kServerReceiveSize) >= 4) {
+            mMainMemory.write32(receive, static_cast<u32>(result));
+        }
+    } else {
+        const u32 arguments[3] = {mMemory.read32(server + kServerNumber),
+                                  mMemory.read32(server + kServerBuffer),
+                                  mMemory.read32(server + kServerSize)};
+        reply = callGuest(*mMachine, mMemory.read32(server + kServerFunc),
+                          mIop.cpu.gpr[reg::gp], arguments);
+    }
+    mUnanswered.erase(server);
+    sendReply(server, reply);
 }
 
-void IopKernel::sifExecRequest() {
-    startRequest(argument(0), mIop.cpu.pc);
+// The handlers answered here write straight into the EE's memory, as cdvdfsv's
+// transfers do, and return a status word the caller finds at its receive buffer.
+s32 IopKernel::answerOnHost(u32 server, const HostServer& host) {
+    const RpcCall call{mMemory.read32(server + kServerNumber),
+                       host.sendSource,
+                       mMemory.read32(server + kServerSize),
+                       mMemory.read32(server + kServerBuffer),
+                       mMemory.read32(server + kServerReceive),
+                       mMemory.read32(server + kServerReceiveSize)};
+    return host.server->call(host.id, call);
 }
 
-// A caller that waits takes the end command; one that polls finds the end
-// packet written over its own, with nothing to wake it.
-void IopKernel::finishRpcRequest() {
-    IopThread& thread = mThreads[mCurrent];
-    const u32 server = thread.rpcServer;
-    const u32 reply = mIop.cpu.gpr[reg::v0];
+void IopKernel::sendReply(u32 server, u32 reply) {
     const u32 size = reply != 0 ? mMemory.read32(server + kServerReceiveSize) : 0;
     const u32 receive = mMemory.read32(server + kServerReceive);
 
@@ -317,38 +351,51 @@ void IopKernel::finishRpcRequest() {
     packet[kPacketClient / 4] = mMemory.read32(server + kServerClient);
     if (mMemory.read32(server + kServerReceiveMode) != 0) {
         sendToEe(kCommandEnd, std::move(packet), reply, receive, size);
-    } else {
-        for (u32 i = 0; i < size; ++i) {
-            mMainMemory.write8(receive + i, mMemory.read8(reply + i));
-        }
-        const u32 polled = mMemory.read32(server + kServerPacket);
-        for (u32 i = 0; i < packet.size(); ++i) {
-            mMainMemory.write32(polled + i * 4, packet[i]);
-        }
+        return;
     }
-    thread.rpcServer = 0;
-    mIop.cpu.pc = thread.rpcResume;
+    for (u32 i = 0; i < size; ++i) {
+        mMainMemory.write8(receive + i, mMemory.read8(reply + i));
+    }
+    const u32 polled = mMemory.read32(server + kServerPacket);
+    for (u32 i = 0; i < packet.size(); ++i) {
+        mMainMemory.write32(polled + i * 4, packet[i]);
+    }
 }
 
-// SIFCMD: sceSifRpcLoop @ 0x1520 takes requests until none is left, then sleeps.
+void IopKernel::sifExecRequest() {
+    execRequest(argument(0));
+}
+
+// SIFCMD: sceSifRpcLoop @ 0x1520 takes requests until none is left, then sleeps
+// until the call handler wakes it. It never returns.
 void IopKernel::sifRpcLoop() {
-    mThreads[mCurrent].rpcQueue = argument(0);
-    mIop.cpu.pc = kIopRpcLoop;
+    const u32 queue = argument(0);
+    const usize self = mCurrent;
+    for (;;) {
+        while (const u32 server = takeRequest(queue)) {
+            execRequest(server);
+        }
+        sleepCurrentThread();
+        waitUntilRunning(*mMachine, self);
+    }
 }
 
-void IopKernel::continueRpcLoop() {
-    IopThread& thread = mThreads[mCurrent];
-    for (;;) {
-        if (const u32 server = takeRequest(thread.rpcQueue)) {
-            startRequest(server, kIopRpcLoop);
-            return;
-        }
-        if (thread.wakeupCount == 0) {
-            blockCurrentThread(IopWait::Sleep, 0);
-            return;
-        }
-        --thread.wakeupCount;
+void IopKernel::addHostServer(u32 id, SifServer& server, u32 loopEntry) {
+    const u32 queue = allocateMemory(kQueueWords * 4);
+    const u32 record = allocateMemory(kServerBytes);
+    const u32 buffer = allocateMemory(kHostServerBuffer);
+    const u32 thread = addThread(loopEntry, kHostServerPriority, kHostServerStack, 0, 0);
+    linkQueue(queue, thread);
+    for (u32 i = 0; i < kServerBytes; i += 4) {
+        mMemory.write32(record + i, 0);
     }
+    mMemory.write32(record + kServerId, id);
+    mMemory.write32(record + kServerBuffer, buffer);
+    mMemory.write32(record + kServerQueue, queue);
+    mMemory.write32(queue + kQueueServers, record);
+    mHostServers[record] = {&server, id, 0};
+    runThread(*threadFor(thread), queue, 0);
+    reschedule();
 }
 
 // SIFCMD: sceSifBindRpc @ 0xd08. The EE's answer fills in the server, at

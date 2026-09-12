@@ -986,6 +986,12 @@ void IopKernel::reschedule() {
     }
 }
 
+void IopKernel::switchToRunnable() {
+    if (mThreads[mCurrent].status != iopstatus::kRun) {
+        reschedule();
+    }
+}
+
 bool IopKernel::isCurrent(usize thread) const {
     return mCurrent == thread && mThreads[thread].status == iopstatus::kRun;
 }
@@ -1169,20 +1175,22 @@ void IopKernel::createThread() {
         return;
     }
 
+    returnValue(addThread(entry, priority, stackSize, attr, mMemory.read32(param + 4)));
+}
+
+u32 IopKernel::addThread(u32 entry, s32 priority, u32 stackSize, u32 attr, u32 option) {
     usize index = 1;
     while (index < mThreads.size() && mThreads[index].allocated) {
         ++index;
     }
     if (index == mThreads.size()) {
-        returnValue(kNoMemory);
-        return;
+        return kNoMemory;
     }
 
     const u32 rounded = (stackSize + kBlockAlignment - 1) & ~(kBlockAlignment - 1);
     const u32 stack = allocateBlock(kAllocLast, rounded, 0);
     if (stack == 0) {
-        returnValue(kNoMemory);
-        return;
+        return kNoMemory;
     }
 
     IopThread& thread = mThreads[index];
@@ -1191,13 +1199,13 @@ void IopKernel::createThread() {
     thread.sequence = ++mSequence;
     thread.status = iopstatus::kDormant;
     thread.attr = attr;
-    thread.option = mMemory.read32(param + 4);
+    thread.option = option;
     thread.entry = entry;
     thread.stack = stack;
     thread.stackSize = rounded;
     thread.initialPriority = priority;
     thread.currentPriority = priority;
-    returnValue(makeHandle(index, thread.sequence));
+    return makeHandle(index, thread.sequence);
 }
 
 // THREADMAN: DeleteThread @ 0xe10
@@ -1238,15 +1246,19 @@ void IopKernel::startThread() {
         return;
     }
 
-    thread->saved = R3000A{};
-    thread->saved.pc = thread->entry;
-    thread->saved.gpr[reg::a0] = argument(1);
-    thread->saved.gpr[reg::sp] = thread->stack + thread->stackSize - 16;
-    thread->saved.gpr[reg::gp] = mIop.cpu.gpr[reg::gp];
-    thread->saved.gpr[reg::ra] = kThreadReturn;
-    thread->status = iopstatus::kReady;
     returnValue(0);
+    runThread(*thread, argument(1), mIop.cpu.gpr[reg::gp]);
     reschedule();
+}
+
+void IopKernel::runThread(IopThread& thread, u32 argument, u32 gp) {
+    thread.saved = R3000A{};
+    thread.saved.pc = thread.entry;
+    thread.saved.gpr[reg::a0] = argument;
+    thread.saved.gpr[reg::sp] = thread.stack + thread.stackSize - 16;
+    thread.saved.gpr[reg::gp] = gp;
+    thread.saved.gpr[reg::ra] = kThreadReturn;
+    thread.status = iopstatus::kReady;
 }
 
 // THREADMAN: ExitThread @ 0x123c

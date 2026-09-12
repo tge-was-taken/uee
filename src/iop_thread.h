@@ -54,11 +54,6 @@ struct IopThread {
     u32 waitMode = 0;
     u32 resultAddress = 0;
     u64 waitDeadline = 0;
-    // The RPC queue sceSifRpcLoop serves, the server whose handler is running,
-    // and where the thread goes once the reply is sent.
-    u32 rpcQueue = 0;
-    u32 rpcServer = 0;
-    u32 rpcResume = 0;
     // Asleep in sceSifBindRpc or sceSifCallRpc until the EE answers.
     bool awaitingEe = false;
 

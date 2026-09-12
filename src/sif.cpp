@@ -71,9 +71,6 @@ constexpr usize kRomdirSize = 12;
 constexpr usize kRomdirAlignment = 16;
 
 constexpr u32 kCommandBuffer = 0x00019600;
-constexpr u32 kServerBase = 0x01000000;
-constexpr u32 kServerStride = 0x1000;
-constexpr u32 kServerBufferOffset = 0x800;
 
 constexpr u32 kBootFlags =
     sbus::kSifInitialised | sbus::kCommandInitialised | sbus::kBootFinished;
@@ -83,9 +80,9 @@ constexpr u32 kBootFlags =
 Sif::Sif(Memory& memory, Sbus& sbus, std::string& console, Iop& iop)
     : mMemory(memory), mSbus(sbus), mIop(iop), mFileIo(memory, console, iop),
       mLoadFile(memory, iop), mCdvd(memory) {
-    registerServer(mFileIo);
-    registerServer(mLoadFile);
-    registerServer(mCdvd);
+    addHostServers(mFileIo);
+    addHostServers(mLoadFile);
+    addHostServers(mCdvd);
 
     // A game starts with the IOP already booted by the BIOS.
     mSbus.writeSubToMainCommand(kCommandBuffer);
@@ -123,6 +120,7 @@ void Sif::receive(u32 transfers, u32 count) {
         handleCommand(transfer, payload);
         payload.reset();
     }
+    mIop.runRequested();
 }
 
 void Sif::handleCommand(const Transfer& command, const std::optional<Transfer>& payload) {
@@ -164,7 +162,7 @@ void Sif::handleCommand(const Transfer& command, const std::optional<Transfer>& 
 void Sif::reset(u32 packet) {
     mRebooting = true;
     mEeCommandBuffer = 0;
-    mBound.clear();
+    mIop.getKernel().takePacketsForEe();
     mPending.clear();
 
     const u32 length = std::min(mMemory.read32(packet + kResetArgumentLength * 4), kResetArgumentLimit);
@@ -237,102 +235,51 @@ void Sif::initialiseCommand(u32 packet) {
     send(std::move(reply));
 }
 
-// SIFCMD: sifcmd_SifRegisterRpc @ 0x1130
-void Sif::registerServer(SifServer& server) {
+// They live on the IOP like any module's, each on a thread of its own.
+void Sif::addHostServers(SifServer& server) {
     for (const u32 serverId : server.serverIds()) {
-        const auto held = mRegistered.find(serverId);
-        if (held != mRegistered.end() && held->second != &server) {
-            log.stub("{} takes {:08x} from {}", server.name(), serverId,
-                                   held->second->name());
-        }
-        mRegistered[serverId] = &server;
+        mIop.addHostServer(serverId, server);
     }
 }
 
-void Sif::reportOnce(u32 serverId, u32 number) {
-    if (mReported.emplace(serverId, number).second) {
-        log.stub("server {:08x} call {}", serverId, number);
+s32 UnknownServer::call(u32 serverId, const RpcCall& call) {
+    if (mReported.emplace(serverId, call.number).second) {
+        log.stub("server {:08x} call {}", serverId, call.number);
     }
+    return -1;
 }
 
-SifServer* Sif::serverFor(u32 serverId) const {
-    const auto found = mRegistered.find(serverId);
-    return found == mRegistered.end() ? nullptr : found->second;
-}
-
-u32 Sif::serverAddress(u32 serverId) {
-    for (const auto& [address, bound] : mBound) {
-        if (bound == serverId) {
-            return address;
-        }
-    }
-    const u32 address = kServerBase + static_cast<u32>(mBound.size()) * kServerStride;
-    mBound[address] = serverId;
-    return address;
-}
-
-u32 Sif::serverIdAt(u32 address) const {
-    const auto found = mBound.find(address);
-    return found == mBound.end() ? 0 : found->second;
-}
-
-// SIFCMD: the bind handler @ 0xc48 answers at once. A server a loaded module
-// registered takes the id over from one answered here, as the game's own build
-// of a module does.
+// SIFCMD: the bind handler @ 0xc48 answers at once.
 void Sif::bindServer(u32 packet) {
     const u32 serverId = mMemory.read32(packet + kBindServerId * 4);
     log.trace("SifCmdRpcBind(server={:08x})", serverId);
     IopKernel& kernel = mIop.getKernel();
-    if (const u32 server = kernel.findRpcServer(serverId)) {
-        replyToRequest(packet, sifcmd::kRpcBind, server, kernel.getRpcServerBuffer(server),
-                       kernel.getRpcServerClientBuffer(server));
-        return;
-    }
-    const u32 server = serverAddress(serverId);
-    if (serverFor(serverId) == nullptr) {
+    if (kernel.findRpcServer(serverId) == 0) {
         log.stub("server {:08x}", serverId);
+        mIop.addHostServer(serverId, mUnknown);
     }
-    replyToRequest(packet, sifcmd::kRpcBind, server, server + kServerBufferOffset);
+    const u32 server = kernel.findRpcServer(serverId);
+    replyToRequest(packet, sifcmd::kRpcBind, server, kernel.getRpcServerBuffer(server),
+                   kernel.getRpcServerClientBuffer(server));
 }
 
-// A module's server answers on its own thread, which sends the reply when its
-// handler returns; the ones answered here reply at once.
+// The server answers from its own thread, and the reply goes out when it does.
 void Sif::callServer(u32 packet, const std::optional<Transfer>& payload) {
     const u32 address = mMemory.read32(packet + kCallServer * 4);
-    if (mIop.getKernel().isRpcServer(address)) {
-        mIop.getKernel().receiveRpcCall({mMemory.read32(packet + kRequestPacket * 4),
-                                         mMemory.read32(packet + kRequestClient * 4),
-                                         mMemory.read32(packet + kCallNumber * 4),
-                                         mMemory.read32(packet + kCallSendSize * 4),
-                                         mMemory.read32(packet + kCallReceiveBuffer * 4),
-                                         mMemory.read32(packet + kCallReceiveSize * 4),
-                                         mMemory.read32(packet + kCallReceiveMode * 4),
-                                         address});
+    if (!mIop.getKernel().isRpcServer(address)) {
+        log.stub("call to {:08x}, which is no server", address);
+        replyToRequest(packet, sifcmd::kRpcCall, 0, 0);
         return;
     }
-    const u32 serverId = serverIdAt(address);
-    const u32 number = mMemory.read32(packet + kCallNumber * 4);
-    const u32 receive = mMemory.read32(packet + kCallReceiveBuffer * 4);
-    const u32 receiveSize = mMemory.read32(packet + kCallReceiveSize * 4);
-    const RpcCall call{number,
-                       payload ? payload->source : 0,
-                       payload ? payload->size : 0,
-                       payload ? payload->destination : 0,
-                       receive,
-                       receiveSize};
-    log.trace("SifExecRequest(server={:08x}, number={}, send={} bytes, receive={} bytes)",
-              serverId, number, call.argumentSize, receiveSize);
-
-    SifServer* server = serverFor(serverId);
-    if (server == nullptr) {
-        reportOnce(serverId, number);
-    }
-    const s32 result = server == nullptr ? -1 : server->call(serverId, call);
-    log.trace("SifExecRequest({:08x}, {}) answered {}", serverId, number, result);
-    if (receiveSize >= 4) {
-        mMemory.write32(receive, static_cast<u32>(result));
-    }
-    replyToRequest(packet, sifcmd::kRpcCall, 0, 0);
+    mIop.getKernel().receiveRpcCall({mMemory.read32(packet + kRequestPacket * 4),
+                                     mMemory.read32(packet + kRequestClient * 4),
+                                     mMemory.read32(packet + kCallNumber * 4),
+                                     mMemory.read32(packet + kCallSendSize * 4),
+                                     mMemory.read32(packet + kCallReceiveBuffer * 4),
+                                     mMemory.read32(packet + kCallReceiveSize * 4),
+                                     mMemory.read32(packet + kCallReceiveMode * 4),
+                                     address,
+                                     payload ? payload->source : 0});
 }
 
 // SIFCMD: the 0x8000000C handler @ 0xa68

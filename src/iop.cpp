@@ -29,6 +29,8 @@ Iop::Iop(Memory& mainMemory, std::string& console, std::span<TranslatedIrx* cons
       mWatched(watched.begin(), watched.end()), mTranslated(translated),
       mHostModules(hostModules.begin(), hostModules.end()) {
     mMmio.attach(mMemory, mKernel);
+    mMachine.scheduler = &mScheduler;
+    mKernel.attachMachine(mMachine);
     for (const TranslatedIrx* module : mTranslated) {
         mNextBase = std::max(mNextBase, (module->end + 0xFu) & ~0xFu);
     }
@@ -153,16 +155,16 @@ void Iop::indexModulePages() {
     mMachine.modulePages = mModulePages;
 }
 
-// The IOP's loader passes the module its own name as argv[0], the strings at the
-// top of the stack the entry runs on.
+// The IOP's loader passes the module its own name as argv[0], the strings ending
+// at top, with the pointers to them below.
 ModuleArguments Iop::writeArguments(const std::string& name,
-                                    std::span<const std::string> arguments) {
+                                    std::span<const std::string> arguments, u32 top) {
     if (arguments.empty()) {
         return {};
     }
     std::vector<std::string> strings{name};
     strings.insert(strings.end(), arguments.begin(), arguments.end());
-    u32 at = kIopStackTop;
+    u32 at = top;
     std::vector<u32> pointers;
     for (const std::string& text : strings) {
         at -= (static_cast<u32>(text.size()) + 4) & ~3u;
@@ -180,12 +182,12 @@ ModuleArguments Iop::writeArguments(const std::string& name,
     return {static_cast<u32>(pointers.size()), at, at - 0x10};
 }
 
-std::optional<s32> Iop::loadModule(const std::string& name, std::span<const u8> image,
-                                   std::span<const std::string> arguments) {
+// Nothing when the host answers for the module, so its image is not loaded.
+std::optional<IrxModule> Iop::linkModule(const std::string& name, std::span<const u8> image) {
     // Loading it would bind later imports to its exports, not to the host.
     if (sourceOf(name) == ModuleSource::Host) {
         log.trace("{} is answered here, so its image is not loaded", name);
-        return 0;
+        return std::nullopt;
     }
     TranslatedIrx* const translated = translationOf(name);
     const u32 base = translated != nullptr ? translated->base : mNextBase;
@@ -217,17 +219,25 @@ std::optional<s32> Iop::loadModule(const std::string& name, std::span<const u8> 
         mMachine.modules = mActive;
         indexModulePages();
     }
+    return module;
+}
 
+std::optional<s32> Iop::loadModule(const std::string& name, std::span<const u8> image,
+                                   std::span<const std::string> arguments) {
+    const std::optional<IrxModule> module = linkModule(name, image);
+    if (!module) {
+        return 0;
+    }
     const u32 sequence = mKernel.sequence();
     mKernel.enterHostThread();
-    enterModule(mInterpreter.iop, module, writeArguments(name, arguments));
+    enterModule(mInterpreter.iop, *module, writeArguments(name, arguments, kIopStackTop));
     const Stop stop = enter();
     // Taken before the module's own threads run and reuse the registers.
     const s32 result = static_cast<s32>(mInterpreter.iop.cpu.gpr[reg::v0]);
     if (stop.reason != StopReason::Exited || !sync()) {
         log.stub("iop module entry: {}", describe(stop));
         mKernel.dropThreadsAbove(sequence);
-        if (translated != nullptr) {
+        if (translationOf(name) != nullptr) {
             mActive.pop_back();
             mMachine.modules = mActive;
             indexModulePages();
@@ -237,12 +247,69 @@ std::optional<s32> Iop::loadModule(const std::string& name, std::span<const u8> 
     return result;
 }
 
+std::optional<s32> Iop::loadModuleOnThread(const std::string& name, std::span<const u8> image,
+                                           std::span<const std::string> arguments) {
+    const std::optional<IrxModule> module = linkModule(name, image);
+    if (!module) {
+        return 0;
+    }
+    constexpr u32 kArgumentBytes = 0x200;
+    ModuleArguments start;
+    if (!arguments.empty()) {
+        const u32 block = mKernel.allocateMemory(kArgumentBytes);
+        start = writeArguments(name, arguments, block + kArgumentBytes);
+    }
+    const u32 values[2] = {start.count, start.vector};
+    return static_cast<s32>(callGuest(mMachine, module->program.entry, module->gp, values));
+}
+
+void Iop::addHostServer(u32 id, SifServer& server) {
+    if (mRpcLoopEntry == 0) {
+        constexpr u32 kRpcLoopOrdinal = 22;
+        mImports.push_back(Import{"sifcmd", kRpcLoopOrdinal});
+        mRpcLoopEntry = mKernel.allocateMemory(8);
+        mMemory.write32(mRpcLoopEntry, importSyscall(static_cast<u32>(mImports.size() - 1)));
+        mMemory.write32(mRpcLoopEntry + 4, 0);
+    }
+    mKernel.addHostServer(id, server, mRpcLoopEntry);
+}
+
 void Iop::startVblank() {
     mKernel.raiseVblankStart();
 }
 
 void Iop::endVblank() {
     mKernel.raiseVblankEnd();
+}
+
+// Time moves with the instructions run, and jumps to the next deadline when
+// every thread waits, since the EE is waiting too. What waits on the EE ends it.
+void Iop::runRequested() {
+    if (mAdvancing) {
+        return;
+    }
+    mAdvancing = true;
+    mKernel.exitHostThread();
+    for (u64 executed = 0; mKernel.hasUnansweredCalls() && executed < kInstructionLimit;) {
+        const u64 before = mScheduler.getExecuted();
+        const Stop stop = mScheduler.run(kCallSlice, IopScheduler::Skipping::Blocked);
+        const u64 ran = mScheduler.getExecuted() - before;
+        executed += ran;
+        mKernel.advanceTime(ran);
+        if (dispatchPendingHandlers() || stop.reason == StopReason::ReachedLimit) {
+            continue;
+        }
+        if (stop.reason != StopReason::Deadlocked) {
+            log.stub("iop request: {}", describe(stop));
+            break;
+        }
+        const std::optional<u64> wake = mKernel.nextDelay();
+        if (!wake) {
+            break;
+        }
+        mKernel.advanceTimeTo(*wake);
+    }
+    mAdvancing = false;
 }
 
 // A tick can land while a call is parked on a coroutine, and resuming it

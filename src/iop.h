@@ -34,6 +34,11 @@ public:
     // module the host answers is not loaded and reports zero.
     std::optional<s32> loadModule(const std::string& name, std::span<const u8> image,
                                   std::span<const std::string> arguments = {});
+    // The same, for a loader running on an IOP thread: the module starts on that
+    // thread, as MODLOAD starts it on the thread that asked.
+    std::optional<s32> loadModuleOnThread(const std::string& name, std::span<const u8> image,
+                                          std::span<const std::string> arguments = {});
+    void addHostServer(u32 id, SifServer& server);
     ModuleSource sourceOf(const std::string& name) const;
     IopKernel& getKernel() { return mKernel; }
 
@@ -48,6 +53,9 @@ public:
     void startVblank();
     void endVblank();
     void advance(u64 instructions);
+    // Runs what the EE just handed over for as long as a call waits on it, as
+    // fast as it will go rather than on the EE's clock.
+    void runRequested();
     void reportThreads() const { mKernel.reportThreads(mSymbols); }
     void reportRegisters() const;
 
@@ -61,8 +69,9 @@ private:
     bool dispatchPendingHandlers();
     void runHandler(const IopHandlerCall& call);
 
-    ModuleArguments writeArguments(const std::string& name,
-                                   std::span<const std::string> arguments);
+    ModuleArguments writeArguments(const std::string& name, std::span<const std::string> arguments,
+                                   u32 top);
+    std::optional<IrxModule> linkModule(const std::string& name, std::span<const u8> image);
 
     TranslatedIrx* translationOf(const std::string& name) const;
 
@@ -86,6 +95,8 @@ private:
     IopMachine mMachine{mInterpreter, mMemory, mKernel, mActive};
     IopScheduler mScheduler{mMachine, mSymbols, mWatched};
     bool mAdvancing = false;
+    // The thread entry of the servers answered here: one call into sceSifRpcLoop.
+    u32 mRpcLoopEntry = 0;
     u64 mHandlersRun = 0;
 };
 

@@ -5,6 +5,7 @@
 #include "iop_thread.h"
 #include "irx.h"
 #include "memory.h"
+#include "sif_server.h"
 #include "symbols.h"
 #include "types.h"
 
@@ -42,9 +43,12 @@ struct SifRpcCall {
     u32 receiveSize = 0;
     u32 receiveMode = 0;
     u32 server = 0;
+    // Where the EE sent the arguments from.
+    u32 sendSource = 0;
 };
 
 class IopMmio;
+struct IopMachine;
 
 class IopKernel {
 public:
@@ -59,6 +63,8 @@ public:
 
     usize currentThread() const { return mCurrent; }
     bool isCurrent(usize thread) const;
+    // A thread made ready from outside any thread has not been switched to yet.
+    void switchToRunnable();
     bool isIdle() const;
     void reportThreads(const Symbols& symbols) const;
     void exitCurrentThread();
@@ -70,6 +76,9 @@ public:
     // Gives the processor to the thread the host runs its own calls on, which
     // is also the one a module entry gets.
     void enterHostThread();
+
+    // What guest calls made from host code run on.
+    void attachMachine(IopMachine& machine) { mMachine = &machine; }
 
     // Nothing carries a request from the IOP to the EE yet, so a host thread
     // that made one can never go on.
@@ -110,9 +119,11 @@ public:
     void receiveRpcCall(const SifRpcCall& call);
     void receiveRpcEnd(std::span<const u32> packet);
     std::vector<SifPacket> takePacketsForEe();
-    // Where a thread in sceSifRpcLoop goes, and where a handler returns to.
-    void continueRpcLoop();
-    void finishRpcRequest();
+    bool hasUnansweredCalls() const { return !mUnanswered.empty(); }
+    // A server this runtime answers, set up the way a module sets up its own: a
+    // queue, a record and a buffer in IOP memory, and a thread that enters
+    // sceSifRpcLoop at loopEntry.
+    void addHostServer(u32 id, SifServer& server, u32 loopEntry);
 
 private:
     using Handler = void (IopKernel::*)();
@@ -282,13 +293,28 @@ private:
     void sifRemoveRpc();
     void sifRemoveRpcQueue();
 
+    // The records of the servers answered here, and where the EE's arguments
+    // came from, which their handlers read.
+    struct HostServer {
+        SifServer* server = nullptr;
+        u32 id = 0;
+        u32 sendSource = 0;
+    };
+
+    u32 addThread(u32 entry, s32 priority, u32 stackSize, u32 attr, u32 option);
+    void runThread(IopThread& thread, u32 argument, u32 gp);
+
     u32 allocatePacket();
     void freePacket(u32 packet);
     std::vector<u32> readPacket(u32 packet) const;
     void sendToEe(u32 command, std::vector<u32> words, u32 dataSource, u32 dataDestination,
                   u32 dataSize);
+    void linkQueue(u32 queue, u32 thread);
+    u32 unlinkServer(u32 queue, u32 server);
     u32 takeRequest(u32 queue);
-    void startRequest(u32 server, u32 resume);
+    void execRequest(u32 server);
+    s32 answerOnHost(u32 server, const HostServer& host);
+    void sendReply(u32 server, u32 reply);
     void sleepCurrentThread();
     void wakeThread(u32 handle);
 
@@ -345,6 +371,7 @@ private:
     usize mCurrent = 0;
     u32 mSequence = 0;
     u64 mCycles = 0;
+    IopMachine* mMachine = nullptr;
     IopMmio* mDevices = nullptr;
     std::set<const Service*> mStubReported;
     Interrupt mInterrupts[64];
@@ -355,6 +382,9 @@ private:
     u32 mPacketPool = 0;
     u32 mRpcId = 0;
     std::vector<SifPacket> mToEe;
+    // Servers holding a call from the EE they have not answered.
+    std::set<u32> mUnanswered;
+    std::map<u32, HostServer> mHostServers;
     // The gp a client's end function runs with, from the thread that called.
     std::map<u32, u32> mEndFunctionGp;
     u32 mTransIntrHandler = 0;
