@@ -42,14 +42,21 @@ constexpr u32 kVoiceAddresses = 0x1C0;
 constexpr u32 kEndAddresses = 0x1C0 + 24 * kAddressStride;
 constexpr u32 kEndx = 0x340;
 constexpr u32 kStatus = 0x344;
+constexpr u32 kAutoDma = 0x1B0;
 
 constexpr u32 kVolumeBlock = 0x760;
 constexpr u32 kVolumeBlockStride = 0x28;
 constexpr u32 kMasterLeft = 0x000;
 constexpr u32 kMasterRight = 0x002;
 
-// LIBSD: SpuInitCores @ 0x29ec waits on this bit before it touches a core.
+// LIBSD: SpuInitCores @ 0x29ec waits on this bit before it touches a core, and
+// freesd waits for it to clear once it has turned transfers off. PCSX2's
+// SPU2/spu2sys.cpp REG_C_ATTR moves it with the transfer mode as here.
 constexpr u16 kTransferReady = 0x0080;
+constexpr u16 kTransferModeMask = 0x0030;
+
+// A volume register in this mode walks towards its target over time.
+constexpr u16 kSweepMode = 0x8000;
 
 // LIBSD: SpuResetVoices @ 0x4344 points every voice at a block of 00 07 and
 // silence, so a block that plays nothing for ever has all three of these set.
@@ -168,9 +175,22 @@ std::optional<u16> Spu2::readHalf(u32 offset) const {
         case kAttribute: return mCores[core].attribute;
         case kEndx: return static_cast<u16>(mCores[core].endx);
         case kEndx + 2: return static_cast<u16>(mCores[core].endx >> 16);
-        case kStatus: return kTransferReady;
+        case kStatus: return mCores[core].status;
+        case kAutoDma: return mCores[core].autoDma;
         default: return 0;
     }
+}
+
+// Transfers complete as they are started here, so none is ever in flight.
+void Spu2::writeAttribute(Core& core, u16 value) {
+    const bool wasTransferring = (core.attribute & kTransferModeMask) != 0;
+    const bool transferring = (value & kTransferModeMask) != 0;
+    if (!transferring) {
+        core.status &= ~kTransferReady;
+    } else if (!wasTransferring) {
+        core.status |= kTransferReady;
+    }
+    core.attribute = value;
 }
 
 bool Spu2::writeHalf(u32 offset, u16 value) {
@@ -225,7 +245,8 @@ bool Spu2::writeHalf(u32 offset, u16 value) {
         case kMixLeft + 2: mCores[core].mixLeft = (mCores[core].mixLeft & 0xFFFF) | (value << 16); return true;
         case kMixRight: mCores[core].mixRight = (mCores[core].mixRight & 0xFFFF0000) | value; return true;
         case kMixRight + 2: mCores[core].mixRight = (mCores[core].mixRight & 0xFFFF) | (value << 16); return true;
-        case kAttribute: mCores[core].attribute = value; return true;
+        case kAttribute: writeAttribute(mCores[core], value); return true;
+        case kAutoDma: mCores[core].autoDma = value; return true;
         case kKeyOn: keyOn(mCores[core], value); return true;
         case kKeyOn + 2: keyOn(mCores[core], static_cast<u32>(value) << 16); return true;
         case kKeyOff: keyOff(mCores[core], value); return true;
@@ -329,7 +350,7 @@ void Spu2::decodeBlock(Voice& voice) {
 // MODHSYN: HSynVoiceVolumeCommit @ 0x4c80
 // Fifteen bits, negated for the opposite phase. No module here walks one.
 s32 Spu2::applyVolume(s32 sample, u16 volume, Sweep& sweep) {
-    if ((volume & 0x8000) == 0) {
+    if ((volume & kSweepMode) == 0) {
         sweep.level = static_cast<s16>(volume << 1);
         return (sample * sweep.level) >> 15;
     }
@@ -425,6 +446,56 @@ s32 Spu2::stepVoice(Core& core, Voice& voice, u32 index) {
     return (sample * voice.envelope.level) >> 15;
 }
 
+// Off and at a fixed volume, a voice adds nothing and nothing about it moves.
+bool Spu2::isSilent(const Voice& voice) {
+    return voice.envelope.phase == EnvelopePhase::Off && (voice.volumeLeft & kSweepMode) == 0 &&
+           (voice.volumeRight & kSweepMode) == 0;
+}
+
+// Nothing sounds and no volume walks, so no frame changes anything.
+bool Spu2::isIdle() const {
+    for (const Core& core : mCores) {
+        if ((core.masterLeft & kSweepMode) != 0 || (core.masterRight & kSweepMode) != 0) {
+            return false;
+        }
+        for (const Voice& voice : core.voices) {
+            if (!isSilent(voice)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// What one idle frame leaves a silent voice, which is also what any number do.
+void Spu2::syncLevels(Voice& voice) {
+    voice.left.level = static_cast<s16>(voice.volumeLeft << 1);
+    voice.right.level = static_cast<s16>(voice.volumeRight << 1);
+}
+
+void Spu2::syncLevels() {
+    for (Core& core : mCores) {
+        core.left.level = static_cast<s16>(core.masterLeft << 1);
+        core.right.level = static_cast<s16>(core.masterRight << 1);
+        for (Voice& voice : core.voices) {
+            syncLevels(voice);
+        }
+    }
+}
+
+void Spu2::advance(u64 frames) {
+    constexpr u64 kChunkFrames = 256;
+    if (isIdle()) {
+        syncLevels();
+        return;
+    }
+    std::vector<s16> stereo(kChunkFrames * 2);
+    for (u64 done = 0; done < frames; done += kChunkFrames) {
+        const usize count = static_cast<usize>(std::min(kChunkFrames, frames - done));
+        render(std::span(stereo).first(count * 2));
+    }
+}
+
 // A voice reaches a channel only through its own volume and the core's mixing
 // switch, and the core's master volume scales what comes out.
 void Spu2::render(std::span<s16> stereo) {
@@ -436,6 +507,10 @@ void Spu2::render(std::span<s16> stereo) {
             s32 coreRight = 0;
             for (u32 i = 0; i < kVoices; ++i) {
                 Voice& voice = core.voices[i];
+                if (isSilent(voice)) {
+                    syncLevels(voice);
+                    continue;
+                }
                 // A volume walks whether or not the switch lets the voice
                 // through, so both are applied and only the sum is gated.
                 const s32 sample = stepVoice(core, voice, i);

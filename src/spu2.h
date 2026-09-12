@@ -32,8 +32,14 @@ public:
     // A DMA to a core, landing at the address its transfer register names.
     void receive(u32 core, std::span<const u8> bytes);
 
+    // A stream the core plays as it arrives, rather than data it stores.
+    bool isAutoDma(u32 core) const { return (mCores[core].autoDma & (core + 1)) != 0; }
+
     // Interleaved left then right.
     void render(std::span<s16> stereo);
+
+    // The same as rendering the frames with nowhere to put them.
+    void advance(u64 frames);
 
 private:
     static constexpr usize kCores = 2;
@@ -81,12 +87,19 @@ private:
         u32 endx = 0;
         u32 transferAddress = 0;
         u16 attribute = 0;
+        u16 status = 0x0080;
+        u16 autoDma = 0;
         u16 masterLeft = 0;
         u16 masterRight = 0;
         Sweep left;
         Sweep right;
     };
 
+    static void writeAttribute(Core& core, u16 value);
+    static bool isSilent(const Voice& voice);
+    bool isIdle() const;
+    static void syncLevels(Voice& voice);
+    void syncLevels();
     Voice* findVoice(u32 core, u32 offset, u32 base, u32 stride);
     const Voice* findVoice(u32 core, u32 offset, u32 base, u32 stride) const;
 
