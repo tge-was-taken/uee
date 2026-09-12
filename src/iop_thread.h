@@ -20,9 +20,7 @@ enum class IopWait : u32 {
     Sleep = 1,
     Semaphore = 2,
     EventFlag = 3,
-    RpcQueue = 4,
     Vblank = 5,
-    RpcReply = 6,
     Delay = 7,
 };
 
@@ -32,9 +30,7 @@ constexpr std::string_view getWaitName(IopWait wait) {
         case IopWait::Sleep: return "sleep";
         case IopWait::Semaphore: return "sema";
         case IopWait::EventFlag: return "event";
-        case IopWait::RpcQueue: return "rpcqueue";
         case IopWait::Vblank: return "vblank";
-        case IopWait::RpcReply: return "rpcreply";
         case IopWait::Delay: return "delay";
     }
     return "?";
@@ -58,6 +54,13 @@ struct IopThread {
     u32 waitMode = 0;
     u32 resultAddress = 0;
     u64 waitDeadline = 0;
+    // The RPC queue sceSifRpcLoop serves, the server whose handler is running,
+    // and where the thread goes once the reply is sent.
+    u32 rpcQueue = 0;
+    u32 rpcServer = 0;
+    u32 rpcResume = 0;
+    // Asleep in sceSifBindRpc or sceSifCallRpc until the EE answers.
+    bool awaitingEe = false;
 
     R3000A saved;
 };

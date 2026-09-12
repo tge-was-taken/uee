@@ -22,6 +22,9 @@ constexpr u32 kIopStackTop = 0x001F0000;
 constexpr u32 kIopStackSize = 0x00010000;
 constexpr u32 kIopModuleReturn = 0x0FFFFFF0;
 constexpr u32 kIopThreadReturn = 0x0FFFFFE0;
+// A thread serving an RPC queue waits here, and a server's handler returns here.
+constexpr u32 kIopRpcLoop = 0x0FFFFFD0;
+constexpr u32 kIopRpcReturn = 0x0FFFFFC0;
 
 // Where a module's argv sits; a module started with none sees a zero argc.
 struct ModuleArguments {

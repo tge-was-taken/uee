@@ -4,7 +4,6 @@
 #include "iop_hle_cdvdfsv.h"
 #include "iop_hle_fileio.h"
 #include "iop_hle_loadfile.h"
-#include "iop_rpc.h"
 #include "memory.h"
 #include "sbus.h"
 #include "sif_server.h"
@@ -36,8 +35,9 @@ constexpr u32 kRpcReadData = 0x8000000C;
 
 }  // namespace sifcmd
 
-// The EE's half of the SIF conversation, carried without an IOP. Answers go
-// back as command packets so the guest's own SIF library parses them.
+// The SIF between the EE and the IOP. Servers answered here reply at once; one a
+// loaded module registered answers from its own IOP thread. Answers go back as
+// command packets so the guest's own SIF library parses them.
 class Sif {
 public:
     Sif(Memory& memory, Sbus& sbus, std::string& console, Iop& iop);
@@ -79,7 +79,9 @@ private:
     void bindServer(u32 packet);
     void callServer(u32 packet, const std::optional<Transfer>& payload);
     void readOtherData(u32 packet);
-    void replyToRequest(u32 packet, u32 request, u32 server, u32 buffer);
+    void replyToRequest(u32 packet, u32 request, u32 server, u32 buffer, u32 clientBuffer = 0);
+    void passEndToIop(u32 packet);
+    void takePacketsFromIop();
     void send(std::vector<u32> packet);
     // Deduplicate stub logs to reduce spam
     void reportOnce(u32 serverId, u32 number);
@@ -94,7 +96,6 @@ private:
     IopHleFileio mFileIo;
     IopHleLoadfile mLoadFile;
     IopHleCdvdfsv mCdvd;
-    IopRpc mIopRpc;
     std::map<u32, SifServer*> mRegistered;
     u32 mUndelivered = 0;
 

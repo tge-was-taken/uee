@@ -19,7 +19,6 @@ constexpr u64 kInstructionLimit = 20'000'000;
 // that fell due runs, so a driver that spins on one sees it arrive.
 constexpr u64 kCallSlice = 10'000;
 constexpr u32 kFirstArgumentRegister = 4;
-constexpr u32 kResultRegister = 2;
 
 }  // namespace
 
@@ -265,33 +264,6 @@ void Iop::advance(u64 instructions) {
         stop.reason == StopReason::UnmappedAccess) {
         log.stub("iop advance: {}", describe(stop));
     }
-}
-
-u32 Iop::callFunction(u32 address, u32 gp, std::span<const u32> arguments) {
-    mKernel.enterHostThread();
-    R3000A& cpu = mInterpreter.iop.cpu;
-    cpu.pc = address;
-    cpu.gpr[reg::gp] = gp;
-    cpu.gpr[reg::sp] = kIopStackTop;
-    cpu.gpr[reg::ra] = kIopModuleReturn;
-    for (usize i = 0; i < arguments.size() && i < 4; ++i) {
-        cpu.gpr[kFirstArgumentRegister + i] = arguments[i];
-    }
-
-    // Nothing else moves the clock while the EE is parked on a call, so a call
-    // that waits on a transfer has to be allowed to reach its completion.
-    const Stop stop = enter();
-    if (stop.reason != StopReason::Exited) {
-        log.stub("iop call {} ({:08x}, {:08x}, {:08x}): {}", mSymbols.describe(address),
-                 arguments.size() > 0 ? arguments[0] : 0, arguments.size() > 1 ? arguments[1] : 0,
-                 arguments.size() > 2 ? arguments[2] : 0, describe(stop));
-        reportRegisters();
-        mKernel.reportThreads(mSymbols);
-        return 0;
-    }
-    const u32 result = cpu.gpr[kResultRegister];
-    sync();
-    return result;
 }
 
 }  // namespace uee

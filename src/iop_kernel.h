@@ -11,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -23,14 +24,24 @@ struct HeapRange {
     u32 end = 0;
 };
 
-// What sceSifRegisterRpc recorded. The handler runs with the gp its module was
-// linked at, which is why that is kept alongside it.
-struct IopRpcServer {
-    u32 id = 0;
-    u32 data = 0;
-    u32 handler = 0;
-    u32 buffer = 0;
-    u32 gp = 0;
+// A command packet for the EE, and the data sent ahead of it.
+struct SifPacket {
+    std::vector<u32> words;
+    u32 dataSource = 0;
+    u32 dataDestination = 0;
+    u32 dataSize = 0;
+};
+
+// What the EE's call packet tells a server a module registered.
+struct SifRpcCall {
+    u32 packet = 0;
+    u32 client = 0;
+    u32 number = 0;
+    u32 sendSize = 0;
+    u32 receive = 0;
+    u32 receiveSize = 0;
+    u32 receiveMode = 0;
+    u32 server = 0;
 };
 
 class IopMmio;
@@ -90,7 +101,18 @@ public:
     void dropThreadsAbove(u32 sequence);
     std::string nameOf(u32 index) const;
 
-    const std::vector<IopRpcServer>& rpcServers() const { return mRpcServers; }
+    // SIFCMD's RPC, on the IOP's side of the SIF: the servers the loaded modules
+    // registered, and the calls the modules make to the EE.
+    u32 findRpcServer(u32 id) const;
+    bool isRpcServer(u32 server) const;
+    u32 getRpcServerBuffer(u32 server) const;
+    u32 getRpcServerClientBuffer(u32 server) const;
+    void receiveRpcCall(const SifRpcCall& call);
+    void receiveRpcEnd(std::span<const u32> packet);
+    std::vector<SifPacket> takePacketsForEe();
+    // Where a thread in sceSifRpcLoop goes, and where a handler returns to.
+    void continueRpcLoop();
+    void finishRpcRequest();
 
 private:
     using Handler = void (IopKernel::*)();
@@ -250,12 +272,25 @@ private:
     void sifInitRpc();
     void sifBindRpc();
     void sifCallRpc();
+    void sifCheckStatRpc();
     void sifDmaStat();
     void sifRegisterRpc();
     void sifSetRpcQueue();
+    void sifGetNextRequest();
+    void sifExecRequest();
     void sifRpcLoop();
     void sifRemoveRpc();
     void sifRemoveRpcQueue();
+
+    u32 allocatePacket();
+    void freePacket(u32 packet);
+    std::vector<u32> readPacket(u32 packet) const;
+    void sendToEe(u32 command, std::vector<u32> words, u32 dataSource, u32 dataDestination,
+                  u32 dataSize);
+    u32 takeRequest(u32 queue);
+    void startRequest(u32 server, u32 resume);
+    void sleepCurrentThread();
+    void wakeThread(u32 handle);
 
     void waitVblankEnd();
     void registerVblankHandler();
@@ -315,7 +350,13 @@ private:
     Interrupt mInterrupts[64];
     bool mInterruptsEnabled = true;
     std::string& mConsole;
-    std::vector<IopRpcServer> mRpcServers;
+    // SIFCMD keeps its queues on one list, and its packets in one pool.
+    u32 mRpcQueues = 0;
+    u32 mPacketPool = 0;
+    u32 mRpcId = 0;
+    std::vector<SifPacket> mToEe;
+    // The gp a client's end function runs with, from the thread that called.
+    std::map<u32, u32> mEndFunctionGp;
     u32 mTransIntrHandler = 0;
     u32 mTransIntrArgument = 0;
     u32 mSpu2IntrHandler = 0;

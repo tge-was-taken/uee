@@ -86,7 +86,7 @@ add_library(uee SHARED
     src/symbols.cpp
     src/symbol_watch.cpp
     src/idle.cpp
-    src/iop_rpc.cpp
+    src/iop_sifcmd.cpp
     src/adpcm.cpp
     src/iop_mmio.cpp
     src/card.cpp

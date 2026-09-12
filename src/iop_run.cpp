@@ -94,6 +94,20 @@ void reportUntranslated(IopMachine& machine, u32 pc) {
     log.warn("no translation for {:08x}, outside every translated module", pc);
 }
 
+// The kernel takes sceSifRpcLoop's steps here, and may put the thread to sleep,
+// the way a host call can.
+void serveRpc(IopMachine& machine) {
+    const usize self = machine.kernel.currentThread();
+    if (machine.iop().cpu.pc == kIopRpcLoop) {
+        machine.kernel.continueRpcLoop();
+    } else {
+        machine.kernel.finishRpcRequest();
+    }
+    while (!machine.kernel.isCurrent(self)) {
+        mco_yield(mco_running());
+    }
+}
+
 Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instructionLimit,
               Idle* idle = nullptr) {
     R3000A& cpu = machine.iop().cpu;
@@ -105,6 +119,10 @@ Stop runUntil(IopMachine& machine, u32 haltPc, u64& executed, const u64& instruc
         if (cpu.pc == kIopThreadReturn) {
             log.trace("thread {} returned from its entry", machine.kernel.currentThread());
             machine.kernel.exitCurrentThread();
+        }
+        if (cpu.pc == kIopRpcLoop || cpu.pc == kIopRpcReturn) {
+            serveRpc(machine);
+            continue;
         }
 
         if (runTranslated(machine, cpu.pc)) {

@@ -36,8 +36,10 @@ constexpr u32 kRequestClient = 7;
 constexpr u32 kBindServerId = 8;
 
 constexpr u32 kCallNumber = 8;
+constexpr u32 kCallSendSize = 9;
 constexpr u32 kCallReceiveBuffer = 10;
 constexpr u32 kCallReceiveSize = 11;
+constexpr u32 kCallReceiveMode = 12;
 constexpr u32 kCallServer = 13;
 
 constexpr u32 kReadSource = 8;
@@ -47,6 +49,7 @@ constexpr u32 kReadSize = 10;
 constexpr u32 kReplyCommand = 8;
 constexpr u32 kReplyServer = 9;
 constexpr u32 kReplyBuffer = 10;
+constexpr u32 kReplyClientBuffer = 11;
 constexpr u32 kReplyWords = 16;
 
 constexpr u32 kRegisterWords = 6;
@@ -79,7 +82,7 @@ constexpr u32 kBootFlags =
 
 Sif::Sif(Memory& memory, Sbus& sbus, std::string& console, Iop& iop)
     : mMemory(memory), mSbus(sbus), mIop(iop), mFileIo(memory, console, iop),
-      mLoadFile(memory, iop), mCdvd(memory), mIopRpc(memory, iop) {
+      mLoadFile(memory, iop), mCdvd(memory) {
     registerServer(mFileIo);
     registerServer(mLoadFile);
     registerServer(mCdvd);
@@ -139,6 +142,9 @@ void Sif::handleCommand(const Transfer& command, const std::optional<Transfer>& 
             return;
         case sifcmd::kRpcReadData:
             readOtherData(packet);
+            return;
+        case sifcmd::kRpcEnd:
+            passEndToIop(packet);
             return;
         case sifcmd::kChangeSubAddress:
             return;
@@ -260,10 +266,7 @@ u32 Sif::serverAddress(u32 serverId) {
             return address;
         }
     }
-    const u32 registered = mIopRpc.dataOf(serverId);
-    const u32 address =
-        registered != 0 ? registered
-                        : kServerBase + static_cast<u32>(mBound.size()) * kServerStride;
+    const u32 address = kServerBase + static_cast<u32>(mBound.size()) * kServerStride;
     mBound[address] = serverId;
     return address;
 }
@@ -273,22 +276,41 @@ u32 Sif::serverIdAt(u32 address) const {
     return found == mBound.end() ? 0 : found->second;
 }
 
-// SIFCMD: sifcmd_SifBindRpc @ 0xd08
+// SIFCMD: the bind handler @ 0xc48 answers at once. A server a loaded module
+// registered takes the id over from one answered here, as the game's own build
+// of a module does.
 void Sif::bindServer(u32 packet) {
     const u32 serverId = mMemory.read32(packet + kBindServerId * 4);
     log.trace("SifCmdRpcBind(server={:08x})", serverId);
-    registerServer(mIopRpc);
+    IopKernel& kernel = mIop.getKernel();
+    if (const u32 server = kernel.findRpcServer(serverId)) {
+        replyToRequest(packet, sifcmd::kRpcBind, server, kernel.getRpcServerBuffer(server),
+                       kernel.getRpcServerClientBuffer(server));
+        return;
+    }
     const u32 server = serverAddress(serverId);
     if (serverFor(serverId) == nullptr) {
         log.stub("server {:08x}", serverId);
     }
-    const u32 registered = mIopRpc.bufferOf(serverId);
-    replyToRequest(packet, sifcmd::kRpcBind, server,
-                   registered != 0 ? registered : server + kServerBufferOffset);
+    replyToRequest(packet, sifcmd::kRpcBind, server, server + kServerBufferOffset);
 }
 
+// A module's server answers on its own thread, which sends the reply when its
+// handler returns; the ones answered here reply at once.
 void Sif::callServer(u32 packet, const std::optional<Transfer>& payload) {
-    const u32 serverId = serverIdAt(mMemory.read32(packet + kCallServer * 4));
+    const u32 address = mMemory.read32(packet + kCallServer * 4);
+    if (mIop.getKernel().isRpcServer(address)) {
+        mIop.getKernel().receiveRpcCall({mMemory.read32(packet + kRequestPacket * 4),
+                                         mMemory.read32(packet + kRequestClient * 4),
+                                         mMemory.read32(packet + kCallNumber * 4),
+                                         mMemory.read32(packet + kCallSendSize * 4),
+                                         mMemory.read32(packet + kCallReceiveBuffer * 4),
+                                         mMemory.read32(packet + kCallReceiveSize * 4),
+                                         mMemory.read32(packet + kCallReceiveMode * 4),
+                                         address});
+        return;
+    }
+    const u32 serverId = serverIdAt(address);
     const u32 number = mMemory.read32(packet + kCallNumber * 4);
     const u32 receive = mMemory.read32(packet + kCallReceiveBuffer * 4);
     const u32 receiveSize = mMemory.read32(packet + kCallReceiveSize * 4);
@@ -339,7 +361,7 @@ void Sif::readOtherData(u32 packet) {
 }
 
 // SIFCMD: the SifRpcRendPkt_t sifcmd_SifCallRpc @ 0xed4 waits for.
-void Sif::replyToRequest(u32 packet, u32 request, u32 server, u32 buffer) {
+void Sif::replyToRequest(u32 packet, u32 request, u32 server, u32 buffer, u32 clientBuffer) {
     std::vector<u32> reply(kReplyWords, 0);
     reply[kHeaderSize] = kReplyWords * 4;
     reply[kHeaderCommand] = sifcmd::kRpcEnd;
@@ -350,7 +372,29 @@ void Sif::replyToRequest(u32 packet, u32 request, u32 server, u32 buffer) {
     reply[kReplyCommand] = request;
     reply[kReplyServer] = server;
     reply[kReplyBuffer] = buffer;
+    reply[kReplyClientBuffer] = clientBuffer;
     send(std::move(reply));
+}
+
+// The EE's answer to a bind or call a module made.
+void Sif::passEndToIop(u32 packet) {
+    std::vector<u32> words(kReplyWords);
+    for (u32 i = 0; i < kReplyWords; ++i) {
+        words[i] = mMemory.read32(packet + i * 4);
+    }
+    mIop.getKernel().receiveRpcEnd(words);
+}
+
+// What the modules sent the EE goes behind the replies already queued, its data
+// first, as a transfer carries it.
+void Sif::takePacketsFromIop() {
+    Memory& iopMemory = mIop.memory();
+    for (SifPacket& packet : mIop.getKernel().takePacketsForEe()) {
+        for (u32 i = 0; i < packet.dataSize; ++i) {
+            mMemory.write8(packet.dataDestination + i, iopMemory.read8(packet.dataSource + i));
+        }
+        mPending.push_back(std::move(packet.words));
+    }
 }
 
 void Sif::send(std::vector<u32> packet) {
@@ -363,6 +407,7 @@ void Sif::report() const {
 }
 
 bool Sif::advance() {
+    takePacketsFromIop();
     // SLUS-216.21: sceSifResetIop @ 0x50c848
     // It clears BOOTEND, SIFINIT and CMDINIT across three instructions, so
     // reporting the reboot earlier loses the ones not yet cleared.
@@ -382,11 +427,13 @@ bool Sif::advance() {
     if (mEeCommandBuffer == 0) {
         return false;
     }
-    // SLUS-216.21: sceSifCmdIntrHdlr @ 0x5066b0 clears this word once it takes a packet.
-    if (mMemory.read32(mEeCommandBuffer) != 0) {
+    // SLUS-216.21: sceSifCmdIntrHdlr @ 0x5066b0 clears this word once it takes a
+    // packet; ps2sdk's _SifCmdIntHandler clears only its size byte.
+    if (mMemory.read8(mEeCommandBuffer) != 0) {
         if (++mUndelivered == kUndeliveredReported) {
-            log.warn("{} replies waiting on a packet the EE has not taken from {:08x}",
-                     mPending.size(), mEeCommandBuffer);
+            log.warn("{} replies waiting on a packet the EE has not taken from {:08x}, command {:08x}",
+                     mPending.size(), mEeCommandBuffer,
+                     mMemory.read32(mEeCommandBuffer + kHeaderCommand * 4));
         }
         return false;
     }

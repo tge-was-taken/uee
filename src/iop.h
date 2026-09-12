@@ -35,9 +35,7 @@ public:
     std::optional<s32> loadModule(const std::string& name, std::span<const u8> image,
                                   std::span<const std::string> arguments = {});
     ModuleSource sourceOf(const std::string& name) const;
-    u32 callFunction(u32 address, u32 gp, std::span<const u32> arguments);
-
-    const std::vector<IopRpcServer>& rpcServers() const { return mKernel.rpcServers(); }
+    IopKernel& getKernel() { return mKernel; }
 
     u32 allocateMemory(u32 size) { return mKernel.allocateMemory(size); }
     u32 allocateMemory(u32 mode, u32 size, u32 address) {

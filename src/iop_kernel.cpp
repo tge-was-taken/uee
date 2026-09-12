@@ -65,16 +65,6 @@ constexpr u32 kUnknownEventFlagId = static_cast<u32>(-409);
 constexpr u32 kEventFlagCondition = static_cast<u32>(-421);
 constexpr u32 kEventFlagPattern = static_cast<u32>(-423);
 
-// SIFCMD: sceSifRegisterRpc @ 0x1130 fills a SifRpcServerData_t.
-constexpr u32 kServerId = 0;
-constexpr u32 kServerFunc = 4;
-constexpr u32 kServerBuffer = 8;
-constexpr u32 kServerClientFunc = 16;
-constexpr u32 kServerClientBuffer = 20;
-
-// SIFCMD: sceSifSetRpcQueue @ 0x1088 fills a SifRpcDataQueue_t.
-constexpr u32 kQueueThreadId = 0;
-
 // THREADMAN: PollEventFlag @ 0x2db0
 constexpr u32 kEventFlagModeMask = 0xFFFFFFEEu;
 constexpr u32 kEventFlagClear = 0x10;
@@ -298,14 +288,17 @@ std::span<const IopKernel::Service> IopKernel::services() {
         {"sifman", 29, "sceSifCheckInit", &IopKernel::sifCheckInit, true},
         {"sifcmd", 14, "sceSifInitRpc", &IopKernel::sifInitRpc, true},
         {"sifman", 8, "sceSifDmaStat", &IopKernel::sifDmaStat, true},
-        {"sifcmd", 15, "sceSifBindRpc", &IopKernel::sifBindRpc, true},
-        {"sifcmd", 16, "sceSifCallRpc", &IopKernel::sifCallRpc, true},
+        {"sifcmd", 15, "sceSifBindRpc", &IopKernel::sifBindRpc},
+        {"sifcmd", 16, "sceSifCallRpc", &IopKernel::sifCallRpc},
         {"sifcmd", 17, "sceSifRegisterRpc", &IopKernel::sifRegisterRpc},
+        {"sifcmd", 18, "sceSifCheckStatRpc", &IopKernel::sifCheckStatRpc},
         {"sifcmd", 19, "sceSifSetRpcQueue", &IopKernel::sifSetRpcQueue},
-        {"sifcmd", 22, "sceSifRpcLoop", &IopKernel::sifRpcLoop, true},
+        {"sifcmd", 20, "sceSifGetNextRequest", &IopKernel::sifGetNextRequest},
+        {"sifcmd", 21, "sceSifExecRequest", &IopKernel::sifExecRequest},
+        {"sifcmd", 22, "sceSifRpcLoop", &IopKernel::sifRpcLoop},
         {"sifcmd", 23, "sceSifGetOtherData", &IopKernel::sifGetOtherData},
         {"sifcmd", 24, "sceSifRemoveRpc", &IopKernel::sifRemoveRpc},
-        {"sifcmd", 25, "sceSifRemoveRpcQueue", &IopKernel::sifRemoveRpcQueue, true},
+        {"sifcmd", 25, "sceSifRemoveRpcQueue", &IopKernel::sifRemoveRpcQueue},
         {"vblank", 5, "WaitVblankEnd", &IopKernel::waitVblankEnd, true},
         {"vblank", 8, "RegisterVblankHandler", &IopKernel::registerVblankHandler, true},
         {"vblank", 9, "ReleaseVblankHandler", &IopKernel::releaseVblankHandler, true},
@@ -999,7 +992,7 @@ bool IopKernel::isCurrent(usize thread) const {
 
 bool IopKernel::isHostWaitingOnEe() const {
     const IopThread& host = mThreads[kHostThread];
-    return host.status == iopstatus::kWait && host.wait == IopWait::RpcReply;
+    return host.status == iopstatus::kWait && host.awaitingEe;
 }
 
 void IopKernel::enterHostThread() {
@@ -1326,32 +1319,41 @@ void IopKernel::changeThreadPriority() {
 
 // THREADMAN: SleepThread @ 0x200c
 void IopKernel::sleepThread() {
+    returnValue(0);
+    sleepCurrentThread();
+}
+
+void IopKernel::sleepCurrentThread() {
     IopThread& thread = mThreads[mCurrent];
     if (thread.wakeupCount > 0) {
         --thread.wakeupCount;
-        returnValue(0);
         return;
     }
-    returnValue(0);
     blockCurrentThread(IopWait::Sleep, 0);
 }
 
 // THREADMAN: WakeupThread @ 0x20e4
 void IopKernel::wakeupThread() {
     const u32 handle = argument(0);
-    IopThread* thread = handle == 0 ? &mThreads[mCurrent] : threadFor(handle);
-    if (thread == nullptr) {
+    if (handle != 0 && threadFor(handle) == nullptr) {
         returnValue(kUnknownThid);
         return;
     }
+    returnValue(0);
+    wakeThread(handle == 0 ? makeHandle(mCurrent, mThreads[mCurrent].sequence) : handle);
+}
+
+void IopKernel::wakeThread(u32 handle) {
+    IopThread* thread = threadFor(handle);
+    if (thread == nullptr) {
+        return;
+    }
     if (thread->status == iopstatus::kWait && thread->wait == IopWait::Sleep) {
-        readyThread(handle == 0 ? mCurrent : handleIndex(handle));
-        returnValue(0);
+        readyThread(handleIndex(handle));
         reschedule();
         return;
     }
     ++thread->wakeupCount;
-    returnValue(0);
 }
 
 // THREADMAN: CancelWakeupThread @ 0x22dc
@@ -1742,58 +1744,6 @@ void IopKernel::sifInitRpc() {
 // A transfer finishes the moment it is asked for.
 void IopKernel::sifDmaStat() {
     returnValue(kFailed);
-}
-
-// SIFCMD: sceSifBindRpc @ 0xd08
-// Nothing carries a request that way yet.
-void IopKernel::sifBindRpc() {
-    returnValue(0);
-    blockCurrentThread(IopWait::RpcReply, argument(0));
-}
-
-// SIFCMD: sceSifCallRpc @ 0xed4. Nothing here answers a call the other way.
-void IopKernel::sifCallRpc() {
-    returnValue(kFailed);
-}
-
-// SIFCMD: sceSifSetRpcQueue @ 0x1088
-void IopKernel::sifSetRpcQueue() {
-    mMemory.write32(argument(0) + kQueueThreadId, argument(1));
-    returnValue(argument(0));
-}
-
-// SIFCMD: sceSifRegisterRpc @ 0x1130
-// The EE reaches the handler through Sif, not a request packet.
-void IopKernel::sifRegisterRpc() {
-    const u32 data = argument(0);
-    const u32 id = argument(1);
-    const u32 handler = argument(2);
-    const u32 buffer = argument(3);
-    mMemory.write32(data + kServerId, id);
-    mMemory.write32(data + kServerFunc, handler);
-    mMemory.write32(data + kServerBuffer, buffer);
-    mMemory.write32(data + kServerClientFunc, argument(4));
-    mMemory.write32(data + kServerClientBuffer, argument(5));
-    mRpcServers.push_back({id, data, handler, buffer, mIop.cpu.gpr[kGlobalRegister]});
-    returnValue(data);
-}
-
-// SIFCMD: sceSifRpcLoop @ 0x1520. Requests arrive as host calls instead, so the
-// thread that would serve them has nothing left to do.
-void IopKernel::sifRpcLoop() {
-    blockCurrentThread(IopWait::RpcQueue, argument(0));
-}
-
-// SIFCMD: sceSifRemoveRpc @ 0x1210
-void IopKernel::sifRemoveRpc() {
-    const u32 id = mMemory.read32(argument(0) + kServerId);
-    std::erase_if(mRpcServers, [id](const IopRpcServer& server) { return server.id == id; });
-    returnValue(0);
-}
-
-// SIFCMD: sceSifRemoveRpcQueue @ 0x12a8
-void IopKernel::sifRemoveRpcQueue() {
-    returnValue(argument(0));
 }
 
 // VBLANK: WaitVblankEnd @ 0x574
