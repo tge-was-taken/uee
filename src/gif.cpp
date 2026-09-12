@@ -118,19 +118,35 @@ void Gif::flushCapture() {
 void Gif::maskPath3(bool masked) {
     mStatus = masked ? (mStatus | kPath3Masked) : (mStatus & ~kPath3Masked);
     mPath3Masked = masked;
-    if (masked) {
-        return;
+    if (!masked) {
+        releaseHeldPacket();
     }
-    const std::vector<u64> held = std::move(mHeld);
-    mHeld.clear();
-    if (held.empty()) {
+}
+
+// The mask takes hold again at the end of a packet, and RenderWare's gate
+// re-masks 96 NOPs after unmasking, so each unmask lets one packet through
+// (SLUS_216.21, _rwDMADmaOpen 0x4d67b0 builds the gate).
+void Gif::releaseHeldPacket() {
+    if (mHeld.empty()) {
         return;
     }
     beginPath(kPath3);
-    for (usize i = 0; i + 1 < held.size(); i += 2) {
-        writeQuadword(held[i], held[i + 1]);
-    }
+    usize sent = 0;
+    do {
+        passQuadword(mHeld[sent], mHeld[sent + 1]);
+        sent += 2;
+    } while (sent < mHeld.size() && isPacketOpen());
+    mHeld.erase(mHeld.begin(), mHeld.begin() + static_cast<std::ptrdiff_t>(sent));
     endPath();
+}
+
+// Nothing comes after the last unmask of a chain to stop the path, and
+// RenderWare waits for the whole of it before kicking the next (SLUS_216.21,
+// _rwDMAHandler 0x4d4350).
+void Gif::drainPath3() {
+    while (!mPath3Masked && !mHeld.empty()) {
+        releaseHeldPacket();
+    }
 }
 
 void Gif::readTag(u64 low, u64 high) {
@@ -170,12 +186,15 @@ void Gif::writeRegister(u32 address, u64 value) {
 }
 
 void Gif::writeQuadword(u64 low, u64 high) {
-    if (mPath3Masked && mActivePath == kPath3) {
+    if (mActivePath == kPath3 && (mPath3Masked || !mHeld.empty())) {
         mHeld.push_back(low);
         mHeld.push_back(high);
         return;
     }
+    passQuadword(low, high);
+}
 
+void Gif::passQuadword(u64 low, u64 high) {
     if (mHandler != nullptr) {
         capture(low, high);
     }

@@ -39,8 +39,12 @@ public:
 
     // The VIF reports the third path's mask through the GIF's own status.
     void maskPath3(bool masked);
+    // Called once the VIF that masks the path has nothing left to send.
+    void drainPath3();
 
 private:
+    void releaseHeldPacket();
+    void passQuadword(u64 low, u64 high);
     void readTag(u64 low, u64 high);
     void writeRegister(u32 address, u64 value);
     void capture(u64 low, u64 high);

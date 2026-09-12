@@ -310,6 +310,9 @@ void Dmac::start(usize index) {
     } else {
         log.stub("dma channel {} mode {}", index, mode);
     }
+    if (index == kVif1) {
+        mGif->drainPath3();
+    }
 
     if (mode != kNormalMode) {
         channel.retiredAddress = channel.address;
