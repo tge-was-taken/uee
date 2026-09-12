@@ -46,16 +46,19 @@ struct ModuleHeader {
     u32 bssSize = 0;
 };
 
-ModuleHeader readModuleHeader(const ElfImage& image, const std::vector<Elf32_Shdr>& sections) {
+Elf32_Shdr findModuleSection(const std::vector<Elf32_Shdr>& sections) {
     for (const Elf32_Shdr& section : sections) {
-        if (section.sh_type != kIopModSection) {
-            continue;
+        if (section.sh_type == kIopModSection) {
+            return section;
         }
-        return {image.read<u32>(section.sh_offset + 4), image.read<u32>(section.sh_offset + 8),
-                image.read<u32>(section.sh_offset + 12), image.read<u32>(section.sh_offset + 16),
-                image.read<u32>(section.sh_offset + 20)};
     }
     throw std::runtime_error("IRX carries no .iopmod section");
+}
+
+ModuleHeader readModuleHeader(const ElfImage& image, const std::vector<Elf32_Shdr>& sections) {
+    const u32 at = findModuleSection(sections).sh_offset;
+    return {image.read<u32>(at + 4), image.read<u32>(at + 8), image.read<u32>(at + 12),
+            image.read<u32>(at + 16), image.read<u32>(at + 20)};
 }
 
 void copySegments(const ElfImage& image, Memory& memory, u32 base) {
@@ -244,6 +247,64 @@ std::vector<RomdirEntry> listRomdir(std::span<const u8> image) {
         entry.offset += (dataStart + 15) & ~15u;
     }
     return entries;
+}
+
+namespace {
+
+std::string readString(const ElfImage& image, usize offset, usize end) {
+    std::string text;
+    for (usize at = offset; at < end; ++at) {
+        const char letter = image.read<char>(at);
+        if (letter == '\0') {
+            break;
+        }
+        text.push_back(letter);
+    }
+    return text;
+}
+
+// Where a module address lies in the file, before it is relocated.
+std::optional<usize> findFileOffset(const ElfImage& image, u32 address) {
+    const Elf32_Ehdr header = image.getHeader();
+    for (u16 i = 0; i < header.e_phnum; ++i) {
+        const Elf32_Phdr segment = image.getSegment(header, i);
+        if (segment.p_type == PT_LOAD && address >= segment.p_vaddr &&
+            address < segment.p_vaddr + segment.p_filesz) {
+            return segment.p_offset + (address - segment.p_vaddr);
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+bool isIrx(std::span<const u8> bytes) {
+    constexpr usize kTypeOffset = 16;
+    return bytes.size() > kTypeOffset + 2 && bytes[0] == 0x7F && bytes[1] == 'E' &&
+           bytes[2] == 'L' && bytes[3] == 'F' &&
+           (bytes[kTypeOffset] | (bytes[kTypeOffset + 1] << 8)) == kIrxType;
+}
+
+// A module built with IRX_ID leaves the header's name empty and points at a
+// {name, version} pair in its own data instead.
+std::string readIrxName(std::span<const u8> bytes) {
+    constexpr u32 kNameOffset = 0x1A;
+    constexpr u32 kNoModuleInfo = 0xFFFFFFFF;
+    const ElfImage image{bytes, "IRX"};
+    requireHeader(image);
+    const Elf32_Shdr section = findModuleSection(readSections(image));
+    const std::string name = readString(image, section.sh_offset + kNameOffset,
+                                        section.sh_offset + section.sh_size);
+    const u32 moduleInfo = image.read<u32>(section.sh_offset);
+    if (!name.empty() || moduleInfo == kNoModuleInfo) {
+        return name;
+    }
+    const std::optional<usize> info = findFileOffset(image, moduleInfo);
+    if (!info) {
+        return name;
+    }
+    const std::optional<usize> text = findFileOffset(image, image.read<u32>(*info));
+    return text ? readString(image, *text, bytes.size()) : name;
 }
 
 IrxModule loadIrx(std::span<const u8> bytes, Memory& memory, u32 base,

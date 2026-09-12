@@ -4,7 +4,9 @@
 #include "iop_hle_loadfile.h"
 
 #include "disc.h"
+#include "irx.h"
 
+#include <algorithm>
 #include <format>
 #include <string>
 #include <vector>
@@ -92,11 +94,60 @@ s32 IopHleLoadfile::loadModule(const RpcCall& call) {
     return static_cast<s32>(++mModules);
 }
 
+// The arguments are strings laid end to end, each with its terminator.
+std::vector<std::string> IopHleLoadfile::readArguments(u32 address, u32 length) {
+    std::vector<std::string> arguments;
+    std::string current;
+    for (u32 i = 0; i < length; ++i) {
+        const char letter = static_cast<char>(mMemory.read8(address + i));
+        if (letter != '\0') {
+            current.push_back(letter);
+            continue;
+        }
+        arguments.push_back(current);
+        current.clear();
+    }
+    if (!current.empty()) {
+        arguments.push_back(current);
+    }
+    return arguments;
+}
+
+// ps2sdk loadfile.c: struct _lf_module_buffer_load_arg, the module's address on
+// the IOP and the argument length, then the arguments behind an unused path.
 s32 IopHleLoadfile::loadModuleBuffer(const RpcCall& call) {
     constexpr u32 kBuffer = 0;
-    log.stub("module buffer at {:08x}", mMemory.read32(call.argument + kBuffer * 4));
+    constexpr u32 kArgumentLength = 4;
+    constexpr u32 kArguments = kPath + kPathLimit;
+    constexpr u32 kArgumentLimit = 252;
+    const u32 buffer = mMemory.read32(call.argument + kBuffer);
+    const u32 length = std::min(mMemory.read32(call.argument + kArgumentLength), kArgumentLimit);
+    const std::vector<std::string> arguments = readArguments(call.argument + kArguments, length);
+
+    // Copied out, since loading writes into the memory the image sits in.
+    const std::span<const u8> ram = mIop.memory().regionAt(0);
+    const std::vector<u8> image =
+        buffer < ram.size() ? std::vector<u8>(ram.begin() + buffer, ram.end()) : std::vector<u8>{};
+    if (!isIrx(image)) {
+        log.stub("module buffer at {:08x} is not an IRX", buffer);
+        return static_cast<s32>(++mModules);
+    }
+    const std::string name = readIrxName(image);
+    log.trace("LoadModuleBuffer({:08x}, {}, {} arguments)", buffer, name, arguments.size());
+    // A throw would unwind through the guest's coroutine, so a module that
+    // cannot be loaded is reported here and answered the way a stub is.
+    std::optional<s32> result;
+    try {
+        result = mIop.loadModule(name.empty() ? std::format("module@{:08x}", buffer) : name,
+                                 image, arguments);
+    } catch (const std::exception& error) {
+        log.stub("module {} at {:08x}: {}", name, buffer, error.what());
+    }
+    if (!result) {
+        log.stub("module {} at {:08x} did not start", name, buffer);
+    }
     if (call.receiveSize >= 8) {
-        mMemory.write32(call.receive + kEntryResult * 4, 0);
+        mMemory.write32(call.receive + kEntryResult * 4, static_cast<u32>(result.value_or(0)));
     }
     return static_cast<s32>(++mModules);
 }

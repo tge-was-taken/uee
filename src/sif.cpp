@@ -67,11 +67,6 @@ constexpr usize kRomdirNameBytes = 10;
 constexpr usize kRomdirSize = 12;
 constexpr usize kRomdirAlignment = 16;
 
-bool isIrx(std::span<const u8> image) {
-    return image.size() > 4 && image[0] == 0x7F && image[1] == 'E' && image[2] == 'L' &&
-           image[3] == 'F';
-}
-
 constexpr u32 kCommandBuffer = 0x00019600;
 constexpr u32 kServerBase = 0x01000000;
 constexpr u32 kServerStride = 0x1000;
@@ -326,6 +321,12 @@ void Sif::readOtherData(u32 packet) {
     log.trace("SifGetOtherData(iop={:08x}, ee={:08x}, {} bytes)", source, destination, size);
     for (u32 i = 0; i < size; ++i) {
         mMemory.write8(destination + i, mIop.memory().read8(source + i));
+    }
+    // Taken here, or the next module to load would report it as its own. The
+    // loader patches in ps2sdk walk IOP kernel structures this runtime does not
+    // keep, and follow what they find there.
+    if (const std::optional<u32> address = mIop.memory().takeFault()) {
+        log.stub("SifGetOtherData read {:08x}, which is not mapped", *address);
     }
 
     std::vector<u32> reply(kReplyWords, 0);

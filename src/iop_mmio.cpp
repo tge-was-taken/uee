@@ -51,6 +51,7 @@ constexpr u32 blocksIn(u32 bcr) {
 void IopMmio::attach(Memory& memory, IopKernel& kernel) {
     mMemory = &memory;
     mKernel = &kernel;
+    kernel.attachDevices(*this);
     mSio2.attach(kernel);
     memory.attach(this);
 }
@@ -147,13 +148,16 @@ void IopMmio::sendToSoundMemory(const DmaChannel& channel, u32 words) {
     mSpu2.receive(&channel == &mSpuChannels[0] ? 0 : 1, bytes);
 }
 
+// The voices move whether or not anything listens, since a driver polls how
+// far they have got.
 void IopMmio::advance(u64 cycles) {
-    if (mAudio == nullptr) {
-        return;
-    }
     mAudioCycles += cycles;
     const u64 frames = mAudioCycles / kIopCyclesPerSample;
     mAudioCycles -= frames * kIopCyclesPerSample;
+    if (mAudio == nullptr) {
+        mSpu2.advance(frames);
+        return;
+    }
 
     for (u64 done = 0; done < frames; done += kRenderFrames) {
         const usize count = static_cast<usize>(std::min<u64>(kRenderFrames, frames - done));
@@ -187,8 +191,9 @@ void IopMmio::writeToSio2(const DmaChannel& channel) {
     mSio2.writeFifoIn(command, block);
 }
 
-// LIBSD waits on the channel's interrupt rather than on the data, and pacing it
-// at the rate the samples play keeps a driver that refills on it in step.
+// LIBSD waits on the channel's interrupt rather than on the data. An auto-DMA
+// stream is paced at the rate it plays, so a driver that refills on it keeps
+// in step; a plain transfer only moves data into the sound memory.
 void IopMmio::startTransfer(DmaChannel& channel) {
     if (channel.base == mSio2Write.base) {
         writeToSio2(channel);
@@ -203,7 +208,12 @@ void IopMmio::startTransfer(DmaChannel& channel) {
     log.trace("spu dma from {:08x}, {} words, line {}", channel.madr, words, channel.line);
     sendToSoundMemory(channel, words);
     channel.chcr &= ~kStart;
-    mKernel->raiseInterruptAfter(channel.line, kIopCyclesPerSample * samplesIn(words));
+    // A plain transfer takes 24 cycles a halfword.
+    constexpr u64 kCyclesPerHalfword = 24;
+    const u32 core = &channel == &mSpuChannels[0] ? 0 : 1;
+    const u64 cycles = mSpu2.isAutoDma(core) ? kIopCyclesPerSample * samplesIn(words)
+                                             : static_cast<u64>(words) * 2 * kCyclesPerHalfword;
+    mKernel->raiseInterruptAfter(channel.line, cycles);
 }
 
 bool IopMmio::writeWord(u32 address, u32 value) {

@@ -9,6 +9,7 @@
 #include "symbols.h"
 #include "types.h"
 
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -29,7 +30,11 @@ public:
         std::span<TranslatedIrx* const> translated = {},
         std::span<const std::string> hostModules = {}, std::span<const u32> watched = {});
 
-    bool loadModule(const std::string& name, std::span<const u8> image);
+    // What the module's start returned, or nothing when it did not start. A
+    // module the host answers is not loaded and reports zero.
+    std::optional<s32> loadModule(const std::string& name, std::span<const u8> image,
+                                  std::span<const std::string> arguments = {});
+    ModuleSource sourceOf(const std::string& name) const;
     u32 callFunction(u32 address, u32 gp, std::span<const u32> arguments);
 
     const std::vector<IopRpcServer>& rpcServers() const { return mKernel.rpcServers(); }
@@ -58,8 +63,10 @@ private:
     bool dispatchPendingHandlers();
     void runHandler(const IopHandlerCall& call);
 
+    ModuleArguments writeArguments(const std::string& name,
+                                   std::span<const std::string> arguments);
+
     TranslatedIrx* translationOf(const std::string& name) const;
-    ModuleSource sourceOf(const std::string& name) const;
 
     Memory mMemory = makeIopMemory();
     IopMmio mMmio;

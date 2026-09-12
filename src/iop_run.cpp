@@ -208,15 +208,15 @@ mco_coro* IopScheduler::coroutineFor(usize thread) {
     return mCoroutines[thread];
 }
 
-void enterModule(IopContext& iop, const IrxModule& module) {
+void enterModule(IopContext& iop, const IrxModule& module, const ModuleArguments& arguments) {
     iop.cpu.pc = module.program.entry;
     iop.cpu.gpr[reg::gp] = module.gp;
-    iop.cpu.gpr[reg::sp] = kIopStackTop;
+    iop.cpu.gpr[reg::sp] = arguments.stackTop;
     iop.cpu.gpr[reg::ra] = kIopModuleReturn;
     // A negative argc unloads rather than starts.
     // CRI_ADXI.IRX md5 df850012de771767b5cd88b6263a25c1: module_start @ 0x57c
-    iop.cpu.gpr[reg::a0] = 0;
-    iop.cpu.gpr[reg::a1] = 0;
+    iop.cpu.gpr[reg::a0] = arguments.count;
+    iop.cpu.gpr[reg::a1] = arguments.vector;
 }
 
 // The caller commits the load delay, so $ra predates a load in the call's slot.

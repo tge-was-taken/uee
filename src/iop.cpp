@@ -15,6 +15,9 @@ LoggerChannel log("iop");
 
 // Past this a module is waiting on hardware nothing here drives.
 constexpr u64 kInstructionLimit = 20'000'000;
+// A call runs in slices, after each of which the clock moves and an interrupt
+// that fell due runs, so a driver that spins on one sees it arrive.
+constexpr u64 kCallSlice = 10'000;
 constexpr u32 kFirstArgumentRegister = 4;
 constexpr u32 kResultRegister = 2;
 
@@ -34,10 +37,19 @@ Iop::Iop(Memory& mainMemory, std::string& console, std::span<TranslatedIrx* cons
 
 // "cdrom0:\\LIB31\\PADMAN.IRX" is configured as padman.
 ModuleSource Iop::sourceOf(const std::string& name) const {
+    // There is no usb controller here, and mass: is the host's own files, so a
+    // driver for the real stick, or a file system over one, could only fail.
+    constexpr std::string_view kStorageDrivers[] = {"usbd", "usb_driver", "usbhdfsd", "bdm",
+                                                "bdmff", "bdmfs_fatfs", "usbmass_bd"};
     std::string bare = name.substr(name.find_last_of(":\\/") + 1);
     bare = bare.substr(0, bare.find('.'));
     for (char& letter : bare) {
         letter = static_cast<char>(std::tolower(static_cast<unsigned char>(letter)));
+    }
+    for (const std::string_view driver : kStorageDrivers) {
+        if (driver == bare) {
+            return ModuleSource::Host;
+        }
     }
     for (const std::string& host : mHostModules) {
         if (host == bare) {
@@ -103,9 +115,20 @@ void Iop::runHandler(const IopHandlerCall& call) {
     mKernel.leaveInterruptThread(interrupted);
 }
 
+// Stops as soon as the call waits on the EE, which is parked on this very call;
+// the IOP's other threads could otherwise run on it without end.
 Stop Iop::enter(IopScheduler::Skipping skipping) {
-    for (;;) {
-        Stop stop = mScheduler.run(kInstructionLimit, skipping);
+    for (u64 executed = 0;;) {
+        Stop stop = mScheduler.run(kCallSlice, skipping);
+        if (mKernel.isHostWaitingOnEe()) {
+            return Stop{StopReason::Deadlocked, stop.pc, "the call waits on an RPC to the EE"};
+        }
+        if (stop.reason == StopReason::ReachedLimit && executed < kInstructionLimit) {
+            executed += kCallSlice;
+            mKernel.advanceTime(kCallSlice);
+            dispatchPendingHandlers();
+            continue;
+        }
         if (stop.reason == StopReason::Deadlocked && dispatchPendingHandlers()) {
             continue;
         }
@@ -131,11 +154,39 @@ void Iop::indexModulePages() {
     mMachine.modulePages = mModulePages;
 }
 
-bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
+// The IOP's loader passes the module its own name as argv[0], the strings at the
+// top of the stack the entry runs on.
+ModuleArguments Iop::writeArguments(const std::string& name,
+                                    std::span<const std::string> arguments) {
+    if (arguments.empty()) {
+        return {};
+    }
+    std::vector<std::string> strings{name};
+    strings.insert(strings.end(), arguments.begin(), arguments.end());
+    u32 at = kIopStackTop;
+    std::vector<u32> pointers;
+    for (const std::string& text : strings) {
+        at -= (static_cast<u32>(text.size()) + 4) & ~3u;
+        for (usize i = 0; i < text.size(); ++i) {
+            mMemory.write8(at + static_cast<u32>(i), static_cast<u8>(text[i]));
+        }
+        mMemory.write8(at + static_cast<u32>(text.size()), 0);
+        pointers.push_back(at);
+    }
+    at = (at - static_cast<u32>(pointers.size() + 1) * 4) & ~0xFu;
+    for (usize i = 0; i < pointers.size(); ++i) {
+        mMemory.write32(at + static_cast<u32>(i) * 4, pointers[i]);
+    }
+    mMemory.write32(at + static_cast<u32>(pointers.size()) * 4, 0);
+    return {static_cast<u32>(pointers.size()), at, at - 0x10};
+}
+
+std::optional<s32> Iop::loadModule(const std::string& name, std::span<const u8> image,
+                                   std::span<const std::string> arguments) {
     // Loading it would bind later imports to its exports, not to the host.
     if (sourceOf(name) == ModuleSource::Host) {
         log.trace("{} is answered here, so its image is not loaded", name);
-        return true;
+        return 0;
     }
     TranslatedIrx* const translated = translationOf(name);
     const u32 base = translated != nullptr ? translated->base : mNextBase;
@@ -170,8 +221,10 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
 
     const u32 sequence = mKernel.sequence();
     mKernel.enterHostThread();
-    enterModule(mInterpreter.iop, module);
+    enterModule(mInterpreter.iop, module, writeArguments(name, arguments));
     const Stop stop = enter();
+    // Taken before the module's own threads run and reuse the registers.
+    const s32 result = static_cast<s32>(mInterpreter.iop.cpu.gpr[reg::v0]);
     if (stop.reason != StopReason::Exited || !sync()) {
         log.stub("iop module entry: {}", describe(stop));
         mKernel.dropThreadsAbove(sequence);
@@ -180,9 +233,9 @@ bool Iop::loadModule(const std::string& name, std::span<const u8> image) {
             mMachine.modules = mActive;
             indexModulePages();
         }
-        return false;
+        return std::nullopt;
     }
-    return true;
+    return result;
 }
 
 void Iop::startVblank() {
@@ -201,7 +254,6 @@ void Iop::advance(u64 instructions) {
     }
     mAdvancing = true;
     mKernel.advanceTime(instructions);
-    mMmio.advance(instructions);
     // The host thread is only the EE's way in. Leaving it runnable would hand
     // every slice straight back, since it sits on the address a call returns to.
     mKernel.exitHostThread();

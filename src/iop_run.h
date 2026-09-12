@@ -23,7 +23,14 @@ constexpr u32 kIopStackSize = 0x00010000;
 constexpr u32 kIopModuleReturn = 0x0FFFFFF0;
 constexpr u32 kIopThreadReturn = 0x0FFFFFE0;
 
-void enterModule(IopContext& iop, const IrxModule& module);
+// Where a module's argv sits; a module started with none sees a zero argc.
+struct ModuleArguments {
+    u32 count = 0;
+    u32 vector = 0;
+    u32 stackTop = kIopStackTop;
+};
+
+void enterModule(IopContext& iop, const IrxModule& module, const ModuleArguments& arguments = {});
 
 // One coroutine per guest thread.
 class IopScheduler {

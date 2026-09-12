@@ -48,6 +48,11 @@ struct RomdirEntry {
 // each member padded to 16 bytes.
 std::vector<RomdirEntry> listRomdir(std::span<const u8> image);
 
+bool isIrx(std::span<const u8> image);
+
+// The name the module gives itself, or an empty string when it gives none.
+std::string readIrxName(std::span<const u8> image);
+
 IrxModule loadIrx(std::span<const u8> image, Memory& memory, u32 base,
                   const std::vector<IrxModule>& resident, std::vector<Import>& hostImports);
 

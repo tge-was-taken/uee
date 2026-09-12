@@ -33,6 +33,8 @@ struct IopRpcServer {
     u32 gp = 0;
 };
 
+class IopMmio;
+
 class IopKernel {
 public:
     // The main memory is where sceSifSetDma moves what a module hands the EE.
@@ -58,6 +60,10 @@ public:
     // is also the one a module entry gets.
     void enterHostThread();
 
+    // Nothing carries a request from the IOP to the EE yet, so a host thread
+    // that made one can never go on.
+    bool isHostWaitingOnEe() const;
+
     // What the EE asks for through the FILEIO heap server, which is the same
     // pool sysmem hands to the modules loaded here.
     u32 allocateMemory(u32 size);
@@ -68,6 +74,7 @@ public:
     // loaded here run on.
     void raiseVblankStart();
     void raiseVblankEnd();
+    void attachDevices(IopMmio& devices) { mDevices = &devices; }
     void advanceTime(u64 instructions);
     void advanceTimeTo(u64 cycles);
     std::optional<u64> nextDelay() const;
@@ -303,6 +310,7 @@ private:
     usize mCurrent = 0;
     u32 mSequence = 0;
     u64 mCycles = 0;
+    IopMmio* mDevices = nullptr;
     std::set<const Service*> mStubReported;
     Interrupt mInterrupts[64];
     bool mInterruptsEnabled = true;

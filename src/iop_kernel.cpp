@@ -18,6 +18,7 @@
 
 #include "log.h"
 #include "iop_kernel.h"
+#include "iop_mmio.h"
 #include "timers.h"
 
 
@@ -996,6 +997,11 @@ bool IopKernel::isCurrent(usize thread) const {
     return mCurrent == thread && mThreads[thread].status == iopstatus::kRun;
 }
 
+bool IopKernel::isHostWaitingOnEe() const {
+    const IopThread& host = mThreads[kHostThread];
+    return host.status == iopstatus::kWait && host.wait == IopWait::RpcReply;
+}
+
 void IopKernel::enterHostThread() {
     mThreads[kHostThread].status = iopstatus::kRun;
     switchTo(kHostThread);
@@ -1890,8 +1896,13 @@ void IopKernel::advanceTimeTo(u64 cycles) {
     advanceTime(cycles > mCycles ? cycles - mCycles : 0);
 }
 
+// The devices keep this clock, including the stretches the scheduler skips
+// while every thread waits.
 void IopKernel::advanceTime(u64 instructions) {
     mCycles += instructions;
+    if (mDevices != nullptr) {
+        mDevices->advance(instructions);
+    }
     if (mNextDeadline != 0 && mCycles < mNextDeadline) {
         return;
     }
