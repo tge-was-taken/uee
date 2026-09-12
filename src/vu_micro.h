@@ -3,6 +3,8 @@
 #include "types.h"
 #include "vu.h"
 
+#include <span>
+
 namespace uee {
 
 class Gif;
@@ -10,8 +12,7 @@ class Memory;
 
 class VuMicro {
 public:
-    VuMicro(Vu& state, Memory& memory, u32 unit, Gif* gif)
-        : mState(state), mMemory(memory), mGif(gif), mUnit(unit) {}
+    VuMicro(Vu& state, Memory& memory, u32 unit, Gif* gif);
 
     struct Result {
         u32 counter;
@@ -27,7 +28,6 @@ public:
     u32 getCycle() const { return mCycle; }
 
 private:
-    u32 getInstructionBase() const;
     u32 getInstructionCount() const;
     u32 getDataBase() const;
     u32 getDataSize() const;
@@ -65,6 +65,9 @@ private:
     Memory& mMemory;
     Gif* mGif;
     u32 mUnit;
+    // Held directly: going through Memory searched its regions on every fetch.
+    std::span<u8> mInstructions;
+    std::span<u8> mData;
 
     u32 mProgramCounter = 0;
     u32 mBranchTarget = 0;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <format>
 #include <stdexcept>
 
@@ -218,12 +219,40 @@ constexpr u32 kRunawayStep = 1'000'000;
 constexpr u32 kVifRegisters[2] = {0x10003800, 0x10003C00};
 constexpr u32 kItop = 0xD0, kTop = 0xE0;
 
+std::span<u8> getUnitMemory(Memory& memory, u32 base, u32 size) {
+    const std::span<u8> bytes = memory.regionAt(base);
+    if (bytes.size() != size) {
+        throw std::logic_error(std::format("expected {} bytes of unit memory at {:08x}, found {}",
+                                           size, base, bytes.size()));
+    }
+    return bytes;
+}
+
+u32 readWord(std::span<const u8> bytes, u32 offset) {
+    u32 value;
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    return value;
+}
+
+u64 readDouble(std::span<const u8> bytes, u32 offset) {
+    u64 value;
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    return value;
+}
+
+void writeWord(std::span<u8> bytes, u32 offset, u32 value) {
+    std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+
 }  // namespace
 
-u32 VuMicro::getInstructionBase() const { return mUnit == 0 ? kVu0MicroBase : kVu1MicroBase; }
-u32 VuMicro::getInstructionCount() const {
-    return (mUnit == 0 ? kVu0MemorySize : kVu1MemorySize) / 8;
-}
+VuMicro::VuMicro(Vu& state, Memory& memory, u32 unit, Gif* gif)
+    : mState(state), mMemory(memory), mGif(gif), mUnit(unit),
+      mInstructions(getUnitMemory(memory, unit == 0 ? kVu0MicroBase : kVu1MicroBase,
+                                  unit == 0 ? kVu0MemorySize : kVu1MemorySize)),
+      mData(getUnitMemory(memory, getDataBase(), getDataSize())) {}
+
+u32 VuMicro::getInstructionCount() const { return static_cast<u32>(mInstructions.size() / 8); }
 u32 VuMicro::getDataBase() const { return mUnit == 0 ? kVu0DataBase : kVu1DataBase; }
 u32 VuMicro::getDataSize() const { return mUnit == 0 ? kVu0MemorySize : kVu1MemorySize; }
 
@@ -593,10 +622,10 @@ void VuMicro::loadQuadword(u32 dest, u32 vf, u32 quadword) {
         mState.writeVf(vf, dest, zero);
         return;
     }
-    const u32 address = getDataBase() + (quadword * 16u) % getDataSize();
+    const u32 offset = (quadword * 16u) % getDataSize();
     u32 lanes[4];
     for (s32 i = 0; i < 4; ++i) {
-        lanes[i] = mMemory.read32(address + 4u * static_cast<u32>(i));
+        lanes[i] = readWord(mData, offset + 4u * static_cast<u32>(i));
     }
     mState.writeVf(vf, dest, lanes);
     if (mUnit == 0) {
@@ -612,11 +641,12 @@ void VuMicro::storeQuadword(u32 dest, u32 vf, u32 quadword) {
     if (!isAddressable(mUnit, quadword)) {
         return;
     }
-    const u32 address = getDataBase() + (quadword * 16u) % getDataSize();
+    const u32 offset = (quadword * 16u) % getDataSize();
     const Reg128 value = mState.readVf(vf);
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i)) {
-            mMemory.write32(address + 4u * static_cast<u32>(i), value.word(i));
+            writeWord(mData, offset + 4u * static_cast<u32>(i), value.word(i));
+            mMemory.keepVuWindowWord(value.word(i));
         }
     }
 }
@@ -635,8 +665,8 @@ void VuMicro::kickToGif(u32 quadword) {
     const u32 quadwords = getDataSize() / 16u;
     mGif->beginPath(kPath1);
     for (u32 sent = 0; sent < quadwords; ++sent) {
-        const u32 address = getDataBase() + ((quadword + sent) % quadwords) * 16u;
-        mGif->writeQuadword(mMemory.read64(address), mMemory.read64(address + 8));
+        const u32 offset = ((quadword + sent) % quadwords) * 16u;
+        mGif->writeQuadword(readDouble(mData, offset), readDouble(mData, offset + 8));
         if (!mGif->isPacketOpen()) {
             break;
         }
@@ -896,9 +926,9 @@ void VuMicro::begin(u32 start) {
 }
 
 bool VuMicro::step() {
-    const u32 address = getInstructionBase() + (mProgramCounter % getInstructionCount()) * 8;
-    const u32 lower = mMemory.read32(address);
-    const u32 upper = mMemory.read32(address + 4);
+    const u32 offset = (mProgramCounter % getInstructionCount()) * 8;
+    const u32 lower = readWord(mInstructions, offset);
+    const u32 upper = readWord(mInstructions, offset + 4);
 
     stallUntil(getOperandsReadyCycle(upper, lower));
     beginCycle();
