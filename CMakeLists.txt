@@ -11,7 +11,17 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-add_compile_options(-Wall -Wextra -Wpedantic)
+if(MSVC)
+    add_compile_options(/W4 /bigobj)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+if(WIN32)
+    # Translated guest calls nest on the host stack, and Windows gives the main
+    # thread 1 MB where Linux gives 8.
+    add_link_options(/STACK:8388608)
+endif()
 
 include(FetchContent)
 set(SPDLOG_USE_STD_FORMAT ON CACHE BOOL "" FORCE)
@@ -43,7 +53,13 @@ FetchContent_Declare(xxhash
     SOURCE_SUBDIR cmake_unofficial)
 FetchContent_MakeAvailable(xxhash)
 
-add_library(uee SHARED
+# A Windows DLL exports only what is marked, so the runtime is linked in there.
+if(WIN32)
+    set(UEE_LIBRARY_TYPE STATIC)
+else()
+    set(UEE_LIBRARY_TYPE SHARED)
+endif()
+add_library(uee ${UEE_LIBRARY_TYPE}
     src/opcodes.cpp
     src/instruction.cpp
     src/block_values.cpp
@@ -105,7 +121,9 @@ add_library(uee SHARED
 target_include_directories(uee PUBLIC src)
 target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus spdlog::spdlog
                               xxHash::xxhash)
-target_compile_options(uee PRIVATE -fno-semantic-interposition)
+if(NOT MSVC)
+    target_compile_options(uee PRIVATE -fno-semantic-interposition)
+endif()
 
 # Needs AVX2 for the per-lane shift, and puts the host into a rounding mode the
 # whole process then runs in.
@@ -116,6 +134,22 @@ if(UEE_HOST_FPU)
 endif()
 
 enable_testing()
+
+# The translators run during the build, so a cross build takes them from a build
+# for this machine.
+set(UEE_HOST_TOOLS "" CACHE PATH "Native build directory whose bin holds the translators")
+if(CMAKE_CROSSCOMPILING AND NOT UEE_HOST_TOOLS)
+    message(FATAL_ERROR "a cross build needs UEE_HOST_TOOLS")
+endif()
+function(add_translator name)
+    if(CMAKE_CROSSCOMPILING)
+        add_executable(${name} IMPORTED GLOBAL)
+        set_target_properties(${name} PROPERTIES IMPORTED_LOCATION ${UEE_HOST_TOOLS}/bin/${name})
+    else()
+        add_executable(${name} tests/${name}.cpp)
+        target_link_libraries(${name} PRIVATE uee spdlog::spdlog)
+    endif()
+endfunction()
 
 add_executable(run_guest tests/run_guest.cpp)
 target_link_libraries(run_guest PRIVATE uee spdlog::spdlog)
@@ -155,17 +189,14 @@ endif()
 add_executable(test_autotest tests/test_autotest.cpp)
 target_link_libraries(test_autotest PRIVATE uee spdlog::spdlog)
 
-add_executable(translate_elf tests/translate_elf.cpp)
-target_link_libraries(translate_elf PRIVATE uee spdlog::spdlog)
+add_translator(translate_elf)
 
 add_executable(test_iop_autotest tests/test_iop_autotest.cpp)
 target_link_libraries(test_iop_autotest PRIVATE uee spdlog::spdlog)
 
-add_executable(translate_irx tests/translate_irx.cpp)
-target_link_libraries(translate_irx PRIVATE uee spdlog::spdlog)
+add_translator(translate_irx)
 
-add_executable(translate_vu tests/translate_vu.cpp)
-target_link_libraries(translate_vu PRIVATE uee spdlog::spdlog)
+add_translator(translate_vu)
 
 add_executable(test_boot tests/test_boot.cpp)
 target_link_libraries(test_boot PRIVATE uee spdlog::spdlog)
