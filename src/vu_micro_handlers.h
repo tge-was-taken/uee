@@ -44,6 +44,9 @@ void xtop(VuMicro& m, u32 ft);
 void xitop(VuMicro& m, u32 ft);
 // Carries on in the interpreter from pc with the pipelines as they are.
 VuMicro::Result resume(VuMicro& m, u32 pc);
+// The same after an indirect jump the translation had no case for, which the
+// record keeps so the next translation does.
+VuMicro::Result resumeJump(VuMicro& m, u32 site, u32 pc);
 VuMicro::Result finish(const VuMicro& m);
 VuMicro::Result stop(VuMicro& m);
 
@@ -206,12 +209,6 @@ inline void branchTo(VuMicro& m, u32 target) {
     m.branching = true;
 }
 
-inline void recordJump(VuMicro& m, u32 target) {
-    if (m.jumps != nullptr) {
-        m.jumps->insert(target % m.getInstructionCount());
-    }
-}
-
 inline void lq(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset) {
     loadQuadword(m, dest, ft, m.state.readVi(fs) + static_cast<u32>(offset));
 }
@@ -240,20 +237,34 @@ inline void sqd(VuMicro& m, u32 dest, u32 fs, u32 ft) {
     storeQuadword(m, dest, fs, m.state.readVi(ft));
 }
 
-inline void ilw(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset) {
-    vilwr(m.state, m.memory, dest, ft, fs, m.getDataBase(), m.getDataSize(), offset);
+// The unit's data memory held directly, as lq and sq reach it: going through
+// Memory searched its regions on every access.
+inline u32 getIntegerOffset(const VuMicro& m, u32 fs, s32 offset) {
+    return ((m.state.readVi(fs) + static_cast<u32>(offset)) * 16u) & (m.getDataSize() - 1);
 }
 
-inline void isw(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset) {
-    viswr(m.state, m.memory, dest, ft, fs, m.getDataBase(), m.getDataSize(), offset);
+inline void ilw(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset = 0) {
+    const u32 at = getIntegerOffset(m, fs, offset) + 4u * getIntegerLane(dest);
+    m.state.writeVi(ft, readWord(m.data, at));
+}
+
+inline void isw(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset = 0) {
+    const u32 at = getIntegerOffset(m, fs, offset);
+    const u32 value = m.state.readVi(ft);
+    for (s32 i = 0; i < 4; ++i) {
+        if (Vu::writes(dest, i)) {
+            writeWord(m.data, at + 4u * static_cast<u32>(i), value);
+            m.memory.keepVuWindowWord(value);
+        }
+    }
 }
 
 inline void ilwr(VuMicro& m, u32 dest, u32 ft, u32 fs) {
-    vilwr(m.state, m.memory, dest, ft, fs, m.getDataBase(), m.getDataSize());
+    ilw(m, dest, ft, fs);
 }
 
 inline void iswr(VuMicro& m, u32 dest, u32 ft, u32 fs) {
-    viswr(m.state, m.memory, dest, ft, fs, m.getDataBase(), m.getDataSize());
+    isw(m, dest, ft, fs);
 }
 
 inline void fcget(VuMicro& m, u32 ft) {
@@ -328,13 +339,11 @@ inline void bal(VuMicro& m, u32 pc, u32 ft, s32 offset) {
 }
 
 inline void jr(VuMicro& m, u32 fs) {
-    recordJump(m, m.state.readVi(fs));
     branchTo(m, m.state.readVi(fs));
 }
 
 inline void jalr(VuMicro& m, u32 pc, u32 ft, u32 fs) {
     const u32 target = m.state.readVi(fs);
-    recordJump(m, target);
     m.state.writeVi(ft, pc + 2);
     branchTo(m, target);
 }

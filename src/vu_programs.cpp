@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstring>
 #include <format>
 #include <fstream>
 #include <stdexcept>
@@ -90,46 +91,162 @@ u64 hashVuPairs(std::span<const u8> micro, std::span<const VuPairRange> pairs) {
     return hash;
 }
 
-VuProgramLog::Image& VuProgramLog::recordStart(u32 unit, std::span<const u8> micro, u32 start) {
-    const Key key{unit, XXH3_64bits(micro.data(), micro.size())};
-    auto [found, added] = mImages.try_emplace(key);
-    Image& image = found->second;
-    if (added) {
-        image.unit = unit;
-        image.bytes.assign(micro.begin(), micro.end());
+namespace {
+
+std::vector<VuPairRange> getRangesOf(const std::vector<bool>& pairs) {
+    std::vector<VuPairRange> ranges;
+    for (u32 pc = 0; pc < pairs.size(); ++pc) {
+        if (!pairs[pc]) {
+            continue;
+        }
+        if (!ranges.empty() && ranges.back().first + ranges.back().count == pc) {
+            ++ranges.back().count;
+        } else {
+            ranges.push_back({pc, 1});
+        }
     }
-    image.starts.insert(start);
-    return image;
+    return ranges;
 }
 
-// One image per block: "image <unit> <hash>", "code <hex>", then its "start"
-// and "jump" lines, pair indices in hex.
+}  // namespace
+
+bool VuProgramRecord::matches(std::span<const u8> micro) const {
+    for (const VuPairRange& range : getRanges()) {
+        const usize offset = range.first * kPairBytes;
+        if (std::memcmp(code.data() + offset, micro.data() + offset, range.count * kPairBytes) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void VuProgramRecord::reach(u32 from, std::span<const u8> micro) {
+    const std::vector<bool> before = reached;
+    addReachablePairs(micro, from, jumps, reached);
+    for (u32 pc = 0; pc < reached.size(); ++pc) {
+        if (reached[pc] && !before[pc]) {
+            std::copy_n(micro.data() + pc * kPairBytes, kPairBytes, code.data() + pc * kPairBytes);
+        }
+    }
+}
+
+// Running a pair the walk never reached means a jump the record did not know,
+// so the pair joins the program from there.
+void VuProgramRecord::cover(u32 pc, std::span<const u8> micro) {
+    if (covered[pc]) {
+        return;
+    }
+    covered[pc] = true;
+    if (!reached[pc]) {
+        reach(pc, micro);
+    }
+}
+
+void VuProgramRecord::addJump(u32 site, u32 target, std::span<const u8> micro) {
+    if (jumps[site].insert(target).second) {
+        reach(site, micro);
+    }
+}
+
+std::vector<VuPairRange> VuProgramRecord::getRanges() const {
+    return getRangesOf(reached);
+}
+
+std::vector<VuPairRange> VuProgramRecord::getCoveredRanges() const {
+    return getRangesOf(covered);
+}
+
+namespace {
+
+std::unique_ptr<VuProgramRecord> makeRecord(u32 unit, u32 start) {
+    const usize size = unit == 0 ? kVu0MemorySize : kVu1MemorySize;
+    auto record = std::make_unique<VuProgramRecord>();
+    record->unit = unit;
+    record->start = start;
+    record->code.assign(size, 0);
+    record->reached.assign(size / kPairBytes, false);
+    record->covered.assign(size / kPairBytes, false);
+    return record;
+}
+
+constexpr std::string_view kVersionLine = "vu-programs 3";
+
+}  // namespace
+
+VuProgramRecord& VuProgramLog::find(u32 unit, u32 start, std::span<const u8> micro) {
+    std::vector<std::unique_ptr<VuProgramRecord>>& records = mRecords[{unit, start}];
+    for (auto it = records.begin(); it != records.end(); ++it) {
+        if ((*it)->matches(micro)) {
+            std::rotate(records.begin(), it, it + 1);
+            return *records.front();
+        }
+    }
+    records.insert(records.begin(), makeRecord(unit, start));
+    records.front()->reach(start, micro);
+    return *records.front();
+}
+
+std::vector<const VuProgramRecord*> VuProgramLog::getRecords() const {
+    std::vector<const VuProgramRecord*> all;
+    for (const auto& [key, records] : mRecords) {
+        for (const auto& record : records) {
+            all.push_back(record.get());
+        }
+    }
+    return all;
+}
+
+// "vu-programs 3", then per record "program <unit> <start>", a "code <first>
+// <hex>" line per run of reachable pairs, a "ran <first> <count>" line per run
+// of pairs that ran and a "jump <site> <target>" per edge; pair indices in hex.
 void VuProgramLog::load(const std::filesystem::path& path) {
     std::ifstream file(path);
     if (!file) {
         return;
     }
-    Image* image = nullptr;
     std::string line;
+    if (!std::getline(file, line) || line != kVersionLine) {
+        throw std::runtime_error(std::format(
+            "{}: not a '{}' file, and an older one is not read",
+            path.string(), kVersionLine));
+    }
+    VuProgramRecord* record = nullptr;
     while (std::getline(file, line)) {
         const usize space = line.find(' ');
         const std::string_view word = std::string_view(line).substr(0, space);
         const std::string_view rest =
             space == std::string::npos ? std::string_view{} : std::string_view(line).substr(space + 1);
-        if (word == "image") {
-            const usize split = rest.find(' ');
-            const u32 unit = parseNumber(rest.substr(0, split), 10, path);
-            const u64 hash = parseHash(rest.substr(split + 1), path);
-            image = &mImages[{unit, hash}];
-            image->unit = unit;
-        } else if (image == nullptr) {
-            throw std::runtime_error(std::format("{}: '{}' before any image", path.string(), word));
+        const usize split = rest.find(' ');
+        const std::string_view first = rest.substr(0, split);
+        const std::string_view second =
+            split == std::string_view::npos ? std::string_view{} : rest.substr(split + 1);
+        if (word == "program") {
+            const u32 unit = parseNumber(first, 10, path);
+            const u32 start = parseNumber(second, 16, path);
+            auto& records = mRecords[{unit, start}];
+            records.push_back(makeRecord(unit, start));
+            record = records.back().get();
+        } else if (record == nullptr) {
+            throw std::runtime_error(std::format("{}: '{}' before any program", path.string(), word));
         } else if (word == "code") {
-            image->bytes = parseBytes(rest, path);
-        } else if (word == "start") {
-            image->starts.insert(parseNumber(rest, 16, path));
+            const u32 pc = parseNumber(first, 16, path);
+            const std::vector<u8> bytes = parseBytes(second, path);
+            if (bytes.size() % kPairBytes != 0 || pc * kPairBytes + bytes.size() > record->code.size()) {
+                throw std::runtime_error(
+                    std::format("{}: code at {:x} does not fit the unit", path.string(), pc));
+            }
+            std::fill_n(record->reached.begin() + pc, bytes.size() / kPairBytes, true);
+            std::copy(bytes.begin(), bytes.end(), record->code.begin() + pc * kPairBytes);
+        } else if (word == "ran") {
+            const u32 pc = parseNumber(first, 16, path);
+            const u32 count = parseNumber(second, 16, path);
+            if (pc + count > record->covered.size()) {
+                throw std::runtime_error(
+                    std::format("{}: ran at {:x} does not fit the unit", path.string(), pc));
+            }
+            std::fill_n(record->covered.begin() + pc, count, true);
         } else if (word == "jump") {
-            image->jumps.insert(parseNumber(rest, 16, path));
+            record->jumps[parseNumber(first, 16, path)].insert(parseNumber(second, 16, path));
         } else if (!word.empty()) {
             throw std::runtime_error(std::format("{}: unknown line '{}'", path.string(), word));
         }
@@ -141,17 +258,23 @@ void VuProgramLog::save(const std::filesystem::path& path) const {
     if (!file) {
         throw std::runtime_error(std::format("cannot write {}", path.string()));
     }
-    for (const auto& [key, image] : mImages) {
-        file << std::format("image {} {:016x}\ncode ", key.first, key.second);
-        for (const u8 byte : image.bytes) {
-            file << std::format("{:02x}", byte);
+    file << kVersionLine << '\n';
+    for (const VuProgramRecord* record : getRecords()) {
+        file << std::format("program {} {:x}\n", record->unit, record->start);
+        for (const VuPairRange& range : record->getRanges()) {
+            file << std::format("code {:x} ", range.first);
+            for (usize i = 0; i < range.count * kPairBytes; ++i) {
+                file << std::format("{:02x}", record->code[range.first * kPairBytes + i]);
+            }
+            file << '\n';
         }
-        file << '\n';
-        for (const u32 start : image.starts) {
-            file << std::format("start {:x}\n", start);
+        for (const VuPairRange& range : record->getCoveredRanges()) {
+            file << std::format("ran {:x} {:x}\n", range.first, range.count);
         }
-        for (const u32 jump : image.jumps) {
-            file << std::format("jump {:x}\n", jump);
+        for (const auto& [site, targets] : record->jumps) {
+            for (const u32 target : targets) {
+                file << std::format("jump {:x} {:x}\n", site, target);
+            }
         }
     }
 }
@@ -160,7 +283,7 @@ VuPrograms::VuPrograms(std::span<const TranslatedVuProgram> translated, VuProgra
                        VuCapture* capture, bool check)
     : mLog(log), mCapture(capture), mCheck(check) {
     for (const TranslatedVuProgram& program : translated) {
-        mByStart.emplace(std::pair{program.unit, program.start}, &program);
+        mByStart[{program.unit, program.start}].push_back(&program);
     }
 }
 
@@ -180,9 +303,7 @@ VuMicro::Result VuPrograms::run(Vu& state, Memory& memory, Gif* gif, u32 unit, u
 VuMicro::Result VuPrograms::runProgram(VuMicro& micro, u32 start) {
     const std::span<const u8> code = micro.instructions;
     const u32 first = start % micro.getInstructionCount();
-    if (mLog != nullptr) {
-        micro.jumps = &mLog->recordStart(micro.unit, code, first).jumps;
-    }
+    micro.log = mLog;
     const TranslatedVuProgram* program = find(micro.unit, first, code);
     if (program == nullptr) {
         return micro.run(start);
@@ -222,12 +343,17 @@ VuMicro::Result VuPrograms::runChecked(const TranslatedVuProgram& program, Vu& s
     return actual;
 }
 
-const TranslatedVuProgram* VuPrograms::find(u32 unit, u32 start,
-                                            std::span<const u8> micro) const {
-    const auto [first, last] = mByStart.equal_range({unit, start});
-    for (auto it = first; it != last; ++it) {
-        if (hashVuPairs(micro, it->second->pairs) == it->second->hash) {
-            return it->second;
+const TranslatedVuProgram* VuPrograms::find(u32 unit, u32 start, std::span<const u8> micro) {
+    const auto found = mByStart.find({unit, start});
+    if (found == mByStart.end()) {
+        return nullptr;
+    }
+    std::vector<const TranslatedVuProgram*>& candidates = found->second;
+    for (auto it = candidates.begin(); it != candidates.end(); ++it) {
+        const TranslatedVuProgram* program = *it;
+        if (hashVuPairs(micro, program->pairs) == program->hash) {
+            std::rotate(candidates.begin(), it, it + 1);
+            return program;
         }
     }
     return nullptr;

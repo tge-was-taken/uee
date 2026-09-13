@@ -2,7 +2,11 @@
 
 #include "types.h"
 
+#include <map>
+#include <set>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace uee {
 
@@ -112,5 +116,11 @@ std::string disassembleLower(u32 pc, u32 upper, u32 lower);
 // Where a lower op sends control, for anything walking a program.
 enum class VuTransfer { None, Jump, Branch, Indirect };
 VuTransfer getTransfer(const VuLower& lower);
+
+// Adds the pairs a start can reach in this code: fallthrough, both ways of a
+// branch and the given targets of each indirect jump site. Calling it again
+// for a new jump target extends the same set.
+void addReachablePairs(std::span<const u8> code, u32 start,
+                       const std::map<u32, std::set<u32>>& jumps, std::vector<bool>& reached);
 
 }  // namespace uee

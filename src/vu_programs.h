@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <set>
 #include <span>
 #include <utility>
@@ -33,30 +34,43 @@ struct TranslatedVuProgram {
 // The same at translation time and at run time.
 u64 hashVuPairs(std::span<const u8> micro, std::span<const VuPairRange> pairs);
 
-// What the interpreter ran, kept so it can be translated later: each distinct
-// micro memory image, the starts run against it and where its indirect jumps
-// landed.
+// One program: the code a start can reach in one version of micro memory, as
+// it was, where each indirect jump was seen to go, and which pairs actually ran.
+// The reachable code is the program and its identity; what ran is what a
+// specialized translation builds on.
+struct VuProgramRecord {
+    u32 unit = 0;
+    u32 start = 0;
+    // The unit's whole instruction memory; only reached pairs mean anything.
+    std::vector<u8> code;
+    std::vector<bool> reached;
+    std::vector<bool> covered;
+    std::map<u32, std::set<u32>> jumps;
+
+    bool matches(std::span<const u8> micro) const;
+    void reach(u32 from, std::span<const u8> micro);
+    void cover(u32 pc, std::span<const u8> micro);
+    void addJump(u32 site, u32 target, std::span<const u8> micro);
+    std::vector<VuPairRange> getRanges() const;
+    std::vector<VuPairRange> getCoveredRanges() const;
+};
+
 class VuProgramLog {
 public:
-    struct Image {
-        u32 unit = 0;
-        std::vector<u8> bytes;
-        std::set<u32> starts;
-        std::set<u32> jumps;
-    };
-    using Key = std::pair<u32, u64>;
-
-    // The image the run belongs to, which is where its jumps are recorded.
-    Image& recordStart(u32 unit, std::span<const u8> micro, u32 start);
+    // The record a run from this start continues: the one whose pairs micro
+    // memory still holds, or a new one when the code there changed.
+    VuProgramRecord& find(u32 unit, u32 start, std::span<const u8> micro);
 
     // Adds what a file already holds, so runs accumulate.
     void load(const std::filesystem::path& path);
     void save(const std::filesystem::path& path) const;
 
-    const std::map<Key, Image>& getImages() const { return mImages; }
+    std::vector<const VuProgramRecord*> getRecords() const;
 
 private:
-    std::map<Key, Image> mImages;
+    // The record that last matched first: a game runs the same code at a start
+    // many times before it uploads other code there.
+    std::map<std::pair<u32, u32>, std::vector<std::unique_ptr<VuProgramRecord>>> mRecords;
 };
 
 // Runs a translation for a start when one matches micro memory, and the
@@ -71,11 +85,14 @@ public:
 
 private:
     VuMicro::Result runProgram(VuMicro& micro, u32 start);
-    const TranslatedVuProgram* find(u32 unit, u32 start, std::span<const u8> micro) const;
+    const TranslatedVuProgram* find(u32 unit, u32 start, std::span<const u8> micro);
     VuMicro::Result runChecked(const TranslatedVuProgram& program, Vu& state, Memory& memory,
                                Gif* gif, u32 start);
 
-    std::multimap<std::pair<u32, u32>, const TranslatedVuProgram*> mByStart;
+    // The candidates for each start, the one that last matched first: a game
+    // runs the same program at a start many times before it uploads another.
+    std::map<std::pair<u32, u32>, std::vector<const TranslatedVuProgram*>> mByStart;
+
     VuProgramLog* mLog;
     VuCapture* mCapture;
     bool mCheck;

@@ -210,7 +210,22 @@ void kickToGif(VuMicro& m, u32 quadword) {
     m.gif->endPath();
 }
 
+void findRecord(VuMicro& m) {
+    if (m.log != nullptr && m.record == nullptr) {
+        m.record = &m.log->find(m.unit, m.entry, m.instructions);
+    }
+}
+
+VuMicro::Result resumeJump(VuMicro& m, u32 site, u32 pc) {
+    findRecord(m);
+    if (m.record != nullptr) {
+        m.record->addJump(site, pc % m.getInstructionCount(), m.instructions);
+    }
+    return resume(m, pc);
+}
+
 VuMicro::Result resume(VuMicro& m, u32 pc) {
+    findRecord(m);
     m.programCounter = pc;
     for (u32 steps = 0; steps < VuMicro::kRunawayStep; ++steps) {
         if (m.step()) {
@@ -394,6 +409,13 @@ bool runPair(VuMicro& m, u32 pc, u32 upperWord, u32 lowerWord) {
     if (changesFlags(upper, lower)) {
         recordFlags(m);
     }
+    if (m.record != nullptr) {
+        const u32 at = pc % m.getInstructionCount();
+        m.record->cover(at, m.instructions);
+        if (lower.op == VuLowerOp::Jr || lower.op == VuLowerOp::Jalr) {
+            m.record->addJump(at, m.branchTarget % m.getInstructionCount(), m.instructions);
+        }
+    }
     return endPair(m, pc);
 }
 
@@ -412,6 +434,7 @@ VuMicro::Result VuMicro::run(u32 start) {
 }
 
 void VuMicro::begin(u32 start) {
+    entry = start % getInstructionCount();
     programCounter = start;
     branching = false;
     taken = false;

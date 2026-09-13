@@ -34,54 +34,24 @@ Pair readPair(std::span<const u8> code, u32 count, u32 pc) {
     return pair;
 }
 
-// Which pairs a start can reach. A branch takes effect after the pair behind
-// it, and the end bit after the pair behind it too, so both look one ahead.
+// A set of a record's pairs and where they branch: everything its start can
+// reach, or only what ran. A jump target the record never saw is left to the
+// interpreter.
 class Discovery {
 public:
-    Discovery(std::span<const u8> code, const std::set<u32>& jumps)
-        : mCode(code), mCount(static_cast<u32>(code.size() / 8)), mJumps(jumps) {}
-
-    void run(u32 start) {
-        std::vector<u32> work{start};
-        while (!work.empty()) {
-            const u32 pc = work.back();
-            work.pop_back();
-            if (!mFollowed.insert(pc).second) {
-                continue;
+    Discovery(const VuProgramRecord& record, const std::vector<bool>& pairs)
+        : mCode(record.code), mCount(static_cast<u32>(record.code.size() / 8)),
+          mJumps(record.jumps) {
+        for (u32 pc = 0; pc < mCount; ++pc) {
+            if (pairs[pc]) {
+                mIncluded.insert(pc);
             }
-            mIncluded.insert(pc);
-            const Pair pair = getPair(pc);
+        }
+        for (const u32 pc : mIncluded) {
             const u32 next = (pc + 1) % mCount;
-            if (pair.transfer == VuTransfer::None) {
-                if (pair.ends) {
-                    mIncluded.insert(next);
-                } else {
-                    work.push_back(next);
-                }
-                continue;
-            }
-            // The pair behind a branch runs before the branch lands.
-            mIncluded.insert(next);
-            const Pair slot = getPair(next);
-            if (slot.transfer != VuTransfer::None) {
+            if (getPair(pc).transfer != VuTransfer::None && mIncluded.contains(next) &&
+                getPair(next).transfer != VuTransfer::None) {
                 mBranchInSlot = true;
-            }
-            // An end bit on the branch stops the program before it lands.
-            if (!pair.ends) {
-                for (const u32 target : getTargets(pc, pair)) {
-                    if (slot.ends) {
-                        mIncluded.insert(target);
-                    } else {
-                        work.push_back(target);
-                    }
-                }
-            }
-            // A slot holding a branch hands the landing pair to that branch
-            // too, which only the run-time dispatch follows exactly.
-            if (slot.transfer != VuTransfer::None && !slot.ends) {
-                for (const u32 target : getTargets(next, slot)) {
-                    work.push_back(target);
-                }
             }
         }
     }
@@ -90,7 +60,12 @@ public:
         switch (pair.transfer) {
             case VuTransfer::Jump: return {pair.target};
             case VuTransfer::Branch: return {pair.target, (pc + 2) % mCount};
-            case VuTransfer::Indirect: return {mJumps.begin(), mJumps.end()};
+            case VuTransfer::Indirect: {
+                const auto found = mJumps.find(pc);
+                return found == mJumps.end() ? std::vector<u32>{}
+                                             : std::vector<u32>(found->second.begin(),
+                                                                found->second.end());
+            }
             case VuTransfer::None: break;
         }
         return {};
@@ -104,26 +79,15 @@ public:
 private:
     std::span<const u8> mCode;
     u32 mCount;
-    const std::set<u32>& mJumps;
-    std::set<u32> mFollowed;
+    const std::map<u32, std::set<u32>>& mJumps;
     std::set<u32> mIncluded;
     bool mBranchInSlot = false;
 };
 
-std::vector<VuPairRange> getRanges(const std::set<u32>& pairs) {
-    std::vector<VuPairRange> ranges;
-    for (const u32 pc : pairs) {
-        if (!ranges.empty() && ranges.back().first + ranges.back().count == pc) {
-            ++ranges.back().count;
-        } else {
-            ranges.push_back({pc, 1});
-        }
-    }
-    return ranges;
-}
-
 struct ProgramSource {
     std::string name;
+    // The full translation the name hands over to, when what ran is not all.
+    std::string fallback;
     u32 unit;
     u32 start;
     u64 hash;
@@ -459,14 +423,16 @@ std::string_view getSourceName(VuSource source) {
     }
 }
 
-std::string emitVector(std::string_view name, const VuUpper& u) {
-    return std::format("{}(s, VuSource::{}, 0x{:x}, {}, {}, {});", name, getSourceName(u.source),
-                       u.dest, u.fd, u.fs, u.ft);
+// Each form a program uses gets its own copy of the op, with the source, the
+// lanes and the target fixed.
+std::string emitVector(std::string_view kind, const VuUpper& u) {
+    return std::format("vectorOpFor<VuKind::{}, VuSource::{}, false, 0x{:x}>(s, {}, {}, {});",
+                       kind, getSourceName(u.source), u.dest, u.fd, u.fs, u.ft);
 }
 
-std::string emitAccumulate(std::string_view name, const VuUpper& u) {
-    return std::format("{}(s, VuSource::{}, 0x{:x}, {}, {});", name, getSourceName(u.source),
-                       u.dest, u.fs, u.ft);
+std::string emitAccumulate(std::string_view kind, const VuUpper& u) {
+    return std::format("vectorOpFor<VuKind::{}, VuSource::{}, true, 0x{:x}>(s, 0, {}, {});", kind,
+                       getSourceName(u.source), u.dest, u.fs, u.ft);
 }
 
 // The upper ops are the unit's register file work, so they take the state; the
@@ -474,18 +440,18 @@ std::string emitAccumulate(std::string_view name, const VuUpper& u) {
 std::string emitUpper(const VuUpper& u) {
     switch (u.op) {
         case VuUpperOp::None: return {};
-        case VuUpperOp::Add: return emitVector("vadd", u);
-        case VuUpperOp::Sub: return emitVector("vsub", u);
-        case VuUpperOp::Madd: return emitVector("vmadd", u);
-        case VuUpperOp::Msub: return emitVector("vmsub", u);
-        case VuUpperOp::Max: return emitVector("vmax", u);
-        case VuUpperOp::Mini: return emitVector("vmini", u);
-        case VuUpperOp::Mul: return emitVector("vmul", u);
-        case VuUpperOp::Adda: return emitAccumulate("vadda", u);
-        case VuUpperOp::Suba: return emitAccumulate("vsuba", u);
-        case VuUpperOp::Madda: return emitAccumulate("vmadda", u);
-        case VuUpperOp::Msuba: return emitAccumulate("vmsuba", u);
-        case VuUpperOp::Mula: return emitAccumulate("vmula", u);
+        case VuUpperOp::Add: return emitVector("Add", u);
+        case VuUpperOp::Sub: return emitVector("Sub", u);
+        case VuUpperOp::Madd: return emitVector("Madd", u);
+        case VuUpperOp::Msub: return emitVector("Msub", u);
+        case VuUpperOp::Max: return emitVector("Max", u);
+        case VuUpperOp::Mini: return emitVector("Mini", u);
+        case VuUpperOp::Mul: return emitVector("Mul", u);
+        case VuUpperOp::Adda: return emitAccumulate("Add", u);
+        case VuUpperOp::Suba: return emitAccumulate("Sub", u);
+        case VuUpperOp::Madda: return emitAccumulate("Madd", u);
+        case VuUpperOp::Msuba: return emitAccumulate("Msub", u);
+        case VuUpperOp::Mula: return emitAccumulate("Mul", u);
         case VuUpperOp::Opmsub:
             return std::format("vopmsub(s, 0x{:x}, {}, {}, {});", u.dest, u.fd, u.fs, u.ft);
         case VuUpperOp::Opmula:
@@ -707,16 +673,33 @@ bool readsCycle(const VuUpper& upper, const VuLower& lower, const VuPairTiming& 
     }
 }
 
-std::string emitProgram(const Discovery& discovery, const std::string& name, u32 start) {
+// How a translated function is entered and left. The one a program starts in
+// covers what ran and hands anything else to its full translation, which takes
+// over at the pair control left at.
+struct ProgramForm {
+    std::string name;
+    // Takes over where control leaves these pairs; the interpreter when empty.
+    std::string fallback;
+    // Pairs another function enters this one at, through a switch on the pc.
+    std::set<u32> entries;
+};
+
+std::string emitProgram(const Discovery& discovery, u32 start, const ProgramForm& form,
+                        std::set<u32>& exits) {
     const std::set<u32>& included = discovery.getIncluded();
     const u32 count = discovery.getCount();
     const std::vector<u32> order(included.begin(), included.end());
     const PairFlow flow(discovery, start);
     const std::set<u32> afterEnd = getPairsAfterEnd(discovery);
     const std::set<u32> liveRecords = getLiveRecords(discovery, flow);
+    const auto leave = [&](std::string_view pc) {
+        return form.fallback.empty() ? std::format("return resume(m, {});", pc)
+                                     : std::format("return {}(m, {});", form.fallback, pc);
+    };
 
     // A label is only written where something jumps to it.
-    const std::set<u32> labelled = getLabels(discovery, order, start);
+    std::set<u32> labelled = getLabels(discovery, order, start);
+    labelled.insert(form.entries.begin(), form.entries.end());
     std::vector<std::string> pieces;
     // Cycles the pairs in order have not added yet. The counter is only read
     // where a label or an exit follows, so it is written there too.
@@ -756,9 +739,26 @@ std::string emitProgram(const Discovery& discovery, const std::string& name, u32
                 piece += std::format("        case 0x{:04x}: goto {};\n", successor,
                                      label(successor));
             }
-            piece += "        default: return resume(m, m.programCounter);\n    }\n";
+            const u32 site = (pc + count - 1) % count;
+            const Pair branch = discovery.getPair(site);
+            if (branch.transfer == VuTransfer::Indirect) {
+                piece += std::format(
+                    "        default: return resumeJump(m, 0x{:04x}, m.programCounter);\n    }}\n",
+                    site);
+            } else {
+                for (const u32 target : discovery.getTargets(site, branch)) {
+                    if (!included.contains(target)) {
+                        exits.insert(target);
+                    }
+                }
+                if (!included.contains(next)) {
+                    exits.insert(next);
+                }
+                piece += std::format("        default: {}\n    }}\n", leave("m.programCounter"));
+            }
         } else if (!included.contains(next)) {
-            piece += std::format("    return resume(m, 0x{:04x});\n", next);
+            exits.insert(next);
+            piece += std::format("    {}\n", leave(std::format("0x{:04x}", next)));
         } else if (i + 1 == order.size() || order[i + 1] != next) {
             // The set wraps, and the start need not be the lowest pair.
             piece += std::format("    goto {};\n", label(next));
@@ -768,10 +768,22 @@ std::string emitProgram(const Discovery& discovery, const std::string& name, u32
 
     // A jump back is where a program that never ends would spin, so the check
     // for a runaway goes where jumps land.
-    std::string body = std::format(
-        "VuMicro::Result {}(VuMicro& m) {{\n    Vu& s = m.state;\n    u32 steps = 0;\n"
-        "    goto {};\n",
-        name, label(start));
+    std::string body;
+    if (form.entries.empty()) {
+        body = std::format(
+            "VuMicro::Result {}(VuMicro& m) {{\n    Vu& s = m.state;\n    u32 steps = 0;\n"
+            "    goto {};\n",
+            form.name, label(start));
+    } else {
+        body = std::format(
+            "VuMicro::Result {}(VuMicro& m, u32 pc) {{\n    Vu& s = m.state;\n    u32 steps = 0;\n"
+            "    switch (pc % 0x{:x}) {{\n",
+            form.name, count);
+        for (const u32 entry : form.entries) {
+            body += std::format("        case 0x{:04x}: goto {};\n", entry, label(entry));
+        }
+        body += "        default: return resume(m, pc);\n    }\n";
+    }
     for (usize i = 0; i < order.size(); ++i) {
         if (labelled.contains(order[i])) {
             body += std::format("\n{}:\n    if (++steps >= VuMicro::kRunawayStep) return stop(m);\n",
@@ -788,22 +800,41 @@ std::string emitProgram(const Discovery& discovery, const std::string& name, u32
 TranslatedSource translateVuPrograms(const VuProgramLog& log, usize units,
                                      std::string_view declarationsHeader) {
     std::vector<ProgramSource> programs;
-    for (const auto& [key, image] : log.getImages()) {
-        for (const u32 start : image.starts) {
-            Discovery discovery(image.bytes, image.jumps);
-            discovery.run(start);
-            ProgramSource program;
-            program.unit = image.unit;
-            program.start = start;
-            program.ranges = getRanges(discovery.getIncluded());
-            program.hash = hashVuPairs(image.bytes, program.ranges);
-            program.name =
-                std::format("vu{}_{:016x}_{:04x}", image.unit, program.hash, program.start);
-            program.body = emitProgram(discovery, program.name, start);
+    for (const VuProgramRecord* record : log.getRecords()) {
+        ProgramSource program;
+        program.unit = record->unit;
+        program.start = record->start;
+        program.ranges = record->getRanges();
+        program.hash = hashVuPairs(record->code, program.ranges);
+        program.name = std::format("vu{}_{:016x}_{:04x}", record->unit, program.hash, program.start);
+        const Discovery full(*record, record->reached);
+        std::set<u32> exits;
+        // A record that never ran its start has nothing to specialize.
+        if (!record->covered[record->start]) {
+            program.body = emitProgram(full, record->start, {program.name, {}, {}}, exits);
             programs.push_back(std::move(program));
+            continue;
         }
+        const Discovery ran(*record, record->covered);
+        const std::string fallback = program.name + "_full";
+        program.body = emitProgram(ran, record->start, {program.name, fallback, {}}, exits);
+        std::set<u32> entries;
+        for (const u32 exit : exits) {
+            if (record->reached[exit]) {
+                entries.insert(exit);
+            }
+        }
+        if (entries.empty()) {
+            // What ran is everything the start reaches.
+            program.body = emitProgram(ran, record->start, {program.name, {}, {}}, exits);
+        } else {
+            std::set<u32> unused;
+            program.body += emitProgram(full, record->start, {fallback, {}, entries}, unused);
+            program.fallback = fallback;
+        }
+        programs.push_back(std::move(program));
     }
-    // One image can hold the same program as another; the first stands for both.
+    // Two records can reach the same code; the first stands for both.
     std::sort(programs.begin(), programs.end(),
               [](const ProgramSource& a, const ProgramSource& b) { return a.name < b.name; });
     programs.erase(std::unique(programs.begin(), programs.end(),
@@ -818,6 +849,10 @@ TranslatedSource translateVuPrograms(const VuProgramLog& log, usize units,
                        "namespace uee::micro {\n\n";
     for (const ProgramSource& program : programs) {
         out.declarations += std::format("VuMicro::Result {}(VuMicro& m);\n", program.name);
+        if (!program.fallback.empty()) {
+            out.declarations +=
+                std::format("VuMicro::Result {}(VuMicro& m, u32 pc);\n", program.fallback);
+        }
     }
     out.declarations += "\n}  // namespace uee::micro\n";
 
@@ -830,15 +865,20 @@ TranslatedSource translateVuPrograms(const VuProgramLog& log, usize units,
         }
         table += "};\n";
     }
-    table += "\nstatic const TranslatedVuProgram kPrograms[] = {\n";
-    for (const ProgramSource& program : programs) {
-        table += std::format("    {{{}, 0x{:x}, {}_pairs, 0x{:016x}, micro::{}}},\n",
-                             program.unit, program.start, program.name, program.hash,
-                             program.name);
+    table += "\nextern const std::span<const TranslatedVuProgram> translatedVuPrograms;\n";
+    // An empty log still builds, with nothing to look up.
+    if (programs.empty()) {
+        table += "const std::span<const TranslatedVuProgram> translatedVuPrograms;\n";
+    } else {
+        table += "static const TranslatedVuProgram kPrograms[] = {\n";
+        for (const ProgramSource& program : programs) {
+            table += std::format("    {{{}, 0x{:x}, {}_pairs, 0x{:016x}, micro::{}}},\n",
+                                 program.unit, program.start, program.name, program.hash,
+                                 program.name);
+        }
+        table += "};\nconst std::span<const TranslatedVuProgram> translatedVuPrograms{kPrograms};\n";
     }
-    table += "};\n\nextern const std::span<const TranslatedVuProgram> translatedVuPrograms;\n"
-             "const std::span<const TranslatedVuProgram> translatedVuPrograms{kPrograms};\n\n"
-             "}  // namespace uee\n";
+    table += "\n}  // namespace uee\n";
     out.units.push_back(std::move(table));
 
     // The table goes in the first file; the functions share the rest by size.

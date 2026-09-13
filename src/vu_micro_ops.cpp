@@ -3,6 +3,7 @@
 #include "vu_handlers.h"
 
 #include <algorithm>
+#include <cstring>
 #include <format>
 
 namespace uee {
@@ -554,6 +555,88 @@ bool readsFlags(const VuLower& lower) {
         case VuLowerOp::Fmeq:
             return true;
         default: return false;
+    }
+}
+
+namespace {
+
+struct PairFlow {
+    bool ends;
+    VuTransfer transfer;
+    u32 target;
+};
+
+PairFlow readPairFlow(std::span<const u8> code, u32 pc) {
+    const u32 count = static_cast<u32>(code.size() / 8);
+    u32 lowerWord;
+    u32 upperWord;
+    std::memcpy(&lowerWord, code.data() + pc * 8, 4);
+    std::memcpy(&upperWord, code.data() + pc * 8 + 4, 4);
+    const VuLower lower = decodeLower(upperWord, lowerWord);
+    return {(upperWord & kVuEndBit) != 0, getTransfer(lower),
+            (pc + 1 + static_cast<u32>(lower.offset)) % count};
+}
+
+}  // namespace
+
+// A branch takes effect after the pair behind it, and the end bit after the
+// pair behind it too, so both look one ahead.
+void addReachablePairs(std::span<const u8> code, u32 start,
+                       const std::map<u32, std::set<u32>>& jumps, std::vector<bool>& reached) {
+    const u32 count = static_cast<u32>(code.size() / 8);
+    const auto getTargets = [&](u32 pc, const PairFlow& flow) -> std::vector<u32> {
+        switch (flow.transfer) {
+            case VuTransfer::Jump: return {flow.target};
+            case VuTransfer::Branch: return {flow.target, (pc + 2) % count};
+            case VuTransfer::Indirect: {
+                const auto found = jumps.find(pc);
+                return found == jumps.end() ? std::vector<u32>{}
+                                            : std::vector<u32>(found->second.begin(),
+                                                               found->second.end());
+            }
+            case VuTransfer::None: break;
+        }
+        return {};
+    };
+    std::vector<bool> followed(count, false);
+    std::vector<u32> work{start % count};
+    while (!work.empty()) {
+        const u32 pc = work.back();
+        work.pop_back();
+        if (followed[pc]) {
+            continue;
+        }
+        followed[pc] = true;
+        reached[pc] = true;
+        const PairFlow flow = readPairFlow(code, pc);
+        const u32 next = (pc + 1) % count;
+        if (flow.transfer == VuTransfer::None) {
+            if (flow.ends) {
+                reached[next] = true;
+            } else {
+                work.push_back(next);
+            }
+            continue;
+        }
+        // The pair behind a branch runs before the branch lands.
+        reached[next] = true;
+        const PairFlow slot = readPairFlow(code, next);
+        // An end bit on the branch stops the program before it lands.
+        if (!flow.ends) {
+            for (const u32 target : getTargets(pc, flow)) {
+                if (slot.ends) {
+                    reached[target] = true;
+                } else {
+                    work.push_back(target);
+                }
+            }
+        }
+        // A slot holding a branch hands the landing pair to that branch too.
+        if (slot.transfer != VuTransfer::None && !slot.ends) {
+            for (const u32 target : getTargets(next, slot)) {
+                work.push_back(target);
+            }
+        }
     }
 }
 

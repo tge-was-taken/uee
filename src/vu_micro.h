@@ -5,12 +5,13 @@
 #include "vu.h"
 #include "vu_micro_ops.h"
 
-#include <set>
 #include <span>
 
 namespace uee {
 
 class Gif;
+class VuProgramLog;
+struct VuProgramRecord;
 
 // A micro program running on one unit: the unit's state and what a run keeps
 // in its pipelines. The handlers in vu_micro_handlers.h work on it, whether the
@@ -85,8 +86,11 @@ struct VuMicro {
     // Held directly: going through Memory searched its regions on every fetch.
     std::span<u8> instructions;
     std::span<u8> data;
-    // Where each indirect jump lands, kept for translating the program later.
-    std::set<u32>* jumps = nullptr;
+    // Where the run is recorded for translating later. The record is looked up
+    // when the interpreter first takes a pair, so a translated run pays nothing.
+    VuProgramLog* log = nullptr;
+    VuProgramRecord* record = nullptr;
+    u32 entry = 0;
 
     u32 programCounter = 0;
     u32 branchTarget = 0;
