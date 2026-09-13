@@ -51,6 +51,8 @@ private:
     void writeLane(u32 quadword, u32 lane, u32 value);
     void writeMasked(u32 quadword, u32 lane, u32 value);
     void writeWhole(u32 quadword);
+    bool isUnpackingQuadwords() const;
+    void stallIfRequested();
     u32 offsetBy(u32 lane, u32 value);
     u32 getDestination(u32 index) const;
     u32 getCycleIndex(u32 index) const;

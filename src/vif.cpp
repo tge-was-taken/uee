@@ -70,6 +70,7 @@ constexpr u32 kUnpack = 0x60;
 constexpr u32 kUnpackMask = 0x60;
 constexpr u32 kUnpackMasked = 0x10;
 constexpr u32 kUnpackFive = 0xF;
+constexpr u32 kUnpackV4_32 = 0xC;
 
 constexpr u32 kOffsetMode = 1;
 constexpr u32 kDifferenceMode = 2;
@@ -235,6 +236,16 @@ void Vif::writeTag(u64 codes) {
 
 void Vif::writeQuadword(u64 low, u64 high) {
     mFedByProcessor = false;
+    if (isUnpackingQuadwords()) {
+        mElement[0] = static_cast<u32>(low);
+        mElement[1] = static_cast<u32>(low >> 32);
+        mElement[2] = static_cast<u32>(high);
+        mElement[3] = static_cast<u32>(high >> 32);
+        flushQuadword();
+        drainMaskedQuadwords();
+        stallIfRequested();
+        return;
+    }
     consume(static_cast<u32>(low));
     consume(static_cast<u32>(low >> 32));
     consume(static_cast<u32>(high));
@@ -268,6 +279,17 @@ void Vif::consume(u32 word) {
     } else {
         execute(word);
     }
+    stallIfRequested();
+}
+
+// A V4-32 element starting at a quadword is that quadword, so its words skip
+// the checks each one would otherwise go through.
+bool Vif::isUnpackingQuadwords() const {
+    return !mStalled && mDirectWords == 0 && mMicroWords == 0 && mPendingTarget == nullptr &&
+           mRemaining != 0 && mFormat == kUnpackV4_32 && mLane == 0 && !mHoldingThree;
+}
+
+void Vif::stallIfRequested() {
     if (mStallRequested && mPendingTarget == nullptr && mRemaining == 0) {
         log.warn("unit {} stalled on {:08x}", mUnit, mCode);
         mStalled = true;
