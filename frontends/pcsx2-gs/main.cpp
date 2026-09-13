@@ -11,15 +11,19 @@
 #include "patches.h"
 #include "run.h"
 #include "stop.h"
+#include "vu_capture.h"
+#include "vu_programs.h"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -37,6 +41,19 @@ bool runFunction(Machine& machine, u32 pc);
 constexpr uee::FunctionRunner kTranslated = uee::runFunction;
 #else
 constexpr uee::FunctionRunner kTranslated = nullptr;
+#endif
+
+#ifdef UEE_VU_PROGRAMS
+namespace uee {
+extern const std::span<const TranslatedVuProgram> translatedVuPrograms;
+}
+std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms() {
+    return uee::translatedVuPrograms;
+}
+#else
+std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms() {
+    return {};
+}
 #endif
 
 namespace {
@@ -311,6 +328,7 @@ public:
     }
 
     u32 getFieldCount() const { return mFields; }
+    void setFieldHook(std::function<void(u32)> hook) { mFieldHook = std::move(hook); }
 
     void vsync(u32 field, std::span<const u8> registers) override {
         std::copy(registers.begin(), registers.end(), mRegisters.begin());
@@ -327,6 +345,9 @@ public:
                 std::format("{}/field{:05d}.png", mFrameDirectory, mFields).c_str());
         }
         ++mFields;
+        if (mFieldHook) {
+            mFieldHook(mFields);
+        }
 
         mWindow.pollEvents();
         if (mWindow.takeResize()) {
@@ -343,6 +364,7 @@ private:
     std::string mResources;
     std::string mFrameDirectory;
     u32 mFields = 0;
+    std::function<void(u32)> mFieldHook;
     std::vector<u8> mRegisters;
     std::vector<u32> mPixels = std::vector<u32>(kMaxWidth * kMaxHeight);
     bool mOpen = false;
@@ -429,6 +451,42 @@ int main(int argc, char** argv) {
         kernel.attachCard(&*card);
     }
 
+    // Every run adds the micro programs it reached to the manifest the build
+    // translates, which by default sits beside the game's executable.
+    const char* manifestPath = std::getenv("UEE_VU_MANIFEST");
+    const std::filesystem::path vuManifest =
+        manifestPath != nullptr ? std::filesystem::path(manifestPath)
+                                : std::filesystem::path(argv[1]).parent_path() / "vu_programs.txt";
+    uee::VuProgramLog vuLog;
+    vuLog.load(vuManifest);
+    const bool vuInterpreted = std::getenv("UEE_VU_INTERPRET") != nullptr;
+    // The runs of a stretch of fields, whole, for bench_vu to replay.
+    const char* capturePath = std::getenv("UEE_VU_CAPTURE");
+    std::optional<uee::VuCapture> vuCapture;
+    u32 captureFirst = 0;
+    u32 captureCount = 0;
+    if (capturePath != nullptr) {
+        const char* fields = std::getenv("UEE_VU_CAPTURE_FIELDS");
+        if (fields == nullptr || std::sscanf(fields, "%u,%u", &captureFirst, &captureCount) != 2) {
+            logger.fatal("UEE_VU_CAPTURE needs UEE_VU_CAPTURE_FIELDS=<first>,<count>");
+            return 2;
+        }
+        vuCapture.emplace();
+        graphics.setFieldHook([&](u32 field) {
+            if (field == captureFirst) {
+                vuCapture->setRecording(true);
+            } else if (field == captureFirst + captureCount && vuCapture->isRecording()) {
+                vuCapture->setRecording(false);
+                vuCapture->save(capturePath);
+                logger.info("wrote {} VU runs to {}", vuCapture->getRuns().size(), capturePath);
+            }
+        });
+    }
+    uee::VuPrograms vuPrograms{
+        vuInterpreted ? std::span<const uee::TranslatedVuProgram>{} : getTranslatedVuPrograms(),
+        &vuLog, vuCapture ? &*vuCapture : nullptr, std::getenv("UEE_VU_CHECK") != nullptr};
+    kernel.attachVuPrograms(&vuPrograms);
+
     // Without a sink the game's sceMpegGetPicture drives an IPU that cannot
     // decode; dropping the stream answers the call.
     DroppedVideo video;
@@ -451,6 +509,7 @@ int main(int argc, char** argv) {
 
     const uee::Stop stop = uee::run(machine, limit);
     logger.info("{} after {} fields", uee::describe(stop), graphics.getFieldCount());
+    vuLog.save(vuManifest);
 
     window.close();
     return 0;

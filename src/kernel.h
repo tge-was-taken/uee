@@ -71,6 +71,10 @@ public:
     void attachAudio(AudioSink* audio) { mIop.attachAudio(audio); }
     void attachPad(PadSource* pad) { mIop.attachPad(pad); }
     void attachCard(CardStorage* card) { mIop.attachCard(card); }
+    void attachVuPrograms(VuPrograms* programs) {
+        mContext.vu0.programs = programs;
+        mMmio.vu1().programs = programs;
+    }
     void attachGsHandler(GsHandler* handler) { mMmio.attachGsHandler(handler); }
 
     void advanceClock();

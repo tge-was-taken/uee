@@ -29,6 +29,14 @@ if(TARGET translated_p3fes)
             "UEE_IOP_MODULE_LIST=${iop_list}")
     endif()
 
+    get_property(vu_sources GLOBAL PROPERTY UEE_VU_PROGRAM_SOURCES)
+    if(vu_sources)
+        get_property(vu_target GLOBAL PROPERTY UEE_VU_PROGRAM_TARGET)
+        target_sources(pcsx2-gs PRIVATE ${vu_sources})
+        target_compile_definitions(pcsx2-gs PRIVATE UEE_VU_PROGRAMS)
+        add_dependencies(pcsx2-gs ${vu_target})
+    endif()
+
     # Translated functions live in this executable, so a discarded packet can
     # only name the guest code that sent it if their symbols are exported.
     set_target_properties(pcsx2-gs PROPERTIES ENABLE_EXPORTS ON)

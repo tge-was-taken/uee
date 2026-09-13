@@ -2,16 +2,6 @@
 
 namespace uee {
 
-u32 Vu::readVi(u32 index) const {
-    return (index == 0) ? 0 : vi[index];
-}
-
-void Vu::writeVi(u32 index, u32 value) {
-    if (index != 0) {
-        vi[index] = (index < 16) ? (value & 0xFFFFu) : value;
-    }
-}
-
 // Writing all ones to each register and reading it back is what these came
 // from, so a register that keeps nothing reads as zero.
 u32 Vu::controlMask(u32 index) {

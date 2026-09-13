@@ -6,6 +6,8 @@
 
 namespace uee {
 
+class VuPrograms;
+
 // The integer file is addressed 0 to 31: below 16 the 16-bit registers, above
 // it the control registers. cfc2 and ctc2 reach all of them.
 struct Vu {
@@ -60,6 +62,9 @@ struct Vu {
     // A program that never reached its end bit is still running, and the
     // interface waits rather than starting a second one over it.
     bool microRunning = false;
+    // Where micro programs go to find a translation. Every start comes through
+    // the unit's own state, including one the processor makes with vcallms.
+    VuPrograms* programs = nullptr;
     // What the clipping unit has worked out so far. The register a program can
     // read lags it, so the two are kept apart.
     u32 clip = 0;
@@ -289,8 +294,12 @@ private:
 public:
     // VI00 reads as zero and ignores writes; only the control registers are
     // wider than 16 bits
-    u32 readVi(u32 index) const;
-    void writeVi(u32 index, u32 value);
+    u32 readVi(u32 index) const { return index == 0 ? 0 : vi[index]; }
+    void writeVi(u32 index, u32 value) {
+        if (index != 0) {
+            vi[index] = index < 16 ? (value & 0xFFFFu) : value;
+        }
+    }
 
     // What a write to each control register keeps. The integer registers hold
     // sixteen bits, and the ones above them each keep their own fields.

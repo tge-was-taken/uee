@@ -80,6 +80,10 @@ add_library(uee SHARED
     src/gs_capture.cpp
     src/gs.cpp
     src/vu_micro.cpp
+    src/vu_micro_ops.cpp
+    src/vu_capture.cpp
+    src/vu_programs.cpp
+    src/vu_translate.cpp
     src/irx.cpp
     src/iop.cpp
     src/log.cpp
@@ -101,13 +105,14 @@ add_library(uee SHARED
 target_include_directories(uee PUBLIC src)
 target_link_libraries(uee PUBLIC minicoro tomlplusplus::tomlplusplus spdlog::spdlog
                               xxHash::xxhash)
+target_compile_options(uee PRIVATE -fno-semantic-interposition)
 
-# Needs AVX2 for the per-lane shift and FMA for the VU accumulate, and puts the
-# host into a rounding mode the whole process then runs in.
+# Needs AVX2 for the per-lane shift, and puts the host into a rounding mode the
+# whole process then runs in.
 option(UEE_HOST_FPU "Use the host float unit where it matches the PS2 unit" OFF)
 if(UEE_HOST_FPU)
     target_compile_definitions(uee PUBLIC UEE_HOST_FPU)
-    target_compile_options(uee PUBLIC -mavx2 -mfma)
+    target_compile_options(uee PUBLIC -mavx2)
 endif()
 
 enable_testing()
@@ -158,6 +163,9 @@ target_link_libraries(test_iop_autotest PRIVATE uee spdlog::spdlog)
 
 add_executable(translate_irx tests/translate_irx.cpp)
 target_link_libraries(translate_irx PRIVATE uee spdlog::spdlog)
+
+add_executable(translate_vu tests/translate_vu.cpp)
+target_link_libraries(translate_vu PRIVATE uee spdlog::spdlog)
 
 add_executable(test_boot tests/test_boot.cpp)
 target_link_libraries(test_boot PRIVATE uee spdlog::spdlog)
@@ -318,6 +326,32 @@ if(UEE_BENCH)
         set_property(GLOBAL PROPERTY UEE_IOP_MODULE_LIST "${list}")
     endfunction()
 
+    # The micro programs a run recorded with UEE_VU_MANIFEST. Nothing on the disc
+    # says which programs a game uploads, so the game has to have run them.
+    function(add_vu_programs name manifest)
+        if(NOT EXISTS ${manifest})
+            message(STATUS "no VU program manifest at ${manifest}")
+            return()
+        endif()
+        set(stem ${TRANSLATED_DIR}/vu.${name})
+        translated_unit_names(generated ${stem} 4)
+        add_custom_command(OUTPUT ${generated} ${stem}.decls.h
+                           COMMAND ${CMAKE_COMMAND} -E make_directory ${TRANSLATED_DIR}
+                           COMMAND translate_vu ${manifest} ${stem} 4
+                           DEPENDS translate_vu ${manifest}
+                           COMMENT "Translating ${name}'s VU programs")
+        # A custom command only orders its own directory, so a target in another
+        # one depends on this instead.
+        add_custom_target(${name}_vu_programs DEPENDS ${generated})
+        # Replays a UEE_VU_CAPTURE of this game against the same translations.
+        add_executable(bench_vu_${name} tests/bench_vu.cpp ${generated})
+        target_include_directories(bench_vu_${name} PRIVATE ${TRANSLATED_DIR})
+        target_compile_definitions(bench_vu_${name} PRIVATE UEE_VU_PROGRAMS)
+        target_link_libraries(bench_vu_${name} PRIVATE uee spdlog::spdlog)
+        set_property(GLOBAL PROPERTY UEE_VU_PROGRAM_SOURCES "${generated}")
+        set_property(GLOBAL PROPERTY UEE_VU_PROGRAM_TARGET ${name}_vu_programs)
+    endfunction()
+
     # A stripped retail executable, where discovery has only the code to go on.
     set(P3FES_ELF ${CMAKE_CURRENT_SOURCE_DIR}/scratch/games/p3fes/SLUS_216.21)
     if(EXISTS ${P3FES_ELF})
@@ -333,6 +367,7 @@ if(UEE_BENCH)
                              ${CMAKE_CURRENT_SOURCE_DIR}/scratch/games/p3fes/p3fes.iso
                              ${CMAKE_CURRENT_SOURCE_DIR}/tests/patches/p3fes.toml
                              ${CMAKE_CURRENT_SOURCE_DIR}/scratch/games/p3fes/modules.txt)
+        add_vu_programs(p3fes ${CMAKE_CURRENT_SOURCE_DIR}/scratch/games/p3fes/vu_programs.txt)
     endif()
 
     if(EE_GCC AND EXISTS "${PS2SDK}/ee/startup/linkfile")

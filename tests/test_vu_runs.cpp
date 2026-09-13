@@ -201,13 +201,13 @@ void replay(Memory& memory, const Json& run, const std::string& image, Report& r
         }
         const std::string site = imageName + ":" + step["pc"].getText();
         const std::string description = std::format("entry {} step {}", run["entry"].getText(), s);
-        const u32 pc = micro.getProgramCounter() % unit.getInstructionCount();
+        const u32 pc = micro.programCounter % unit.getInstructionCount();
         if (pc != readHex(step["pc"])) {
             report.addCase(site, description,
                            {{"pc", step["pc"].getText(), std::format("{:04X}", pc), ""}});
             return;
         }
-        const u32 before = micro.getCycle();
+        const u32 before = micro.cycle;
         micro.step();
         expected.apply(step);
         std::vector<Mismatch> found = compare(expected, vu, memory, unit);
@@ -218,9 +218,9 @@ void replay(Memory& memory, const Json& run, const std::string& image, Report& r
         ourQ = vu.vi[Vu::kQ];
         ourP = vu.vi[Vu::kP];
         resync(expected, vu, memory, unit);
-        if (micro.getCycle() - before != expectedCycles) {
+        if (micro.cycle - before != expectedCycles) {
             found.push_back({"cycles", std::to_string(expectedCycles),
-                             std::to_string(micro.getCycle() - before), ""});
+                             std::to_string(micro.cycle - before), ""});
         }
         report.addCase(site, description, found);
     }

@@ -273,7 +273,7 @@ std::vector<Mismatch> check(Vu& vu, Memory& memory, const VuUnit& unit, const Js
         const u32 target = branch["count"].getInteger() != 0
                                ? readHex(branch["pc"])
                                : (pc + 2) % unit.getInstructionCount();
-        compare("branch", target, micro.getProgramCounter() % unit.getInstructionCount());
+        compare("branch", target, micro.programCounter % unit.getInstructionCount());
     }
 
     auto runUntilLanded = [&] {
