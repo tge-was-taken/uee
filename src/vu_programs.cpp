@@ -72,7 +72,8 @@ std::string describeDifference(const Vu& expected, const Vu& actual, VuMicro::Re
     if (expected.clip != actual.clip) {
         return std::format("clip {:x}, not {:x}", actual.clip, expected.clip);
     }
-    const auto mismatch = std::mismatch(expectedData.begin(), expectedData.end(), actualData.begin());
+    const auto mismatch =
+        std::mismatch(expectedData.begin(), expectedData.end(), actualData.begin());
     if (mismatch.first != expectedData.end()) {
         return std::format("data memory at {:x}", mismatch.first - expectedData.begin());
     }
@@ -113,7 +114,8 @@ std::vector<VuPairRange> getRangesOf(const std::vector<bool>& pairs) {
 bool VuProgramRecord::matches(std::span<const u8> micro) const {
     for (const VuPairRange& range : getRanges()) {
         const usize offset = range.first * kPairBytes;
-        if (std::memcmp(code.data() + offset, micro.data() + offset, range.count * kPairBytes) != 0) {
+        const usize bytes = range.count * kPairBytes;
+        if (std::memcmp(code.data() + offset, micro.data() + offset, bytes) != 0) {
             return false;
         }
     }
@@ -215,7 +217,8 @@ void VuProgramLog::load(const std::filesystem::path& path) {
         const usize space = line.find(' ');
         const std::string_view word = std::string_view(line).substr(0, space);
         const std::string_view rest =
-            space == std::string::npos ? std::string_view{} : std::string_view(line).substr(space + 1);
+            space == std::string::npos ? std::string_view{}
+                                       : std::string_view(line).substr(space + 1);
         const usize split = rest.find(' ');
         const std::string_view first = rest.substr(0, split);
         const std::string_view second =
@@ -227,11 +230,13 @@ void VuProgramLog::load(const std::filesystem::path& path) {
             records.push_back(makeRecord(unit, start));
             record = records.back().get();
         } else if (record == nullptr) {
-            throw std::runtime_error(std::format("{}: '{}' before any program", path.string(), word));
+            throw std::runtime_error(
+                std::format("{}: '{}' before any program", path.string(), word));
         } else if (word == "code") {
             const u32 pc = parseNumber(first, 16, path);
             const std::vector<u8> bytes = parseBytes(second, path);
-            if (bytes.size() % kPairBytes != 0 || pc * kPairBytes + bytes.size() > record->code.size()) {
+            if (bytes.size() % kPairBytes != 0 ||
+                pc * kPairBytes + bytes.size() > record->code.size()) {
                 throw std::runtime_error(
                     std::format("{}: code at {:x} does not fit the unit", path.string(), pc));
             }
@@ -294,7 +299,8 @@ VuMicro::Result VuPrograms::run(Vu& state, Memory& memory, Gif* gif, u32 unit, u
     }
     VuCapture::Run& run =
         mCapture->begin(unit, micro.instructions, state, micro.data, start,
-                        memory.read32(getVifTopAddress(unit)), memory.read32(getVifItopAddress(unit)));
+                        memory.read32(getVifTopAddress(unit)),
+                        memory.read32(getVifItopAddress(unit)));
     const VuMicro::Result result = runProgram(micro, start);
     mCapture->end(run, state, micro.data, result);
     return result;

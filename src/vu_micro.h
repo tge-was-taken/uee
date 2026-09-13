@@ -118,7 +118,9 @@ struct VuMicro {
 
 // Where a program reads the interface's double buffer pointers.
 constexpr u32 getVifTopAddress(u32 unit) { return (unit == 0 ? 0x10003800u : 0x10003C00u) + 0xE0u; }
-constexpr u32 getVifItopAddress(u32 unit) { return (unit == 0 ? 0x10003800u : 0x10003C00u) + 0xD0u; }
+constexpr u32 getVifItopAddress(u32 unit) {
+    return (unit == 0 ? 0x10003800u : 0x10003C00u) + 0xD0u;
+}
 
 // The address a program stopped at is what the next start reads back, so the
 // two always move together.
