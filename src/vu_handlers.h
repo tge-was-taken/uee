@@ -137,6 +137,12 @@ inline u32 combineLanes(const Vu& vu0, u32 dest, const Reg128& a, const Reg128& 
     }
 }
 
+// A lane the host refuses is rare, so its software path stays out of line.
+template <VuKind kind>
+UEE_NOINLINE u32 computeRefusedLane(const Vu& vu0, u32 a, u32 b, s32 i) {
+    return combineLane<kind>(vu0, a, b, i);
+}
+
 // Lanes outside dest are left as they are, since nothing reads them.
 template <VuKind kind>
 inline void computeLanes(const Vu& vu0, u32 dest, const Reg128& a, const Reg128& b,
@@ -144,7 +150,7 @@ inline void computeLanes(const Vu& vu0, u32 dest, const Reg128& a, const Reg128&
     const u32 answered = combineLanes<kind>(vu0, dest, a, b, out);
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i) && (answered & (1u << i)) == 0) {
-            out[i] = combineLane<kind>(vu0, a.word(i), b.word(i), i);
+            out[i] = computeRefusedLane<kind>(vu0, a.word(i), b.word(i), i);
         }
     }
 }
@@ -211,6 +217,55 @@ inline bool setPlainFlags(Vu& vu0, u32 dest, const Reg128& a, const Reg128& b,
     return true;
 }
 
+// A result that saturated, underflowed or left a zero the host cannot tell
+// from one is rare, so the exact flags and saturation stay out of line.
+template <VuKind kind>
+UEE_NOINLINE void writeExactResult(Vu& vu0, bool toAcc, u32 dest, u32 vd, const Reg128& a,
+                                   const Reg128& b, u32 out[4]) {
+    if constexpr (kind == VuKind::Madd || kind == VuKind::Msub) {
+        u32 product[4]{};
+        u32 productFlags[4]{};
+        for (s32 i = 0; i < 4; ++i) {
+            if (!Vu::writes(dest, i)) {
+                continue;
+            }
+            const single::Rounded rounded = getProductForFlags(a.word(i), b.word(i));
+            product[i] = clampVuResult(rounded);
+            productFlags[i] = getRangeFlags(rounded);
+        }
+        vu0.addSticky(dest, product, productFlags);
+    }
+
+    constexpr bool readsAcc = kind == VuKind::Madd || kind == VuKind::Msub;
+    u32 flags[4]{};
+    bool saturated[4]{};
+    for (s32 i = 0; i < 4; ++i) {
+        if (!Vu::writes(dest, i)) {
+            continue;
+        }
+        if (needsExactLane(out[i])) {
+            flags[i] = getRangeFlags(
+                single::join(computeExactLane<kind>(vu0, a.word(i), b.word(i), i)));
+        }
+        if constexpr (readsAcc) {
+            if (vu0.accSaturated[i]) {
+                flags[i] |= Vu::kOverflow;
+            }
+        }
+        saturated[i] = (flags[i] & Vu::kOverflow) != 0;
+        if (saturated[i]) {
+            out[i] = (out[i] & single::kSignMask) | single::kLargest;
+        }
+    }
+    vu0.setFlags(dest, out, flags);
+
+    if (toAcc) {
+        vu0.writeAcc(dest, out, saturated);
+    } else {
+        vu0.writeVf(vd, dest, out);
+    }
+}
+
 // The kind is fixed per call, so four lanes run as one operation, not a switch.
 template <VuKind kind>
 inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32 vs,
@@ -235,49 +290,15 @@ inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32
             }
             return;
         }
-        if constexpr (kind == VuKind::Madd || kind == VuKind::Msub) {
-            u32 product[4]{};
-            u32 productFlags[4]{};
-            for (s32 i = 0; i < 4; ++i) {
-                if (!Vu::writes(dest, i)) {
-                    continue;
-                }
-                const single::Rounded rounded = getProductForFlags(a.word(i), b.word(i));
-                product[i] = clampVuResult(rounded);
-                productFlags[i] = getRangeFlags(rounded);
-            }
-            vu0.addSticky(dest, product, productFlags);
-        }
-
-        constexpr bool readsAcc = kind == VuKind::Madd || kind == VuKind::Msub;
-        u32 flags[4]{};
-        bool saturated[4]{};
-        for (s32 i = 0; i < 4; ++i) {
-            if (!Vu::writes(dest, i)) {
-                continue;
-            }
-            if (needsExactLane(out[i])) {
-                flags[i] = getRangeFlags(
-                    single::join(computeExactLane<kind>(vu0, a.word(i), b.word(i), i)));
-            }
-            if constexpr (readsAcc) {
-                if (vu0.accSaturated[i]) {
-                    flags[i] |= Vu::kOverflow;
-                }
-            }
-            saturated[i] = (flags[i] & Vu::kOverflow) != 0;
-            if (saturated[i]) {
-                out[i] = (out[i] & single::kSignMask) | single::kLargest;
-            }
-        }
-        vu0.setFlags(dest, out, flags);
-
-        if (toAcc) {
-            vu0.writeAcc(dest, out, saturated);
-        } else {
-            vu0.writeVf(vd, dest, out);
-        }
+        writeExactResult<kind>(vu0, toAcc, dest, vd, a, b, out);
     }
+}
+
+// A translated program names each op's form outright, so each form it uses
+// gets its own copy with the source, the lanes and the target folded in.
+template <VuKind kind, VuSource source, bool toAcc, u32 dest>
+UEE_FLATTEN UEE_NOINLINE void vectorOpFor(Vu& vu0, u32 vd, u32 vs, u32 vt) {
+    vectorOp<kind>(vu0, source, toAcc, dest, vd, vs, vt);
 }
 
 // The interpreter reads the kind out of the encoding, where emitted code names
@@ -547,17 +568,21 @@ inline void vrsqrt(Vu& vu0, u32 vs, u32 fsf, u32 vt, u32 ftf) {
 }
 
 // The outer product is defined on xyz alone, whatever the encoding says.
+// Denormals read as zero and nothing is unordered, so magnitudes compare as
+// integers.
+inline u32 getClipMagnitude(u32 bits) {
+    const u32 magnitude = bits & single::kMagnitudeMask;
+    return magnitude < single::kSmallestNormal ? 0u : magnitude;
+}
+
 inline void vclip(Vu& vu0, u32 vs, u32 vt) {
     const Reg128 s = vu0.readVf(vs);
-    const f64 limit = std::fabs(single::widen(vu0.readVf(vt).word(3)));
+    const u32 limit = getClipMagnitude(vu0.readVf(vt).word(3));
     u32 bits = 0;
     for (s32 i = 0; i < 3; ++i) {
-        const f64 value = single::widen(s.word(i));
-        if (value > limit) {
-            bits |= 1u << (2 * i);
-        }
-        if (value < -limit) {
-            bits |= 1u << (2 * i + 1);
+        const u32 word = s.word(i);
+        if (getClipMagnitude(word) > limit) {
+            bits |= 1u << (2 * i + ((word & single::kSignMask) != 0 ? 1 : 0));
         }
     }
     vu0.clip = ((vu0.clip << 6) | bits) & 0xFFFFFFu;

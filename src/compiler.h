@@ -4,9 +4,12 @@
 #if defined(_MSC_VER) && !defined(__clang__)
 #define UEE_NOINLINE __declspec(noinline)
 #define UEE_COLD
+#define UEE_FLATTEN
 #else
 #define UEE_NOINLINE [[gnu::noinline]]
 #define UEE_COLD [[gnu::cold]]
+// Inlines everything the function calls, for a copy specialized as a whole.
+#define UEE_FLATTEN [[gnu::flatten]]
 #endif
 
 #define UEE_MAYBE_UNUSED [[maybe_unused]]
