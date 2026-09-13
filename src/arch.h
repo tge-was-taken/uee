@@ -21,7 +21,6 @@ inline u32 getRounding() { return getFloatControl() & kRoundingBits; }
 inline void setRounding(u32 mode) { setFloatControl((getFloatControl() & ~kRoundingBits) | mode); }
 inline void setRoundToNearest() { setRounding(0); }
 
-// All four lanes or none: blending one at a time costs more than it saves.
 class Lanes {
 public:
     Lanes() : mValue(_mm_setzero_si128()) {}
@@ -44,8 +43,9 @@ private:
     __m128i mValue;
 };
 
-inline bool anyLaneSet(Lanes mask) {
-    return _mm_movemask_ps(_mm_castsi128_ps(mask.raw())) != 0;
+// One bit per lane whose mask is set, lane 0 lowest.
+inline u32 getSetLanes(Lanes mask) {
+    return static_cast<u32>(_mm_movemask_ps(_mm_castsi128_ps(mask.raw())));
 }
 
 inline Lanes greaterThanSigned(Lanes a, Lanes b) {
@@ -64,14 +64,25 @@ inline Lanes maskWith(Lanes a, Lanes mask) {
 inline Lanes flipBits(Lanes a, Lanes bits) {
     return Lanes(_mm_xor_si128(a.raw(), bits.raw()));
 }
+inline Lanes addEach(Lanes a, Lanes b) {
+    return Lanes(_mm_add_epi32(a.raw(), b.raw()));
+}
 inline Lanes subtractEach(Lanes a, Lanes b) {
     return Lanes(_mm_sub_epi32(a.raw(), b.raw()));
 }
 inline Lanes absoluteEach(Lanes a) {
     return Lanes(_mm_abs_epi32(a.raw()));
 }
-inline Lanes maxUnsigned(Lanes a, Lanes b) {
-    return Lanes(_mm_max_epu32(a.raw(), b.raw()));
+template <int count>
+inline Lanes shiftLeftBy(Lanes a) {
+    return Lanes(_mm_slli_epi32(a.raw(), count));
+}
+template <int count>
+inline Lanes shiftRightBy(Lanes a) {
+    return Lanes(_mm_srli_epi32(a.raw(), count));
+}
+inline Lanes clearBits(Lanes a, Lanes bits) {
+    return Lanes(_mm_andnot_si128(bits.raw(), a.raw()));
 }
 inline Lanes shiftLeftEach(Lanes a, Lanes counts) {
     return Lanes(_mm_sllv_epi32(a.raw(), counts.raw()));
@@ -84,6 +95,14 @@ inline Lanes multiplyLowEach(Lanes a, Lanes b) {
     return Lanes(_mm_mullo_epi32(a.raw(), b.raw()));
 }
 
+// Both round the way the control register says, which is toward zero here.
+inline Lanes convertToFloat(Lanes a) {
+    return Lanes(_mm_castps_si128(_mm_cvtepi32_ps(a.raw())));
+}
+inline Lanes truncateToInt(Lanes a) {
+    return Lanes(_mm_cvttps_epi32(_mm_castsi128_ps(a.raw())));
+}
+
 inline Lanes addFloat(Lanes a, Lanes b) {
     return Lanes(_mm_castps_si128(
         _mm_add_ps(_mm_castsi128_ps(a.raw()), _mm_castsi128_ps(b.raw()))));
@@ -91,17 +110,6 @@ inline Lanes addFloat(Lanes a, Lanes b) {
 inline Lanes multiplyFloat(Lanes a, Lanes b) {
     return Lanes(_mm_castps_si128(
         _mm_mul_ps(_mm_castsi128_ps(a.raw()), _mm_castsi128_ps(b.raw()))));
-}
-// One rounding, where a multiply and an add apart would take two.
-inline Lanes multiplyAddFloat(Lanes a, Lanes b, Lanes addend) {
-    return Lanes(_mm_castps_si128(_mm_fmadd_ps(_mm_castsi128_ps(a.raw()),
-                                               _mm_castsi128_ps(b.raw()),
-                                               _mm_castsi128_ps(addend.raw()))));
-}
-inline Lanes subtractFromFloat(Lanes a, Lanes b, Lanes minuend) {
-    return Lanes(_mm_castps_si128(_mm_fnmadd_ps(_mm_castsi128_ps(a.raw()),
-                                                _mm_castsi128_ps(b.raw()),
-                                                _mm_castsi128_ps(minuend.raw()))));
 }
 
 #else
@@ -118,6 +126,7 @@ struct Lanes {
     Lanes() = default;
     explicit Lanes(const u32*) {}
     static Lanes broadcast(u32) { return Lanes(); }
+    void store(u32*) const {}
 };
 
 #endif

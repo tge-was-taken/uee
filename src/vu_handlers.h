@@ -86,6 +86,24 @@ inline single::Parts computeExactLane(const Vu& vu0, u32 a, u32 b, s32 i) {
     }
 }
 
+// The product inside an accumulate reaches only the sticky flags, which read its
+// sign, whether it is zero and whether it left the range. The exponents decide
+// all three unless their sum sits near either end, so any nonzero magnitude
+// stands in for the value there.
+inline single::Rounded getProductForFlags(u32 a, u32 b) {
+    const u32 ea = (a >> 23) & 0xFFu;
+    const u32 eb = (b >> 23) & 0xFFu;
+    const u32 sign = (a ^ b) & single::kSignMask;
+    if (ea == 0 || eb == 0) {
+        return {sign, false, false};
+    }
+    // The product's exponent is ea + eb - 127, one more on a carry.
+    if (ea + eb >= 128 && ea + eb <= 381) {
+        return {sign | 0x3F800000u, false, false};
+    }
+    return single::mul(a, b);
+}
+
 // The result alone cannot say whether it saturated or an operand was already
 // that large, nor a true zero from one too small to keep.
 inline bool needsExactLane(u32 result) {
@@ -93,15 +111,17 @@ inline bool needsExactLane(u32 result) {
     return magnitude == 0 || magnitude == single::kVuLargest;
 }
 
-// False says the host unit could not answer for all four lanes. The two that
-// pick an operand rather than compute one are not worth handing over.
+// Turns a dest field into lanes, lane 0 lowest, and back.
+constexpr u8 kLaneOrder[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
+
+// One bit per lane the host unit answered. The two that pick an operand rather
+// than compute one are not worth handing over.
 template <VuKind kind>
-inline bool combineLanes(const Vu& vu0, const Reg128& a, const Reg128& b, u32 out[4]) {
+inline u32 combineLanes(const Vu& vu0, u32 dest, const Reg128& a, const Reg128& b,
+                        u32 out[4]) {
     if constexpr (!host::kHasFloatUnit || kind == VuKind::Max || kind == VuKind::Mini) {
-        return false;
+        return 0;
     } else {
-        static_assert(sizeof(Reg128) == 4 * sizeof(u32),
-                      "the lanes are read straight out of the register");
         const host::Lanes x{reinterpret_cast<const u32*>(&a)};
         const host::Lanes y{reinterpret_cast<const u32*>(&b)};
         if constexpr (kind == VuKind::Add) {
@@ -109,24 +129,86 @@ inline bool combineLanes(const Vu& vu0, const Reg128& a, const Reg128& b, u32 ou
         } else if constexpr (kind == VuKind::Sub) {
             return host::subLanes(x, y, out);
         } else if constexpr (kind == VuKind::Mul) {
-            return host::mulLanes(x, y, out);
+            return host::mulLanes(x, y, out, kLaneOrder[dest]);
         } else {
             const host::Lanes acc{reinterpret_cast<const u32*>(&vu0.acc)};
-            return host::maddLanes(acc, x, y, out, kind == VuKind::Msub);
+            return host::maddLanes(acc, x, y, out, kind == VuKind::Msub, kLaneOrder[dest]);
         }
     }
 }
 
-// Shared, with the lanes and broadcast settled at each call site.
+// Lanes outside dest are left as they are, since nothing reads them.
 template <VuKind kind>
-UEE_NOINLINE inline void computeLanes(const Vu& vu0, const Reg128& a, const Reg128& b,
-                                      u32 out[4]) {
-    if (combineLanes<kind>(vu0, a, b, out)) {
-        return;
-    }
+inline void computeLanes(const Vu& vu0, u32 dest, const Reg128& a, const Reg128& b,
+                         u32 out[4]) {
+    const u32 answered = combineLanes<kind>(vu0, dest, a, b, out);
     for (s32 i = 0; i < 4; ++i) {
-        out[i] = combineLane<kind>(vu0, a.word(i), b.word(i), i);
+        if (Vu::writes(dest, i) && (answered & (1u << i)) == 0) {
+            out[i] = combineLane<kind>(vu0, a.word(i), b.word(i), i);
+        }
     }
+}
+
+// Written with one wide store: the host unit reads the operand back with one
+// wide load, which cannot take its value from two narrower stores.
+inline Reg128 broadcastLane(u32 value) {
+    if constexpr (host::kHasFloatUnit) {
+        Reg128 lanesOf;
+        host::Lanes::broadcast(value).store(reinterpret_cast<u32*>(&lanesOf));
+        return lanesOf;
+    } else {
+        return lanes(value, value, value, value);
+    }
+}
+
+inline u32 getSaturatedLanes(const Vu& vu0) {
+    u32 lanes = 0;
+    for (s32 i = 0; i < 4; ++i) {
+        lanes |= vu0.accSaturated[i] ? 1u << i : 0u;
+    }
+    return lanes;
+}
+
+// Most results are plain: no lane saturated, out of range or a zero that could
+// have underflowed, so the MAC register holds only zeros and signs. False, with
+// nothing set, for any other.
+template <VuKind kind>
+inline bool setPlainFlags(Vu& vu0, u32 dest, const Reg128& a, const Reg128& b,
+                          const u32 out[4]) {
+    constexpr bool readsAcc = kind == VuKind::Madd || kind == VuKind::Msub;
+    const u32* x = reinterpret_cast<const u32*>(&a);
+    const u32* y = reinterpret_cast<const u32*>(&b);
+    const u32 lanes = kLaneOrder[dest];
+    const host::ResultLanes result = host::getResultLanes(out);
+    host::ProductLanes product{};
+    u32 exactZero = 0;
+    u32 special = result.largest;
+    if constexpr (kind == VuKind::Add || kind == VuKind::Sub) {
+        exactZero = host::getExactZeroSums(x, y);
+    } else if constexpr (kind == VuKind::Mul) {
+        exactZero = host::getProductLanes(x, y).zero;
+    } else {
+        product = host::getProductLanes(x, y);
+        special |= getSaturatedLanes(vu0) | product.unsure;
+        exactZero = product.zero |
+                    (product.clearOfUnderflow &
+                     host::getClearOfUnderflow(reinterpret_cast<const u32*>(&vu0.acc)));
+    }
+    special |= result.zero & ~exactZero;
+    if ((special & lanes) != 0) {
+        return false;
+    }
+    if constexpr (readsAcc) {
+        const u32 sticky = ((product.zero & lanes) != 0 ? 1u : 0u) |
+                           ((product.sign & lanes) != 0 ? 2u : 0u);
+        vu0.vi[Vu::kStatus] |= sticky << 6;
+    }
+    const u32 zeros = result.zero & lanes;
+    const u32 signs = result.sign & lanes;
+    vu0.vi[Vu::kMac] = kLaneOrder[zeros] | static_cast<u32>(kLaneOrder[signs]) << 4;
+    const u32 live = (zeros != 0 ? 1u : 0u) | (signs != 0 ? 2u : 0u);
+    vu0.vi[Vu::kStatus] = (vu0.vi[Vu::kStatus] & ~0xFu) | live | (live << 6);
+    return true;
 }
 
 // The kind is fixed per call, so four lanes run as one operation, not a switch.
@@ -136,20 +218,31 @@ inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32
     const Reg128 a = vu0.readVf(vs);
     const Reg128 read = vu0.readVf(vt);
     const u32 shared = readOperand(vu0, source, read, 0);
-    const Reg128 b =
-        source == VuSource::Vt ? read : lanes(shared, shared, shared, shared);
-    u32 out[4];
-    computeLanes<kind>(vu0, a, b, out);
+    const Reg128 b = source == VuSource::Vt ? read : broadcastLane(shared);
+    u32 out[4]{};
+    computeLanes<kind>(vu0, dest, a, b, out);
     // The two that pick an operand rather than compute one leave them alone.
     if constexpr (kind == VuKind::Max || kind == VuKind::Mini) {
         vu0.writeVf(vd, dest, out);
         return;
     } else {
+        if (setPlainFlags<kind>(vu0, dest, a, b, out)) {
+            if (toAcc) {
+                const bool saturated[4]{};
+                vu0.writeAcc(dest, out, saturated);
+            } else {
+                vu0.writeVf(vd, dest, out);
+            }
+            return;
+        }
         if constexpr (kind == VuKind::Madd || kind == VuKind::Msub) {
-            u32 product[4];
-            u32 productFlags[4];
+            u32 product[4]{};
+            u32 productFlags[4]{};
             for (s32 i = 0; i < 4; ++i) {
-                const single::Rounded rounded = single::mul(a.word(i), b.word(i));
+                if (!Vu::writes(dest, i)) {
+                    continue;
+                }
+                const single::Rounded rounded = getProductForFlags(a.word(i), b.word(i));
                 product[i] = clampVuResult(rounded);
                 productFlags[i] = getRangeFlags(rounded);
             }
@@ -157,10 +250,12 @@ inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32
         }
 
         constexpr bool readsAcc = kind == VuKind::Madd || kind == VuKind::Msub;
-        u32 flags[4];
-        bool saturated[4];
+        u32 flags[4]{};
+        bool saturated[4]{};
         for (s32 i = 0; i < 4; ++i) {
-            flags[i] = 0;
+            if (!Vu::writes(dest, i)) {
+                continue;
+            }
             if (needsExactLane(out[i])) {
                 flags[i] = getRangeFlags(
                     single::join(computeExactLane<kind>(vu0, a.word(i), b.word(i), i)));
@@ -311,6 +406,13 @@ inline void vabs(Vu& vu0, u32 dest, u32 vt, u32 vs) {
 constexpr u32 encodePowerOfTwo(s32 exponent) { return static_cast<u32>(127 + exponent) << 23; }
 
 inline void vitof(Vu& vu0, u32 dest, u32 vt, u32 vs, s32 fraction) {
+    if constexpr (host::kHasFloatUnit) {
+        const Reg128 source = vu0.readVf(vs);
+        u32 out[4];
+        host::convertFromIntLanes(reinterpret_cast<const u32*>(&source), out, fraction);
+        vu0.writeVf(vt, dest, out);
+        return;
+    }
     vectorUnary(vu0, dest, vt, vs, [fraction](u32 word) {
         const u32 value = single::convertFromInt32(static_cast<s32>(word));
         if (fraction == 0) {
@@ -321,6 +423,13 @@ inline void vitof(Vu& vu0, u32 dest, u32 vt, u32 vs, s32 fraction) {
 }
 
 inline void vftoi(Vu& vu0, u32 dest, u32 vt, u32 vs, s32 fraction) {
+    if constexpr (host::kHasFloatUnit) {
+        const Reg128 source = vu0.readVf(vs);
+        u32 out[4];
+        host::convertToIntLanes(reinterpret_cast<const u32*>(&source), out, fraction);
+        vu0.writeVf(vt, dest, out);
+        return;
+    }
     vectorUnary(vu0, dest, vt, vs, [fraction](u32 word) {
         const u32 scaled =
             fraction == 0 ? word
@@ -349,9 +458,10 @@ inline u32 getDataAddress(u32 pointer) {
     return kVu0DataBase + (pointer * 16u) % kVu0MemorySize;
 }
 
-// Both units run these, so the window they address is the caller's to say.
+// Both units run these, so the window they address is the caller's to say. Both
+// sizes are powers of two, so the wrap is a mask.
 inline u32 getIntegerAddress(const Vu& vu, u32 vis, u32 base, u32 size, s32 offset) {
-    return base + ((vu.readVi(vis) + static_cast<u32>(offset)) * 16u) % size;
+    return base + (((vu.readVi(vis) + static_cast<u32>(offset)) * 16u) & (size - 1));
 }
 
 // The field is encoded into one lane rather than picked apart, so several bits
@@ -455,10 +565,25 @@ inline void vclip(Vu& vu0, u32 vs, u32 vt) {
 
 constexpr u32 kOuterProductDest = 0xEu;
 
+// Lane i multiplies a's next lane by b's one after, so the rotated operands
+// make it a plain multiply of lanes.
+inline Reg128 rotateLanes(const Reg128& value, s32 by) {
+    return lanes(value.word(by % 3), value.word((by + 1) % 3), value.word((by + 2) % 3), 0);
+}
+
 inline void vopmula(Vu& vu0, u32 dest, u32 vs, u32 vt) {
     const Reg128 a = vu0.readVf(vs);
     const Reg128 b = vu0.readVf(vt);
+    const u32 written = dest & kOuterProductDest;
+    const Reg128 x = rotateLanes(a, 1);
+    const Reg128 y = rotateLanes(b, 2);
     u32 out[4]{};
+    computeLanes<VuKind::Mul>(vu0, written, x, y, out);
+    if (setPlainFlags<VuKind::Mul>(vu0, written, x, y, out)) {
+        const bool saturated[4]{};
+        vu0.writeAcc(written, out, saturated);
+        return;
+    }
     u32 flags[4]{};
     bool saturated[4]{};
     for (s32 i = 0; i < 3; ++i) {
@@ -467,7 +592,6 @@ inline void vopmula(Vu& vu0, u32 dest, u32 vs, u32 vt) {
         flags[i] = getRangeFlags(rounded);
         saturated[i] = rounded.overflow;
     }
-    const u32 written = dest & kOuterProductDest;
     vu0.setFlags(written, out, flags);
     vu0.writeAcc(written, out, saturated);
 }
@@ -475,9 +599,16 @@ inline void vopmsub(Vu& vu0, u32 dest, u32 vd, u32 vs, u32 vt) {
     const Reg128 a = vu0.readVf(vs);
     const Reg128 b = vu0.readVf(vt);
     const u32 written = dest & kOuterProductDest;
+    const Reg128 x = rotateLanes(a, 1);
+    const Reg128 y = rotateLanes(b, 2);
+    u32 out[4]{};
+    computeLanes<VuKind::Msub>(vu0, written, x, y, out);
+    if (setPlainFlags<VuKind::Msub>(vu0, written, x, y, out)) {
+        vu0.writeVf(vd, written, out);
+        return;
+    }
     u32 product[4]{};
     u32 productFlags[4]{};
-    u32 out[4]{};
     u32 flags[4]{};
     for (s32 i = 0; i < 3; ++i) {
         const single::Rounded multiplied =

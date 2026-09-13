@@ -297,6 +297,12 @@ UEE_NOINLINE inline u64 computeBoothProduct(u32 a, u32 b, u64 exact) {
     return exact - ((low ^ static_cast<u32>(exact)) & 0x8000u);
 }
 
+// A borrow out of bit 15 only reaches the result when everything between is
+// zero, and a second operand with no low bits recodes to no digits at all.
+inline bool canBorrowLowBit(u32 b, u64 exact) {
+    return (exact & 0x7FFFFFu) < 0x8000u && (b & 0xFFFFu) != 0;
+}
+
 // The unit truncates 48 bits back to 24. The exponent is left unbounded so a
 // caller can accumulate before the range check, which is what madd.s does.
 inline Parts multiplyParts(Parts a, Parts b) {
@@ -304,11 +310,9 @@ inline Parts multiplyParts(Parts a, Parts b) {
         return {a.sign ^ b.sign, 0, 0};
     }
     const u64 exact = static_cast<u64>(a.significand) * b.significand;
-    // A borrow out of bit 15 only reaches the result when everything between is
-    // zero, so the tree is worth running for nothing else.
-    const u64 wide = (exact & 0x7FFFFFu) >= 0x8000u
-                         ? exact
-                         : computeBoothProduct(a.significand, b.significand, exact);
+    const u64 wide = canBorrowLowBit(b.significand, exact)
+                         ? computeBoothProduct(a.significand, b.significand, exact)
+                         : exact;
     const bool carried = (wide >> 47) != 0;
     const u32 significand = static_cast<u32>(wide >> (carried ? 24 : 23));
     return {a.sign ^ b.sign, a.exponent + b.exponent - 127 + (carried ? 1 : 0), significand};
