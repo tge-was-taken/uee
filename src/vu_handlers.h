@@ -175,6 +175,16 @@ inline u32 getSaturatedLanes(const Vu& vu0) {
     return lanes;
 }
 
+// The MAC register and the live status bits when nothing underflowed or
+// overflowed: only which lanes are zero and which are negative.
+inline void writeZeroAndSignFlags(Vu& vu0, u32 lanes, const host::ResultLanes& result) {
+    const u32 zeros = result.zero & lanes;
+    const u32 signs = result.sign & lanes;
+    vu0.vi[Vu::kMac] = kLaneOrder[zeros] | static_cast<u32>(kLaneOrder[signs]) << 4;
+    const u32 live = (zeros != 0 ? 1u : 0u) | (signs != 0 ? 2u : 0u);
+    vu0.vi[Vu::kStatus] = (vu0.vi[Vu::kStatus] & ~0xFu) | live | (live << 6);
+}
+
 // Most results are plain: no lane saturated, out of range or a zero that could
 // have underflowed, so the MAC register holds only zeros and signs. False, with
 // nothing set, for any other.
@@ -209,11 +219,7 @@ inline bool setPlainFlags(Vu& vu0, u32 dest, const Reg128& a, const Reg128& b,
                            ((product.sign & lanes) != 0 ? 2u : 0u);
         vu0.vi[Vu::kStatus] |= sticky << 6;
     }
-    const u32 zeros = result.zero & lanes;
-    const u32 signs = result.sign & lanes;
-    vu0.vi[Vu::kMac] = kLaneOrder[zeros] | static_cast<u32>(kLaneOrder[signs]) << 4;
-    const u32 live = (zeros != 0 ? 1u : 0u) | (signs != 0 ? 2u : 0u);
-    vu0.vi[Vu::kStatus] = (vu0.vi[Vu::kStatus] & ~0xFu) | live | (live << 6);
+    writeZeroAndSignFlags(vu0, lanes, result);
     return true;
 }
 
@@ -299,6 +305,51 @@ inline void vectorOp(Vu& vu0, VuSource source, bool toAcc, u32 dest, u32 vd, u32
 template <VuKind kind, VuSource source, bool toAcc, u32 dest>
 UEE_FLATTEN UEE_NOINLINE void vectorOpFor(Vu& vu0, u32 vd, u32 vs, u32 vt) {
     vectorOp<kind>(vu0, source, toAcc, dest, vd, vs, vt);
+}
+
+// The fast mode, chosen at start up over exactness: the flags keep which lanes
+// are zero or negative, and underflow, overflow and the accumulator's
+// saturation go untracked.
+template <VuKind kind>
+inline void computeLanesFast(const Vu& vu0, const Reg128& a, const Reg128& b, u32 out[4]) {
+    const host::Lanes x{reinterpret_cast<const u32*>(&a)};
+    const host::Lanes y{reinterpret_cast<const u32*>(&b)};
+    if constexpr (kind == VuKind::Add) {
+        host::addLanesFast(x, y, out);
+    } else if constexpr (kind == VuKind::Sub) {
+        host::subLanesFast(x, y, out);
+    } else if constexpr (kind == VuKind::Mul) {
+        host::mulLanesFast(x, y, out);
+    } else {
+        const host::Lanes acc{reinterpret_cast<const u32*>(&vu0.acc)};
+        host::maddLanesFast(acc, x, y, out, kind == VuKind::Msub);
+    }
+}
+
+template <VuKind kind, bool toAcc>
+inline void writeFastResult(Vu& vu0, u32 dest, u32 vd, const u32 out[4]) {
+    writeZeroAndSignFlags(vu0, kLaneOrder[dest], host::getResultLanes(out));
+    if constexpr (toAcc) {
+        const bool saturated[4]{};
+        vu0.writeAcc(dest, out, saturated);
+    } else {
+        vu0.writeVf(vd, dest, out);
+    }
+}
+
+template <VuKind kind, VuSource source, bool toAcc, u32 dest>
+UEE_FLATTEN UEE_NOINLINE void vectorOpFast(Vu& vu0, u32 vd, u32 vs, u32 vt) {
+    if constexpr (!host::kHasFloatUnit || kind == VuKind::Max || kind == VuKind::Mini) {
+        vectorOp<kind>(vu0, source, toAcc, dest, vd, vs, vt);
+    } else {
+        const Reg128 a = vu0.readVf(vs);
+        const Reg128 read = vu0.readVf(vt);
+        const Reg128 b =
+            source == VuSource::Vt ? read : broadcastLane(readOperand(vu0, source, read, 0));
+        u32 out[4];
+        computeLanesFast<kind>(vu0, a, b, out);
+        writeFastResult<kind, toAcc>(vu0, dest, vd, out);
+    }
 }
 
 // The interpreter reads the kind out of the encoding, where emitted code names
@@ -547,6 +598,36 @@ inline Vu::Quotient computeVuInverseRoot(u32 a, u32 b) {
     return {clampVuResult(single::rsqrt(a, b)), negative, false};
 }
 
+// The fast mode's divider: the host's quotient and root, rounded toward zero
+// once rather than by the unit's digit recurrence. Nothing to divide by is
+// answered as the unit answers it.
+inline f32 getFastOperand(u32 bits) {
+    return host::clampToFinite(std::bit_cast<f32>(bits));
+}
+
+inline Vu::Quotient computeVuQuotientFast(u32 a, u32 b) {
+    if (!host::kHasFloatUnit || isZeroLane(b)) {
+        return computeVuQuotient(a, b);
+    }
+    return {std::bit_cast<u32>(getFastOperand(a) / getFastOperand(b)), false, false};
+}
+
+inline Vu::Quotient computeVuRootFast(u32 b) {
+    if (!host::kHasFloatUnit) {
+        return computeVuRoot(b);
+    }
+    return {std::bit_cast<u32>(std::sqrt(std::fabs(getFastOperand(b)))),
+            (b & single::kSignMask) != 0, false};
+}
+
+inline Vu::Quotient computeVuInverseRootFast(u32 a, u32 b) {
+    if (!host::kHasFloatUnit || isZeroLane(b)) {
+        return computeVuInverseRoot(a, b);
+    }
+    return {std::bit_cast<u32>(getFastOperand(a) / std::sqrt(std::fabs(getFastOperand(b)))),
+            (b & single::kSignMask) != 0, false};
+}
+
 inline void vdiv(Vu& vu0, u32 vs, u32 fsf, u32 vt, u32 ftf) {
     const Vu::Quotient q = computeVuQuotient(vu0.readVf(vs).word(static_cast<s32>(fsf)),
                               vu0.readVf(vt).word(static_cast<s32>(ftf)));
@@ -655,6 +736,28 @@ inline void vopmsub(Vu& vu0, u32 dest, u32 vd, u32 vs, u32 vt) {
     vu0.addSticky(written, product, productFlags);
     vu0.setFlags(written, out, flags);
     vu0.writeVf(vd, written, out);
+}
+
+inline void vopmulaFast(Vu& vu0, u32 dest, u32 vs, u32 vt) {
+    if (!host::kHasFloatUnit) {
+        vopmula(vu0, dest, vs, vt);
+        return;
+    }
+    u32 out[4];
+    computeLanesFast<VuKind::Mul>(vu0, rotateLanes(vu0.readVf(vs), 1),
+                                  rotateLanes(vu0.readVf(vt), 2), out);
+    writeFastResult<VuKind::Mul, true>(vu0, dest & kOuterProductDest, 0, out);
+}
+
+inline void vopmsubFast(Vu& vu0, u32 dest, u32 vd, u32 vs, u32 vt) {
+    if (!host::kHasFloatUnit) {
+        vopmsub(vu0, dest, vd, vs, vt);
+        return;
+    }
+    u32 out[4];
+    computeLanesFast<VuKind::Msub>(vu0, rotateLanes(vu0.readVf(vs), 1),
+                                   rotateLanes(vu0.readVf(vt), 2), out);
+    writeFastResult<VuKind::Msub, false>(vu0, dest & kOuterProductDest, vd, out);
 }
 
 // The microprogram runs to completion here, so a guest that polls for the unit

@@ -5,6 +5,7 @@
 #include "single.h"
 #include "types.h"
 
+#include <algorithm>
 #include <bit>
 #include <optional>
 
@@ -192,7 +193,8 @@ inline BoothDigit computeBoothDigit(Lanes a, Lanes b) {
     value = arch::flipBits(value, arch::maskWith(negate, Lanes::broadcast(~0u << (place * 2))));
     const Lanes used =
         arch::maskWith(arch::greaterThanSigned(test, zero), arch::greaterThanSigned(seven, test));
-    return {arch::maskWith(value, used), arch::maskWith(negate, Lanes::broadcast(1u << (place * 2)))};
+    return {arch::maskWith(value, used),
+            arch::maskWith(negate, Lanes::broadcast(1u << (place * 2)))};
 }
 
 struct CarrySave {
@@ -216,8 +218,8 @@ inline Lanes getBoothBorrows(Lanes a, Lanes b) {
     const CarrySave t0 = addThree(d[1].data, d[2].data, d[3].data);
     CarrySave t1 = addThree(arch::clearBits(d[4].data, Lanes::broadcast(0x7FF)),
                             arch::clearBits(d[5].data, Lanes::broadcast(0xFFF)), d[6].data);
-    t1.carry = arch::either(t1.carry, arch::either(d[6].negate,
-                                                   arch::maskWith(d[5].data, Lanes::broadcast(0x800))));
+    t1.carry = arch::either(
+        t1.carry, arch::either(d[6].negate, arch::maskWith(d[5].data, Lanes::broadcast(0x800))));
     const Lanes d7 = arch::either(
         d[7].data,
         arch::addEach(arch::maskWith(d[5].data, Lanes::broadcast(0x400)), d[5].negate));
@@ -245,13 +247,16 @@ UEE_NOINLINE inline Lanes lowerBorrowedLanes(Lanes a, Lanes b, Lanes product, La
     const Lanes carried = arch::equalTo(
         product.exponents(),
         arch::subtractEach(arch::addEach(a.exponents(), b.exponents()), Lanes::broadcast(126)));
-    const Lanes bit23Clear = arch::equalTo(arch::maskWith(arch::multiplyLowEach(sa, sb), implicit), zero);
+    const Lanes bit23Clear =
+        arch::equalTo(arch::maskWith(arch::multiplyLowEach(sa, sb), implicit), zero);
     const Lanes lowered = arch::maskWith(
         arch::maskWith(candidates, getBoothBorrows(sa, sb)),
-        arch::maskWith(arch::flipBits(arch::equalTo(product.exponents(), zero), Lanes::broadcast(~0u)),
-                       arch::either(arch::flipBits(carried, Lanes::broadcast(~0u)), bit23Clear)));
+        arch::maskWith(
+            arch::flipBits(arch::equalTo(product.exponents(), zero), Lanes::broadcast(~0u)),
+            arch::either(arch::flipBits(carried, Lanes::broadcast(~0u)), bit23Clear)));
     const Lanes result = arch::subtractEach(product, arch::maskWith(lowered, Lanes::broadcast(1)));
-    refused = arch::either(refused, arch::maskWith(lowered, arch::equalTo(result.exponents(), zero)));
+    refused =
+        arch::either(refused, arch::maskWith(lowered, arch::equalTo(result.exponents(), zero)));
     return result;
 }
 
@@ -379,6 +384,39 @@ inline u32 maddLanes(Lanes acc, Lanes a, Lanes b, u32 out[4], bool subtract, u32
                                     arch::either(isAboveCeiling(acc), isAboveCeiling(sum))));
 }
 
+// The fast mode: IEEE arithmetic on the host, rounding toward zero as the unit
+// does, without its guard bit or the multiplier's borrow. An exponent of 255 is
+// an ordinary large number on the unit and infinity on the host, so operands
+// are held to the largest finite value; a sum or product that overflows stops
+// there by itself when rounding toward zero.
+inline Lanes clampToFinite(Lanes value) {
+    return arch::either(arch::maskWith(value, Lanes::broadcast(kSignBit)),
+                        arch::minimumUnsigned(getMagnitudes(value), Lanes::broadcast(0x7F7FFFFFu)));
+}
+
+inline void addLanesFast(Lanes a, Lanes b, u32 out[4]) {
+    arch::addFloat(clampToFinite(a), clampToFinite(b)).store(out);
+}
+
+inline void subLanesFast(Lanes a, Lanes b, u32 out[4]) {
+    arch::subtractFloat(clampToFinite(a), clampToFinite(b)).store(out);
+}
+
+inline void mulLanesFast(Lanes a, Lanes b, u32 out[4]) {
+    arch::multiplyFloat(clampToFinite(a), clampToFinite(b)).store(out);
+}
+
+inline void maddLanesFast(Lanes acc, Lanes a, Lanes b, u32 out[4], bool subtract) {
+    const Lanes product = arch::multiplyFloat(clampToFinite(a), clampToFinite(b));
+    const Lanes base = clampToFinite(acc);
+    (subtract ? arch::subtractFloat(base, product) : arch::addFloat(base, product)).store(out);
+}
+
+inline f32 clampToFinite(f32 value) {
+    const u32 bits = std::bit_cast<u32>(value);
+    return std::bit_cast<f32>((bits & kSignBit) | std::min(bits & 0x7FFFFFFFu, 0x7F7FFFFFu));
+}
+
 #else
 
 inline void configureHostFloat() {}
@@ -394,6 +432,13 @@ inline u32 mulLanes(Lanes, Lanes, u32*, u32) { return 0; }
 inline void convertFromIntLanes(const u32*, u32*, s32) {}
 inline void convertToIntLanes(const u32*, u32*, s32) {}
 inline u32 maddLanes(Lanes, Lanes, Lanes, u32*, bool, u32) { return 0; }
+
+// Never reached: without the host unit the fast mode runs the exact path.
+inline void addLanesFast(Lanes, Lanes, u32*) {}
+inline void subLanesFast(Lanes, Lanes, u32*) {}
+inline void mulLanesFast(Lanes, Lanes, u32*) {}
+inline void maddLanesFast(Lanes, Lanes, Lanes, u32*, bool) {}
+inline f32 clampToFinite(f32 value) { return value; }
 
 struct ResultLanes {
     u32 zero;

@@ -21,12 +21,13 @@
 #ifdef UEE_VU_PROGRAMS
 namespace uee {
 extern const std::span<const TranslatedVuProgram> translatedVuPrograms;
+extern const std::span<const TranslatedVuProgram> translatedFastVuPrograms;
 }
-std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms() {
-    return uee::translatedVuPrograms;
+std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms(bool fast) {
+    return fast ? uee::translatedFastVuPrograms : uee::translatedVuPrograms;
 }
 #else
-std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms() {
+std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms(bool) {
     return {};
 }
 #endif
@@ -96,15 +97,18 @@ Totals replay(const VuCapture& capture, VuPrograms& programs, Memory& memory, Gi
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        spdlog::error("usage: {} <capture> [--interpret] [--repeat <n>]", argv[0]);
+        spdlog::error("usage: {} <capture> [--interpret | --fast] [--repeat <n>]", argv[0]);
         return 2;
     }
     bool interpret = false;
+    bool fast = false;
     u32 repeat = 5;
     for (int i = 2; i < argc; ++i) {
         const std::string_view argument = argv[i];
         if (argument == "--interpret") {
             interpret = true;
+        } else if (argument == "--fast") {
+            fast = true;
         } else if (argument == "--repeat" && i + 1 < argc) {
             repeat = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
         } else {
@@ -123,7 +127,7 @@ int main(int argc, char** argv) {
     Gif gif;
     gif.attach(memory, gs);
     VuPrograms programs{interpret ? std::span<const TranslatedVuProgram>{}
-                                  : getTranslatedVuPrograms(),
+                                  : getTranslatedVuPrograms(fast),
                         nullptr, nullptr, false};
 
     // The first pass checks every result; the rest only time.
@@ -135,8 +139,9 @@ int main(int argc, char** argv) {
         best = std::min(best, totals.elapsed);
     }
     const u64 runs = capture.getRuns().size();
+    const char* mode = interpret ? "interpreted" : (fast ? "fast" : "translated");
     spdlog::info("{} runs, {}: best pass {:.2f} ms, {:.0f} ns per run, {} ended differently",
-                 runs, interpret ? "interpreted" : "translated", best.count() / 1e6,
+                 runs, mode, best.count() / 1e6,
                  runs == 0 ? 0.0 : static_cast<double>(best.count()) / static_cast<double>(runs),
                  mismatches);
     return mismatches == 0 ? 0 : 1;

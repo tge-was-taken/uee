@@ -46,12 +46,13 @@ constexpr uee::FunctionRunner kTranslated = nullptr;
 #ifdef UEE_VU_PROGRAMS
 namespace uee {
 extern const std::span<const TranslatedVuProgram> translatedVuPrograms;
+extern const std::span<const TranslatedVuProgram> translatedFastVuPrograms;
 }
-std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms() {
-    return uee::translatedVuPrograms;
+std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms(bool fast) {
+    return fast ? uee::translatedFastVuPrograms : uee::translatedVuPrograms;
 }
 #else
-std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms() {
+std::span<const uee::TranslatedVuProgram> getTranslatedVuPrograms(bool) {
     return {};
 }
 #endif
@@ -173,12 +174,14 @@ public:
             logger.fatal("cannot open a window: {}", SDL_GetError());
             return false;
         }
+        mTitle = title;
+        mRateStart = std::chrono::steady_clock::now();
         // No renderer yet: one binds a graphics context to the window, and a
         // renderer that draws into the window itself must be the only one.
         return true;
     }
 
-    void close() {
+    ~Window() override {
         SDL_DestroyRenderer(mRenderer);
         SDL_DestroyWindow(mWindow);
         SDL_Quit();
@@ -257,6 +260,20 @@ public:
         }
     }
 
+    void countField() {
+        ++mRateFields;
+        const auto now = std::chrono::steady_clock::now();
+        const std::chrono::duration<double> elapsed = now - mRateStart;
+        if (elapsed < std::chrono::seconds(1)) {
+            return;
+        }
+        const double rate = mRateFields / elapsed.count();
+        SDL_SetWindowTitle(mWindow, std::format("{} ({:.1f} fields/s)", mTitle, rate).c_str());
+        logger.trace("{:.1f} fields/s", rate);
+        mRateStart = now;
+        mRateFields = 0;
+    }
+
     bool takeResize() {
         const bool resized = mResized;
         mResized = false;
@@ -286,6 +303,9 @@ public:
 private:
     u16 mRepeated = 0;
     u32 mPolls = 0;
+    std::string mTitle;
+    std::chrono::steady_clock::time_point mRateStart;
+    u32 mRateFields = 0;
     SDL_Window* mWindow = nullptr;
     SDL_Renderer* mRenderer = nullptr;
     SDL_Texture* mTexture = nullptr;
@@ -298,9 +318,9 @@ private:
 // The registers are kept here because the unit reads them while it draws.
 class Graphics : public uee::GsHandler {
 public:
-    Graphics(GsLibrary& gs, Window& window, int renderer,
+    Graphics(GsLibrary& gs, Window& window, int renderer, int threads,
              std::string resources, std::string frameDirectory)
-        : mGs(gs), mWindow(window), mRenderer(renderer),
+        : mGs(gs), mWindow(window), mRenderer(renderer), mThreads(threads),
           mResources(std::move(resources)), mFrameDirectory(std::move(frameDirectory)) {}
 
     ~Graphics() override {
@@ -316,7 +336,7 @@ public:
         const BorrowedWindow window = mWindow.getBorrowedWindow();
         const bool presents = mRenderer != 0;
         mOpen = mGs.open(mRegisters.data(), mRenderer, presents ? &window : nullptr,
-                         mResources.empty() ? nullptr : mResources.c_str(), 0) != 0;
+                         mResources.empty() ? nullptr : mResources.c_str(), mThreads) != 0;
         mPresents = mOpen && presents;
         if (!mOpen) {
             logger.fatal("the renderer did not open");
@@ -345,6 +365,7 @@ public:
                 std::format("{}/field{:05d}.png", mFrameDirectory, mFields).c_str());
         }
         ++mFields;
+        mWindow.countField();
         if (mFieldHook) {
             mFieldHook(mFields);
         }
@@ -360,6 +381,7 @@ private:
     GsLibrary& mGs;
     Window& mWindow;
     int mRenderer = 0;
+    int mThreads = 0;
     bool mPresents = false;
     std::string mResources;
     std::string mFrameDirectory;
@@ -427,7 +449,13 @@ int main(int argc, char** argv) {
 
     const char* frames = std::getenv("UEE_GS_FRAMES");
     const char* resources = std::getenv("UEE_PCSX2_RESOURCES");
-    Graphics graphics(gs, window, renderer, resources == nullptr ? "" : resources,
+    // Threads the software renderer rasterizes on besides the one that emulates;
+    // with none, drawing shares the emulation thread. PCSX2's default is 2.
+    int threads = 2;
+    if (const char* count = std::getenv("UEE_GS_THREADS")) {
+        threads = std::atoi(count);
+    }
+    Graphics graphics(gs, window, renderer, threads, resources == nullptr ? "" : resources,
                       frames == nullptr ? "" : frames);
     std::optional<uee::GsCaptureWriter> capture;
     std::optional<SplitGs> both;
@@ -460,6 +488,8 @@ int main(int argc, char** argv) {
     uee::VuProgramLog vuLog;
     vuLog.load(vuManifest);
     const bool vuInterpreted = std::getenv("UEE_VU_INTERPRET") != nullptr;
+    // Speed over exactness: host float arithmetic in translated programs.
+    const bool vuFast = std::getenv("UEE_VU_FAST") != nullptr;
     // The runs of a stretch of fields, whole, for bench_vu to replay.
     const char* capturePath = std::getenv("UEE_VU_CAPTURE");
     std::optional<uee::VuCapture> vuCapture;
@@ -482,9 +512,12 @@ int main(int argc, char** argv) {
             }
         });
     }
-    uee::VuPrograms vuPrograms{
-        vuInterpreted ? std::span<const uee::TranslatedVuProgram>{} : getTranslatedVuPrograms(),
-        &vuLog, vuCapture ? &*vuCapture : nullptr, std::getenv("UEE_VU_CHECK") != nullptr};
+    std::span<const uee::TranslatedVuProgram> vuTranslated;
+    if (!vuInterpreted) {
+        vuTranslated = getTranslatedVuPrograms(vuFast);
+    }
+    uee::VuPrograms vuPrograms{vuTranslated, &vuLog, vuCapture ? &*vuCapture : nullptr,
+                               std::getenv("UEE_VU_CHECK") != nullptr};
     kernel.attachVuPrograms(&vuPrograms);
 
     // Without a sink the game's sceMpegGetPicture drives an IPU that cannot
@@ -510,7 +543,5 @@ int main(int argc, char** argv) {
     const uee::Stop stop = uee::run(machine, limit);
     logger.info("{} after {} fields", uee::describe(stop), graphics.getFieldCount());
     vuLog.save(vuManifest);
-
-    window.close();
     return 0;
 }

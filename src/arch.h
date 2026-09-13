@@ -103,9 +103,17 @@ inline Lanes truncateToInt(Lanes a) {
     return Lanes(_mm_cvttps_epi32(_mm_castsi128_ps(a.raw())));
 }
 
+inline Lanes minimumUnsigned(Lanes a, Lanes b) {
+    return Lanes(_mm_min_epu32(a.raw(), b.raw()));
+}
+
 inline Lanes addFloat(Lanes a, Lanes b) {
     return Lanes(_mm_castps_si128(
         _mm_add_ps(_mm_castsi128_ps(a.raw()), _mm_castsi128_ps(b.raw()))));
+}
+inline Lanes subtractFloat(Lanes a, Lanes b) {
+    return Lanes(_mm_castps_si128(
+        _mm_sub_ps(_mm_castsi128_ps(a.raw()), _mm_castsi128_ps(b.raw()))));
 }
 inline Lanes multiplyFloat(Lanes a, Lanes b) {
     return Lanes(_mm_castps_si128(

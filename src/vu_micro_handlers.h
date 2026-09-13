@@ -165,19 +165,36 @@ inline void setImmediate(VuMicro& m, u32 value) {
     m.state.vi[Vu::kI] = value;
 }
 
+// Translated code names its unit, which folds away the checks that depend on
+// it; the interpreter leaves kAnyUnit and reads it from the machine.
+constexpr u32 kAnyUnit = ~0u;
+
+template <u32 unit>
+inline u32 getUnit(const VuMicro& m) {
+    if constexpr (unit == kAnyUnit) {
+        return m.unit;
+    } else {
+        return unit;
+    }
+}
+
+template <u32 unit>
+inline u32 getDataSize(const VuMicro& m) {
+    return getUnit<unit>(m) == 0 ? kVu0MemorySize : kVu1MemorySize;
+}
+
+template <u32 unit = kAnyUnit>
 inline void loadQuadword(VuMicro& m, u32 dest, u32 vf, u32 quadword) {
-    if (!isAddressable(m.unit, quadword)) {
+    if (!isAddressable(getUnit<unit>(m), quadword)) {
         const u32 zero[4]{};
         m.state.writeVf(vf, dest, zero);
         return;
     }
-    const u32 offset = (quadword * 16u) & (m.getDataSize() - 1);
+    const u32 offset = (quadword * 16u) & (getDataSize<unit>(m) - 1);
     u32 lanes[4];
-    for (s32 i = 0; i < 4; ++i) {
-        lanes[i] = readWord(m.data, offset + 4u * static_cast<u32>(i));
-    }
+    std::memcpy(lanes, m.data.data() + offset, sizeof(lanes));
     m.state.writeVf(vf, dest, lanes);
-    if (m.unit == 0) {
+    if (getUnit<unit>(m) == 0) {
         for (s32 i = 0; i < 4; ++i) {
             if (Vu::writes(dest, i)) {
                 m.memory.keepVuWindowWord(lanes[i]);
@@ -186,11 +203,12 @@ inline void loadQuadword(VuMicro& m, u32 dest, u32 vf, u32 quadword) {
     }
 }
 
+template <u32 unit = kAnyUnit>
 inline void storeQuadword(VuMicro& m, u32 dest, u32 vf, u32 quadword) {
-    if (!isAddressable(m.unit, quadword)) {
+    if (!isAddressable(getUnit<unit>(m), quadword)) {
         return;
     }
-    const u32 offset = (quadword * 16u) & (m.getDataSize() - 1);
+    const u32 offset = (quadword * 16u) & (getDataSize<unit>(m) - 1);
     const Reg128 value = m.state.readVf(vf);
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i)) {
@@ -209,47 +227,56 @@ inline void branchTo(VuMicro& m, u32 target) {
     m.branching = true;
 }
 
+template <u32 unit = kAnyUnit>
 inline void lq(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset) {
-    loadQuadword(m, dest, ft, m.state.readVi(fs) + static_cast<u32>(offset));
+    loadQuadword<unit>(m, dest, ft, m.state.readVi(fs) + static_cast<u32>(offset));
 }
 
+template <u32 unit = kAnyUnit>
 inline void sq(VuMicro& m, u32 dest, u32 fs, u32 ft, s32 offset) {
-    storeQuadword(m, dest, fs, m.state.readVi(ft) + static_cast<u32>(offset));
+    storeQuadword<unit>(m, dest, fs, m.state.readVi(ft) + static_cast<u32>(offset));
 }
 
+template <u32 unit = kAnyUnit>
 inline void lqi(VuMicro& m, u32 dest, u32 ft, u32 fs) {
-    loadQuadword(m, dest, ft, m.state.readVi(fs));
+    loadQuadword<unit>(m, dest, ft, m.state.readVi(fs));
     m.state.writeVi(fs, m.state.readVi(fs) + 1);
 }
 
+template <u32 unit = kAnyUnit>
 inline void sqi(VuMicro& m, u32 dest, u32 fs, u32 ft) {
-    storeQuadword(m, dest, fs, m.state.readVi(ft));
+    storeQuadword<unit>(m, dest, fs, m.state.readVi(ft));
     m.state.writeVi(ft, m.state.readVi(ft) + 1);
 }
 
+template <u32 unit = kAnyUnit>
 inline void lqd(VuMicro& m, u32 dest, u32 ft, u32 fs) {
     m.state.writeVi(fs, m.state.readVi(fs) - 1);
-    loadQuadword(m, dest, ft, m.state.readVi(fs));
+    loadQuadword<unit>(m, dest, ft, m.state.readVi(fs));
 }
 
+template <u32 unit = kAnyUnit>
 inline void sqd(VuMicro& m, u32 dest, u32 fs, u32 ft) {
     m.state.writeVi(ft, m.state.readVi(ft) - 1);
-    storeQuadword(m, dest, fs, m.state.readVi(ft));
+    storeQuadword<unit>(m, dest, fs, m.state.readVi(ft));
 }
 
 // The unit's data memory held directly, as lq and sq reach it: going through
 // Memory searched its regions on every access.
+template <u32 unit>
 inline u32 getIntegerOffset(const VuMicro& m, u32 fs, s32 offset) {
-    return ((m.state.readVi(fs) + static_cast<u32>(offset)) * 16u) & (m.getDataSize() - 1);
+    return ((m.state.readVi(fs) + static_cast<u32>(offset)) * 16u) & (getDataSize<unit>(m) - 1);
 }
 
+template <u32 unit = kAnyUnit>
 inline void ilw(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset = 0) {
-    const u32 at = getIntegerOffset(m, fs, offset) + 4u * getIntegerLane(dest);
+    const u32 at = getIntegerOffset<unit>(m, fs, offset) + 4u * getIntegerLane(dest);
     m.state.writeVi(ft, readWord(m.data, at));
 }
 
+template <u32 unit = kAnyUnit>
 inline void isw(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset = 0) {
-    const u32 at = getIntegerOffset(m, fs, offset);
+    const u32 at = getIntegerOffset<unit>(m, fs, offset);
     const u32 value = m.state.readVi(ft);
     for (s32 i = 0; i < 4; ++i) {
         if (Vu::writes(dest, i)) {
@@ -259,12 +286,14 @@ inline void isw(VuMicro& m, u32 dest, u32 ft, u32 fs, s32 offset = 0) {
     }
 }
 
+template <u32 unit = kAnyUnit>
 inline void ilwr(VuMicro& m, u32 dest, u32 ft, u32 fs) {
-    ilw(m, dest, ft, fs);
+    ilw<unit>(m, dest, ft, fs);
 }
 
+template <u32 unit = kAnyUnit>
 inline void iswr(VuMicro& m, u32 dest, u32 ft, u32 fs) {
-    isw(m, dest, ft, fs);
+    isw<unit>(m, dest, ft, fs);
 }
 
 inline void fcget(VuMicro& m, u32 ft) {
@@ -427,13 +456,33 @@ inline void efu(VuMicro& m, u32 function, u32 fs, u32 lane) {
 
 inline void div(VuMicro& m, u32 fs, u32 fsLane, u32 ft, u32 ftLane) {
     issueResult(m, m.quotient,
-                takeQuotient(m, computeVuQuotient(readLane(m, fs, fsLane), readLane(m, ft, ftLane))),
+                takeQuotient(m, computeVuQuotient(readLane(m, fs, fsLane),
+                                                  readLane(m, ft, ftLane))),
                 VuMicro::kQuotientLatency);
 }
 
 inline void sqrt(VuMicro& m, u32 ft, u32 ftLane) {
     issueResult(m, m.quotient, takeQuotient(m, computeVuRoot(readLane(m, ft, ftLane))),
                 VuMicro::kQuotientLatency);
+}
+
+inline void divFast(VuMicro& m, u32 fs, u32 fsLane, u32 ft, u32 ftLane) {
+    issueResult(m, m.quotient,
+                takeQuotient(m, computeVuQuotientFast(readLane(m, fs, fsLane),
+                                                      readLane(m, ft, ftLane))),
+                VuMicro::kQuotientLatency);
+}
+
+inline void sqrtFast(VuMicro& m, u32 ft, u32 ftLane) {
+    issueResult(m, m.quotient, takeQuotient(m, computeVuRootFast(readLane(m, ft, ftLane))),
+                VuMicro::kQuotientLatency);
+}
+
+inline void rsqrtFast(VuMicro& m, u32 fs, u32 fsLane, u32 ft, u32 ftLane) {
+    issueResult(m, m.quotient,
+                takeQuotient(m, computeVuInverseRootFast(readLane(m, fs, fsLane),
+                                                         readLane(m, ft, ftLane))),
+                VuMicro::kRootLatency);
 }
 
 inline void rsqrt(VuMicro& m, u32 fs, u32 fsLane, u32 ft, u32 ftLane) {

@@ -86,6 +86,7 @@ private:
 
 struct ProgramSource {
     std::string name;
+    bool fast = false;
     // The full translation the name hands over to, when what ran is not all.
     std::string fallback;
     u32 unit;
@@ -300,12 +301,14 @@ VuPairTiming pruneTiming(const PairFlow& flow, u32 pc) {
     constexpr u32 kLanes = VuMicro::kFmacLatency;
     for (VuLanes* read : {&timing.upperReads[0], &timing.upperReads[1], &timing.lowerReads[0],
                           &timing.lowerReads[1]}) {
-        if (!flow.isBefore(pc, kLanes, [&](const VuPairTiming& t) { return writesLanes(t, *read); })) {
+        const auto writes = [&](const VuPairTiming& t) { return writesLanes(t, *read); };
+        if (!flow.isBefore(pc, kLanes, writes)) {
             *read = {};
         }
     }
     for (VuLanes* write : {&timing.upperWrite, &timing.lowerWrite}) {
-        if (!flow.isAfter(pc, kLanes, [&](const VuPairTiming& t) { return readsLanes(t, *write); })) {
+        const auto reads = [&](const VuPairTiming& t) { return readsLanes(t, *write); };
+        if (!flow.isAfter(pc, kLanes, reads)) {
             *write = {};
         }
     }
@@ -425,37 +428,45 @@ std::string_view getSourceName(VuSource source) {
 
 // Each form a program uses gets its own copy of the op, with the source, the
 // lanes and the target fixed.
-std::string emitVector(std::string_view kind, const VuUpper& u) {
-    return std::format("vectorOpFor<VuKind::{}, VuSource::{}, false, 0x{:x}>(s, {}, {}, {});",
-                       kind, getSourceName(u.source), u.dest, u.fd, u.fs, u.ft);
+std::string_view getVectorOp(bool fast) {
+    return fast ? "vectorOpFast" : "vectorOpFor";
 }
 
-std::string emitAccumulate(std::string_view kind, const VuUpper& u) {
-    return std::format("vectorOpFor<VuKind::{}, VuSource::{}, true, 0x{:x}>(s, 0, {}, {});", kind,
-                       getSourceName(u.source), u.dest, u.fs, u.ft);
+std::string emitVector(std::string_view kind, const VuUpper& u, bool fast) {
+    return std::format("{}<VuKind::{}, VuSource::{}, false, 0x{:x}>(s, {}, {}, {});",
+                       getVectorOp(fast), kind, getSourceName(u.source), u.dest, u.fd, u.fs,
+                       u.ft);
+}
+
+std::string emitAccumulate(std::string_view kind, const VuUpper& u, bool fast) {
+    return std::format("{}<VuKind::{}, VuSource::{}, true, 0x{:x}>(s, 0, {}, {});",
+                       getVectorOp(fast), kind, getSourceName(u.source), u.dest, u.fs, u.ft);
 }
 
 // The upper ops are the unit's register file work, so they take the state; the
 // lower ones reach the pipelines too, so they take the machine.
-std::string emitUpper(const VuUpper& u) {
+// The fast mode swaps the float arithmetic for the host's, see vectorOpFast.
+std::string emitUpper(const VuUpper& u, bool fast) {
     switch (u.op) {
         case VuUpperOp::None: return {};
-        case VuUpperOp::Add: return emitVector("Add", u);
-        case VuUpperOp::Sub: return emitVector("Sub", u);
-        case VuUpperOp::Madd: return emitVector("Madd", u);
-        case VuUpperOp::Msub: return emitVector("Msub", u);
-        case VuUpperOp::Max: return emitVector("Max", u);
-        case VuUpperOp::Mini: return emitVector("Mini", u);
-        case VuUpperOp::Mul: return emitVector("Mul", u);
-        case VuUpperOp::Adda: return emitAccumulate("Add", u);
-        case VuUpperOp::Suba: return emitAccumulate("Sub", u);
-        case VuUpperOp::Madda: return emitAccumulate("Madd", u);
-        case VuUpperOp::Msuba: return emitAccumulate("Msub", u);
-        case VuUpperOp::Mula: return emitAccumulate("Mul", u);
+        case VuUpperOp::Add: return emitVector("Add", u, fast);
+        case VuUpperOp::Sub: return emitVector("Sub", u, fast);
+        case VuUpperOp::Madd: return emitVector("Madd", u, fast);
+        case VuUpperOp::Msub: return emitVector("Msub", u, fast);
+        case VuUpperOp::Max: return emitVector("Max", u, fast);
+        case VuUpperOp::Mini: return emitVector("Mini", u, fast);
+        case VuUpperOp::Mul: return emitVector("Mul", u, fast);
+        case VuUpperOp::Adda: return emitAccumulate("Add", u, fast);
+        case VuUpperOp::Suba: return emitAccumulate("Sub", u, fast);
+        case VuUpperOp::Madda: return emitAccumulate("Madd", u, fast);
+        case VuUpperOp::Msuba: return emitAccumulate("Msub", u, fast);
+        case VuUpperOp::Mula: return emitAccumulate("Mul", u, fast);
         case VuUpperOp::Opmsub:
-            return std::format("vopmsub(s, 0x{:x}, {}, {}, {});", u.dest, u.fd, u.fs, u.ft);
+            return std::format("vopmsub{}(s, 0x{:x}, {}, {}, {});", fast ? "Fast" : "", u.dest,
+                               u.fd, u.fs, u.ft);
         case VuUpperOp::Opmula:
-            return std::format("vopmula(s, 0x{:x}, {}, {});", u.dest, u.fs, u.ft);
+            return std::format("vopmula{}(s, 0x{:x}, {}, {});", fast ? "Fast" : "", u.dest, u.fs,
+                               u.ft);
         case VuUpperOp::Itof:
             return std::format("vitof(s, 0x{:x}, {}, {}, {});", u.dest, u.ft, u.fs, u.shift);
         case VuUpperOp::Ftoi:
@@ -467,7 +478,9 @@ std::string emitUpper(const VuUpper& u) {
     return {};
 }
 
-std::string emitLower(u32 pc, const VuLower& l) {
+// Memory ops name the unit, which folds the checks that depend on it.
+std::string emitLower(u32 pc, const VuLower& l, bool fast, u32 unit) {
+    const std::string_view suffix = fast ? "Fast" : "";
     switch (l.op) {
         case VuLowerOp::None: return {};
         case VuLowerOp::Immediate: return std::format("setImmediate(m, 0x{:x});", l.immediate);
@@ -486,25 +499,35 @@ std::string emitLower(u32 pc, const VuLower& l) {
         case VuLowerOp::Function:
             return std::format("efu(m, 0x{:x}, {}, {});", l.function, l.fs, l.fsLane);
         case VuLowerOp::Div:
-            return std::format("div(m, {}, {}, {}, {});", l.fs, l.fsLane, l.ft, l.ftLane);
-        case VuLowerOp::Sqrt: return std::format("sqrt(m, {}, {});", l.ft, l.ftLane);
+            return std::format("div{}(m, {}, {}, {}, {});", suffix, l.fs, l.fsLane, l.ft,
+                               l.ftLane);
+        case VuLowerOp::Sqrt: return std::format("sqrt{}(m, {}, {});", suffix, l.ft, l.ftLane);
         case VuLowerOp::Rsqrt:
-            return std::format("rsqrt(m, {}, {}, {}, {});", l.fs, l.fsLane, l.ft, l.ftLane);
-        case VuLowerOp::Ilwr: return std::format("ilwr(m, 0x{:x}, {}, {});", l.dest, l.ft, l.fs);
-        case VuLowerOp::Iswr: return std::format("iswr(m, 0x{:x}, {}, {});", l.dest, l.ft, l.fs);
-        case VuLowerOp::Lqi: return std::format("lqi(m, 0x{:x}, {}, {});", l.dest, l.ft, l.fs);
-        case VuLowerOp::Sqi: return std::format("sqi(m, 0x{:x}, {}, {});", l.dest, l.fs, l.ft);
-        case VuLowerOp::Lqd: return std::format("lqd(m, 0x{:x}, {}, {});", l.dest, l.ft, l.fs);
-        case VuLowerOp::Sqd: return std::format("sqd(m, 0x{:x}, {}, {});", l.dest, l.fs, l.ft);
+            return std::format("rsqrt{}(m, {}, {}, {}, {});", suffix, l.fs, l.fsLane, l.ft,
+                               l.ftLane);
+        case VuLowerOp::Ilwr:
+            return std::format("ilwr<{}>(m, 0x{:x}, {}, {});", unit, l.dest, l.ft, l.fs);
+        case VuLowerOp::Iswr:
+            return std::format("iswr<{}>(m, 0x{:x}, {}, {});", unit, l.dest, l.ft, l.fs);
+        case VuLowerOp::Lqi:
+            return std::format("lqi<{}>(m, 0x{:x}, {}, {});", unit, l.dest, l.ft, l.fs);
+        case VuLowerOp::Sqi:
+            return std::format("sqi<{}>(m, 0x{:x}, {}, {});", unit, l.dest, l.fs, l.ft);
+        case VuLowerOp::Lqd:
+            return std::format("lqd<{}>(m, 0x{:x}, {}, {});", unit, l.dest, l.ft, l.fs);
+        case VuLowerOp::Sqd:
+            return std::format("sqd<{}>(m, 0x{:x}, {}, {});", unit, l.dest, l.fs, l.ft);
         case VuLowerOp::Iadd: return std::format("viadd(s, {}, {}, {});", l.fd, l.fs, l.ft);
         case VuLowerOp::Isub: return std::format("visub(s, {}, {}, {});", l.fd, l.fs, l.ft);
         case VuLowerOp::Iand: return std::format("viand(s, {}, {}, {});", l.fd, l.fs, l.ft);
         case VuLowerOp::Ior: return std::format("vior(s, {}, {}, {});", l.fd, l.fs, l.ft);
         case VuLowerOp::Iaddi: return std::format("viaddi(s, {}, {}, {});", l.ft, l.fs, l.offset);
         case VuLowerOp::Lq:
-            return std::format("lq(m, 0x{:x}, {}, {}, {});", l.dest, l.ft, l.fs, l.offset);
+            return std::format("lq<{}>(m, 0x{:x}, {}, {}, {});",
+                                   unit, l.dest, l.ft, l.fs, l.offset);
         case VuLowerOp::Sq:
-            return std::format("sq(m, 0x{:x}, {}, {}, {});", l.dest, l.fs, l.ft, l.offset);
+            return std::format("sq<{}>(m, 0x{:x}, {}, {}, {});",
+                                   unit, l.dest, l.fs, l.ft, l.offset);
         case VuLowerOp::Fcget: return std::format("fcget(m, {});", l.ft);
         case VuLowerOp::Fcset: return std::format("fcset(m, 0x{:x});", l.immediate);
         case VuLowerOp::Fcand: return std::format("fcand(m, 0x{:x});", l.immediate);
@@ -522,9 +545,11 @@ std::string emitLower(u32 pc, const VuLower& l) {
         case VuLowerOp::Isubiu:
             return std::format("isubiu(m, {}, {}, 0x{:x});", l.ft, l.fs, l.immediate);
         case VuLowerOp::Ilw:
-            return std::format("ilw(m, 0x{:x}, {}, {}, {});", l.dest, l.ft, l.fs, l.offset);
+            return std::format("ilw<{}>(m, 0x{:x}, {}, {}, {});",
+                                   unit, l.dest, l.ft, l.fs, l.offset);
         case VuLowerOp::Isw:
-            return std::format("isw(m, 0x{:x}, {}, {}, {});", l.dest, l.ft, l.fs, l.offset);
+            return std::format("isw<{}>(m, 0x{:x}, {}, {}, {});",
+                                   unit, l.dest, l.ft, l.fs, l.offset);
         case VuLowerOp::B: return std::format("b(m, 0x{:x}, {});", pc, l.offset);
         case VuLowerOp::Bal: return std::format("bal(m, 0x{:x}, {}, {});", pc, l.ft, l.offset);
         case VuLowerOp::Jr: return std::format("jr(m, {});", l.fs);
@@ -588,12 +613,12 @@ std::string emitMarks(const VuPairTiming& timing) {
 // upper one writes as it was before the pair, which only matters when the
 // lower op touches that register at all.
 std::string emitPair(u32 pc, u32 upperWord, u32 lowerWord, const VuPairTiming& checks,
-                     bool inOrder, bool records) {
+                     bool inOrder, bool records, bool fast, u32 unit) {
     const VuPairTiming timing = getPairTiming(upperWord, lowerWord);
     const VuUpper decodedUpper = decodeUpper(upperWord);
     const VuLower decodedLower = decodeLower(upperWord, lowerWord);
-    const std::string upper = emitUpper(decodedUpper);
-    const std::string lower = emitLower(pc, decodedLower);
+    const std::string upper = emitUpper(decodedUpper, fast);
+    const std::string lower = emitLower(pc, decodedLower, fast, unit);
     const std::string upperText = std::format("{:04x}  {}", pc, disassembleUpper(upperWord));
     const std::string lowerText = "      " + disassembleLower(pc, upperWord, lowerWord);
     const u32 target = getUpperDestination(upperWord);
@@ -678,6 +703,8 @@ bool readsCycle(const VuUpper& upper, const VuLower& lower, const VuPairTiming& 
 // over at the pair control left at.
 struct ProgramForm {
     std::string name;
+    u32 unit = 0;
+    bool fast = false;
     // Takes over where control leaves these pairs; the interpreter when empty.
     std::string fallback;
     // Pairs another function enters this one at, through a switch on the pc.
@@ -719,7 +746,8 @@ std::string emitProgram(const Discovery& discovery, u32 start, const ProgramForm
             piece += std::format("    advanceBy(m, {});\n", pending);
             pending = 0;
         }
-        piece += emitPair(pc, pair.upper, pair.lower, checks, inOrder, records);
+        piece += emitPair(pc, pair.upper, pair.lower, checks, inOrder, records, form.fast,
+                          form.unit);
         if (inOrder) {
             ++pending;
             const bool continues = included.contains(next) && i + 1 < order.size() &&
@@ -786,13 +814,77 @@ std::string emitProgram(const Discovery& discovery, u32 start, const ProgramForm
     }
     for (usize i = 0; i < order.size(); ++i) {
         if (labelled.contains(order[i])) {
-            body += std::format("\n{}:\n    if (++steps >= VuMicro::kRunawayStep) return stop(m);\n",
-                                label(order[i]));
+            body += std::format(
+                "\n{}:\n    if (++steps >= VuMicro::kRunawayStep) return stop(m);\n",
+                label(order[i]));
         }
         body += pieces[i];
     }
     body += "}\n\n";
     return body;
+}
+
+// The program a record's start runs, in the exact mode or the fast one.
+ProgramSource translateRecord(const VuProgramRecord& record, bool fast) {
+    ProgramSource program;
+    program.fast = fast;
+    program.unit = record.unit;
+    program.start = record.start;
+    program.ranges = record.getRanges();
+    program.hash = hashVuPairs(record.code, program.ranges);
+    program.name = std::format("vu{}_{:016x}_{:04x}{}", record.unit, program.hash, program.start,
+                               fast ? "_fast" : "");
+    const Discovery full(record, record.reached);
+    const ProgramForm alone{program.name, record.unit, fast, {}, {}};
+    std::set<u32> exits;
+    // A record that never ran its start has nothing to specialize.
+    if (!record.covered[record.start]) {
+        program.body = emitProgram(full, record.start, alone, exits);
+        return program;
+    }
+    const Discovery ran(record, record.covered);
+    const std::string fallback = program.name + "_full";
+    const ProgramForm specialized{program.name, record.unit, fast, fallback, {}};
+    program.body = emitProgram(ran, record.start, specialized, exits);
+    std::set<u32> entries;
+    for (const u32 exit : exits) {
+        if (record.reached[exit]) {
+            entries.insert(exit);
+        }
+    }
+    if (entries.empty()) {
+        // What ran is everything the start reaches.
+        program.body = emitProgram(ran, record.start, alone, exits);
+    } else {
+        std::set<u32> unused;
+        const ProgramForm complete{fallback, record.unit, fast, {}, entries};
+        program.body += emitProgram(full, record.start, complete, unused);
+        program.fallback = fallback;
+    }
+    return program;
+}
+
+std::string emitTable(std::string_view name, const std::vector<ProgramSource>& programs,
+                      bool fast) {
+    std::string table =
+        std::format("\nextern const std::span<const TranslatedVuProgram> {};\n", name);
+    std::vector<const ProgramSource*> chosen;
+    for (const ProgramSource& program : programs) {
+        if (program.fast == fast) {
+            chosen.push_back(&program);
+        }
+    }
+    // An empty log still builds, with nothing to look up.
+    if (chosen.empty()) {
+        return table + std::format("const std::span<const TranslatedVuProgram> {};\n", name);
+    }
+    table += std::format("static const TranslatedVuProgram {}Table[] = {{\n", name);
+    for (const ProgramSource* program : chosen) {
+        table += std::format("    {{{}, 0x{:x}, {}_pairs, 0x{:016x}, micro::{}}},\n", program->unit,
+                             program->start, program->name, program->hash, program->name);
+    }
+    return table + std::format("}};\nconst std::span<const TranslatedVuProgram> {}{{{}Table}};\n",
+                               name, name);
 }
 
 }  // namespace
@@ -801,38 +893,8 @@ TranslatedSource translateVuPrograms(const VuProgramLog& log, usize units,
                                      std::string_view declarationsHeader) {
     std::vector<ProgramSource> programs;
     for (const VuProgramRecord* record : log.getRecords()) {
-        ProgramSource program;
-        program.unit = record->unit;
-        program.start = record->start;
-        program.ranges = record->getRanges();
-        program.hash = hashVuPairs(record->code, program.ranges);
-        program.name = std::format("vu{}_{:016x}_{:04x}", record->unit, program.hash, program.start);
-        const Discovery full(*record, record->reached);
-        std::set<u32> exits;
-        // A record that never ran its start has nothing to specialize.
-        if (!record->covered[record->start]) {
-            program.body = emitProgram(full, record->start, {program.name, {}, {}}, exits);
-            programs.push_back(std::move(program));
-            continue;
-        }
-        const Discovery ran(*record, record->covered);
-        const std::string fallback = program.name + "_full";
-        program.body = emitProgram(ran, record->start, {program.name, fallback, {}}, exits);
-        std::set<u32> entries;
-        for (const u32 exit : exits) {
-            if (record->reached[exit]) {
-                entries.insert(exit);
-            }
-        }
-        if (entries.empty()) {
-            // What ran is everything the start reaches.
-            program.body = emitProgram(ran, record->start, {program.name, {}, {}}, exits);
-        } else {
-            std::set<u32> unused;
-            program.body += emitProgram(full, record->start, {fallback, {}, entries}, unused);
-            program.fallback = fallback;
-        }
-        programs.push_back(std::move(program));
+        programs.push_back(translateRecord(*record, false));
+        programs.push_back(translateRecord(*record, true));
     }
     // Two records can reach the same code; the first stands for both.
     std::sort(programs.begin(), programs.end(),
@@ -865,35 +927,35 @@ TranslatedSource translateVuPrograms(const VuProgramLog& log, usize units,
         }
         table += "};\n";
     }
-    table += "\nextern const std::span<const TranslatedVuProgram> translatedVuPrograms;\n";
-    // An empty log still builds, with nothing to look up.
-    if (programs.empty()) {
-        table += "const std::span<const TranslatedVuProgram> translatedVuPrograms;\n";
-    } else {
-        table += "static const TranslatedVuProgram kPrograms[] = {\n";
-        for (const ProgramSource& program : programs) {
-            table += std::format("    {{{}, 0x{:x}, {}_pairs, 0x{:016x}, micro::{}}},\n",
-                                 program.unit, program.start, program.name, program.hash,
-                                 program.name);
-        }
-        table += "};\nconst std::span<const TranslatedVuProgram> translatedVuPrograms{kPrograms};\n";
-    }
+    table += emitTable("translatedVuPrograms", programs, false);
+    table += emitTable("translatedFastVuPrograms", programs, true);
     table += "\n}  // namespace uee\n";
     out.units.push_back(std::move(table));
 
-    // The table goes in the first file; the functions share the rest by size.
+    // The table goes in the first file and the functions share the rest by
+    // size. Each mode keeps files of its own: mixed, the fast copies spread the
+    // exact ones through the binary and cost the exact mode 15%.
     const std::string open = std::format("#include \"{}\"\n\nnamespace uee::micro {{\n\n",
                                          declarationsHeader);
-    const usize files = std::max<usize>(units, 2) - 1;
-    usize total = 0;
-    for (const ProgramSource& program : programs) {
-        total += program.body.size();
-    }
+    const usize files = std::max<usize>(units, 3) - 1;
+    const usize exactFiles = (files + 1) / 2;
     std::vector<std::string> bodies(files, open);
-    usize written = 0;
-    for (const ProgramSource& program : programs) {
-        bodies[std::min(files - 1, written * files / std::max<usize>(total, 1))] += program.body;
-        written += program.body.size();
+    for (const bool fast : {false, true}) {
+        const usize first = fast ? exactFiles : 0;
+        const usize count = fast ? files - exactFiles : exactFiles;
+        usize total = 0;
+        for (const ProgramSource& program : programs) {
+            total += program.fast == fast ? program.body.size() : 0;
+        }
+        usize written = 0;
+        for (const ProgramSource& program : programs) {
+            if (program.fast != fast) {
+                continue;
+            }
+            const usize file = std::min(count - 1, written * count / std::max<usize>(total, 1));
+            bodies[first + file] += program.body;
+            written += program.body.size();
+        }
     }
     for (std::string& body : bodies) {
         out.units.push_back(body + "}  // namespace uee::micro\n");

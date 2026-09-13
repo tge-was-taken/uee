@@ -33,8 +33,8 @@ int main(int argc, char** argv) {
     usize units = 0;
     const auto [end, error] =
         std::from_chars(unitsText.data(), unitsText.data() + unitsText.size(), units);
-    if (error != std::errc{} || end != unitsText.data() + unitsText.size() || units < 2) {
-        spdlog::error("units must be a number of at least 2, not '{}'", unitsText);
+    if (error != std::errc{} || end != unitsText.data() + unitsText.size() || units < 3) {
+        spdlog::error("units must be a number of at least 3, not '{}'", unitsText);
         return 2;
     }
 
