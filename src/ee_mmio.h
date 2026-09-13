@@ -7,6 +7,7 @@
 #include "host.h"
 #include "interrupts.h"
 #include "ipu.h"
+#include "memory.h"
 #include "r5900.h"
 #include "mmio.h"
 #include "sbus.h"

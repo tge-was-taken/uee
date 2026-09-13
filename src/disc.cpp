@@ -341,7 +341,7 @@ std::FILE* FolderDisc::openFor(const Entry& entry) {
     if (mOpenFile != nullptr) {
         std::fclose(mOpenFile);
     }
-    mOpenFile = std::fopen(entry.path.c_str(), "rb");
+    mOpenFile = std::fopen(entry.path.string().c_str(), "rb");
     mOpenSector = mOpenFile == nullptr ? 0 : entry.sector;
     return mOpenFile;
 }

@@ -3,7 +3,8 @@
 #include "types.h"
 
 #include <spdlog/pattern_formatter.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
+// Windows builds of spdlog instantiate only the console sink, not this one.
+#include <spdlog/sinks/ansicolor_sink-inl.h>
 
 #include <cstdlib>
 #include <string>
@@ -58,7 +59,7 @@ spdlog::level::level_enum levelFor(const std::string& name) {
 // The guest's own output goes to stdout, so a test reading it sees none of this.
 std::shared_ptr<spdlog::sinks::sink> sharedSink() {
     static std::shared_ptr<spdlog::sinks::sink> sink =
-        std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+        std::make_shared<spdlog::sinks::ansicolor_stderr_sink_mt>();
     return sink;
 }
 
@@ -105,7 +106,7 @@ LoggerChannel::LoggerChannel(std::string name) {
 void configureLogging(LogContext source) {
     context() = std::move(source);
 
-    auto sink = std::static_pointer_cast<spdlog::sinks::stderr_color_sink_mt>(sharedSink());
+    auto sink = std::static_pointer_cast<spdlog::sinks::ansicolor_stderr_sink_mt>(sharedSink());
     sink->set_color(spdlog::level::trace, "\033[90m");
     sink->set_color(spdlog::level::debug, "\033[36m");
     sink->set_color(spdlog::level::info, "\033[32m");

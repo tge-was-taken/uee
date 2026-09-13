@@ -3,6 +3,7 @@
 #include "compiler.h"
 #include "types.h"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 

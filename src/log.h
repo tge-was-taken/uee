@@ -44,7 +44,8 @@ public:
     template <typename... Args>
     void stub(spdlog::format_string_t<Args...> format, Args&&... args) const {
         if (mLogger->should_log(spdlog::level::warn)) {
-            mLogger->warn("stub {}", std::vformat(format, std::make_format_args(args...)));
+            mLogger->warn("stub {}", std::vformat(spdlog::details::to_string_view(format),
+                                                   std::make_format_args(args...)));
         }
     }
 
