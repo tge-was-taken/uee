@@ -62,6 +62,7 @@ UEE_NOINLINE inline u32 multiplyAccumulateSoft(Fpu& fpu, u32 a, u32 b, bool subt
 inline u32 multiplyAccumulate(Fpu& fpu, u32 a, u32 b, bool subtract) {
     if (!fpu.accSaturated) {
         if (const std::optional<u32> fast = host::multiplyAdd(fpu.acc, a, b, subtract)) {
+            fpu.raise(0);
             return *fast;
         }
     }
