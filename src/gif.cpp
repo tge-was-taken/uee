@@ -1,6 +1,7 @@
 #include "gif.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "host.h"
 #include "memory.h"
@@ -97,12 +98,10 @@ void Gif::capture(u64 low, u64 high) {
         flushCapture();
         mCapturedPath = mActivePath;
     }
-    for (u32 shift = 0; shift < 64; shift += 8) {
-        mCaptured.push_back(static_cast<u8>(low >> shift));
-    }
-    for (u32 shift = 0; shift < 64; shift += 8) {
-        mCaptured.push_back(static_cast<u8>(high >> shift));
-    }
+    const usize at = mCaptured.size();
+    mCaptured.resize(at + 16);
+    std::memcpy(mCaptured.data() + at, &low, sizeof(low));
+    std::memcpy(mCaptured.data() + at + 8, &high, sizeof(high));
 }
 
 void Gif::flushCapture() {
