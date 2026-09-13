@@ -3,6 +3,7 @@
 #include "types.h"
 
 #include <optional>
+#include <span>
 
 namespace uee {
 
@@ -12,17 +13,7 @@ struct Vu;
 
 class Vif {
 public:
-    void attach(Memory& memory, Gif& gif, u32 unit, Vu* vu) {
-        mMemory = &memory;
-        mGif = &gif;
-        mUnit = unit;
-        mVu = vu;
-        // What the boot rom's own use of the units leaves in the registers a
-        // reset does not clear.
-        mItop = unit == 0 ? 0xA3u : 0u;
-        mTop = unit == 1 ? 0x1Cu : 0u;
-        mStatus = unit == 1 ? kBootMark : 0u;
-    }
+    void attach(Memory& memory, Gif& gif, u32 unit, Vu* vu);
 
     std::optional<u32> read(u32 address);
     bool write(u32 address, u32 value);
@@ -58,7 +49,8 @@ private:
     void drainMaskedQuadwords();
     void flushQuadword();
     void writeLane(u32 quadword, u32 lane, u32 value);
-    void writeMasked(u32 index, u32 lane, u32 value);
+    void writeMasked(u32 quadword, u32 lane, u32 value);
+    void writeWhole(u32 quadword);
     u32 offsetBy(u32 lane, u32 value);
     u32 getDestination(u32 index) const;
     u32 getCycleIndex(u32 index) const;
@@ -67,6 +59,9 @@ private:
     Gif* mGif = nullptr;
     Vu* mVu = nullptr;
     u32 mUnit = 0;
+    // Held directly, as the unit's own interpreter holds them.
+    std::span<u8> mMicro;
+    std::span<u8> mData;
 
     // The rom leaves the second unit having reached a mark.
     static constexpr u32 kBootMark = 1u << 6;

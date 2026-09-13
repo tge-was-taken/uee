@@ -3,6 +3,7 @@
 #include "log.h"
 
 #include <algorithm>
+#include <cstring>
 #include <format>
 #include <stdexcept>
 
@@ -14,6 +15,10 @@ namespace uee {
 namespace {
 
 LoggerChannel log("vif");
+
+void writeWord(std::span<u8> bytes, u32 offset, u32 value) {
+    std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
 
 constexpr u32 kRegisterSpan = 0x180;
 constexpr u32 kFifoSpan = 0x1000;
@@ -92,6 +97,20 @@ constexpr u32 getWidth(u32 format) {
 }
 
 }  // namespace
+
+void Vif::attach(Memory& memory, Gif& gif, u32 unit, Vu* vu) {
+    mMemory = &memory;
+    mGif = &gif;
+    mUnit = unit;
+    mVu = vu;
+    mMicro = memory.getRegion(getMicroBase(), getMicroSize());
+    mData = memory.getRegion(getMemoryBase(), getMemorySize());
+    // What the boot rom's own use of the units leaves in the registers a
+    // reset does not clear.
+    mItop = unit == 0 ? 0xA3u : 0u;
+    mTop = unit == 1 ? 0x1Cu : 0u;
+    mStatus = unit == 1 ? kBootMark : 0u;
+}
 
 u32 Vif::getRegisterBase() const { return mUnit == 0 ? 0x10003800u : 0x10003C00u; }
 u32 Vif::getFifoBase() const { return mUnit == 0 ? 0x10004000u : 0x10005000u; }
@@ -256,7 +275,8 @@ void Vif::consume(u32 word) {
 }
 
 void Vif::uploadMicro(u32 word) {
-    mMemory->write32(getMicroBase() + (mMicroWord % (getMicroSize() / 4u)) * 4u, word);
+    writeWord(mMicro, (mMicroWord % (getMicroSize() / 4u)) * 4u, word);
+    mMemory->keepVuWindowWord(word);
     ++mMicroWord;
     --mMicroWords;
     mNum = (mMicroWords + 1) / 2;
@@ -453,8 +473,13 @@ void Vif::beginUnpack(u32 code) {
 u32 Vif::getDestination(u32 index) const {
     const u32 cycle = mCycle & 0xFFu;
     const u32 write = (mCycle >> 8) & 0xFFu;
-    if (write == 0 || cycle < write) {
+    if (write == 0 || cycle <= write) {
         return mAddress + index;
+    }
+    // Vertex streams interleave one quadword a cycle, so that case skips the
+    // divide.
+    if (write == 1) {
+        return mAddress + index * cycle;
     }
     return mAddress + (index / write) * cycle + (index % write);
 }
@@ -522,8 +547,13 @@ void Vif::flushQuadword() {
         mFill[0] = mElement[0];
         mFill[1] = mElement[1];
     }
-    for (u32 lane = 0; lane < 4; ++lane) {
-        writeMasked(mWritten, lane, mElement[lane]);
+    const u32 destination = getDestination(mWritten);
+    if (!mMasked && mMode == 0) {
+        writeWhole(destination);
+    } else {
+        for (u32 lane = 0; lane < 4; ++lane) {
+            writeMasked(destination, lane, mElement[lane]);
+        }
     }
     mLane = 0;
     ++mWritten;
@@ -532,20 +562,29 @@ void Vif::flushQuadword() {
 }
 
 void Vif::writeLane(u32 quadword, u32 lane, u32 value) {
-    const u32 offset = (quadword % (getMemorySize() / 16u)) * 16u + lane * 4u;
-    mMemory->write32(getMemoryBase() + offset, value);
+    // Both memories are a power of two, so the wrap is a mask and not a divide.
+    const u32 offset = (quadword & (getMemorySize() / 16u - 1)) * 16u + lane * 4u;
+    writeWord(mData, offset, value);
+    mMemory->keepVuWindowWord(value);
 }
 
-void Vif::writeMasked(u32 index, u32 lane, u32 value) {
+// The lanes in order, so the window keeps the last one.
+void Vif::writeWhole(u32 quadword) {
+    const u32 offset = (quadword & (getMemorySize() / 16u - 1)) * 16u;
+    std::memcpy(mData.data() + offset, mElement, sizeof(mElement));
+    mMemory->keepVuWindowWord(mElement[3]);
+}
+
+void Vif::writeMasked(u32 quadword, u32 lane, u32 value) {
     if (!mMasked) {
-        writeLane(getDestination(index), lane, offsetBy(lane, value));
+        writeLane(quadword, lane, offsetBy(lane, value));
         return;
     }
-    const u32 cycle = getCycleIndex(index);
+    const u32 cycle = getCycleIndex(mWritten);
     switch ((mMask >> (cycle * 8u + lane * 2u)) & 3u) {
-        case 0: writeLane(getDestination(index), lane, offsetBy(lane, value)); return;
-        case 1: writeLane(getDestination(index), lane, mRow[lane]); return;
-        case 2: writeLane(getDestination(index), lane, mColumn[cycle]); return;
+        case 0: writeLane(quadword, lane, offsetBy(lane, value)); return;
+        case 1: writeLane(quadword, lane, mRow[lane]); return;
+        case 2: writeLane(quadword, lane, mColumn[cycle]); return;
         default: return;
     }
 }

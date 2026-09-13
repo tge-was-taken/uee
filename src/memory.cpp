@@ -1,6 +1,7 @@
 #include "memory.h"
 
 #include <bit>
+#include <format>
 #include <utility>
 
 static_assert(std::endian::native == std::endian::little,
@@ -170,6 +171,15 @@ void Memory::writeVirtual64(u32 address, u64 value) {
         return;
     }
     store(resolveAddress(address, 8), value);
+}
+
+std::span<u8> Memory::getRegion(u32 base, u32 size) {
+    const std::span<u8> bytes = regionAt(base);
+    if (bytes.size() != size) {
+        throw std::logic_error(std::format("expected a {} byte region at {:08x}, found {}", size,
+                                           base, bytes.size()));
+    }
+    return bytes;
 }
 
 Memory makeMainMemory() {

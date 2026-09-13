@@ -146,6 +146,9 @@ public:
         return {};
     }
 
+    // Throws unless a region of exactly that size starts there.
+    std::span<u8> getRegion(u32 base, u32 size);
+
     u8 readRam8(u32 address) const { return *ram(address); }
     u16 readRam16(u32 address) const { return loadAt<u16>(ram(address)); }
     u32 readRam32(u32 address) const { return loadAt<u32>(ram(address)); }
