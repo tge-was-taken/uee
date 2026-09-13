@@ -4,6 +4,7 @@
 #include "host.h"
 #include "interpreter.h"
 #include "kernel.h"
+#include "library.h"
 #include "log.h"
 #include "memory.h"
 #include "gs_capture.h"
@@ -31,8 +32,6 @@
 #include <span>
 #include <string>
 #include <vector>
-
-#include <dlfcn.h>
 
 #ifdef UEE_TRANSLATED_P3FES
 namespace uee {
@@ -110,9 +109,10 @@ struct BorrowedWindow {
 class GsLibrary {
 public:
     bool load(const char* path) {
-        mLibrary = dlopen(path, RTLD_NOW);
+        std::string error;
+        mLibrary = openLibrary(path, error);
         if (mLibrary == nullptr) {
-            logger.fatal("cannot load {}: {}", path, dlerror());
+            logger.fatal("cannot load {}: {}", path, error);
             return false;
         }
         open = findSymbol<int (*)(u8*, int, const BorrowedWindow*, const char*, int)>(
@@ -140,7 +140,7 @@ public:
 private:
     template <typename Function>
     Function findSymbol(const char* name) {
-        void* found = dlsym(mLibrary, name);
+        void* found = findLibrarySymbol(mLibrary, name);
         if (found == nullptr) {
             logger.fatal("the graphics library does not answer {}", name);
         }

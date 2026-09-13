@@ -6,7 +6,7 @@ if(NOT SDL3_FOUND)
     return()
 endif()
 
-add_executable(pcsx2-gs main.cpp)
+add_executable(pcsx2-gs main.cpp library.cpp)
 
 # The translated game, when the benchmark targets built one.
 if(TARGET translated_p3fes)
