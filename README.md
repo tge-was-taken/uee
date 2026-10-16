@@ -1,8 +1,11 @@
-# uee
+# µee
 
 A minimal PS2 runtime: it statically recompiles a PS2 game's code to C++, links
 it against a high level emulation of the console's kernel, and runs the result
 as a native program.
+
+Spelled `uee` where ASCII is required: the namespace, the CMake project and the
+`UEE_*` build options.
 
 **This is an experiment, not a product.** Almost all of the code was written by
 Claude (Claude Code) under my direction, as a long running exercise in how far
