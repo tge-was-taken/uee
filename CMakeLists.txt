@@ -24,6 +24,9 @@ if(WIN32)
 endif()
 
 include(FetchContent)
+# The fetched libraries link in statically. xxHash's own option would otherwise
+# turn BUILD_SHARED_LIBS on, and spdlog would follow on the next configure.
+set(BUILD_SHARED_LIBS OFF)
 set(SPDLOG_USE_STD_FORMAT ON CACHE BOOL "" FORCE)
 FetchContent_Declare(spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
@@ -564,5 +567,6 @@ else()
     message(STATUS "guest tests skipped: EE_GCC=${EE_GCC} PS2SDK=${PS2SDK}")
 endif()
 
+add_subdirectory(frontends/sdl)
 add_subdirectory(frontends/sky2hook)
 add_subdirectory(frontends/pcsx2-gs)
