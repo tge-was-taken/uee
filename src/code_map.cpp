@@ -200,7 +200,8 @@ void CodeMap::seedFromDataPointers() {
 void CodeMap::seedFromCodeConstants() {
     u32 upper[32] = {};
     bool haveUpper[32] = {};
-    bool endsBlock = false;
+    bool lastTransfers = false;
+    bool slotEnded = false;
     for (u32 pc = mProgram.codeStart; pc + 4 <= mProgram.codeEnd; pc += 4) {
         const std::optional<Instruction> insn = fetch(pc);
         if (!insn) {
@@ -208,7 +209,9 @@ void CodeMap::seedFromCodeConstants() {
         }
         const Op op = getOp(*insn);
         const bool transfers = getControlFlow(op, *insn, pc).flow != Flow::Next;
-        if (std::exchange(endsBlock, transfers)) {
+        // A delay slot still runs in the block its transfer ends, and a call
+        // often finishes its last argument there.
+        if (std::exchange(slotEnded, std::exchange(lastTransfers, transfers))) {
             std::fill(std::begin(haveUpper), std::end(haveUpper), false);
         }
         if (transfers) {
