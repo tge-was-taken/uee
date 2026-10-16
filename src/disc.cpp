@@ -49,6 +49,15 @@ const char* nameOf(const u8* bytes) {
     return reinterpret_cast<const char*>(bytes + sizeof(DirectoryRecord));
 }
 
+// An image runs past what a long reaches on Windows, where it is 32 bits.
+bool seekTo(std::FILE* file, u64 offset) {
+#ifdef _WIN32
+    return _fseeki64(file, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+    return fseeko(file, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+}
+
 // The guest asks with a device prefix and version suffix the disc does not have.
 std::vector<std::string> splitPath(const std::string& path) {
     const usize colon = path.find(':');
@@ -176,7 +185,7 @@ bool IsoDisc::read(u32 sector, u32 count, std::vector<u8>& out) {
         return false;
     }
     out.assign(static_cast<usize>(count) * kSectorBytes, 0);
-    if (std::fseek(mFile, static_cast<long>(sector) * kSectorBytes, SEEK_SET) != 0) {
+    if (!seekTo(mFile, static_cast<u64>(sector) * kSectorBytes)) {
         return false;
     }
     return std::fread(out.data(), 1, out.size(), mFile) == out.size();
@@ -362,8 +371,7 @@ bool FolderDisc::read(u32 sector, u32 count, std::vector<u8>& out) {
     }
     out.assign(static_cast<usize>(count) * kSectorBytes, 0);
 
-    const long at = static_cast<long>(sector - entry->sector) * kSectorBytes;
-    if (std::fseek(file, at, SEEK_SET) != 0) {
+    if (!seekTo(file, static_cast<u64>(sector - entry->sector) * kSectorBytes)) {
         return false;
     }
     std::fread(out.data(), 1, out.size(), file);
