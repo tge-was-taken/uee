@@ -57,6 +57,25 @@ public:
     virtual void vsync(u32 field, std::span<const u8> privilegedRegisters) = 0;
 };
 
+// The buttons as libpad reports them, the poll response's first data byte in the
+// high half.
+constexpr u16 kPadLeft = 0x8000;
+constexpr u16 kPadDown = 0x4000;
+constexpr u16 kPadRight = 0x2000;
+constexpr u16 kPadUp = 0x1000;
+constexpr u16 kPadStart = 0x0800;
+constexpr u16 kPadR3 = 0x0400;
+constexpr u16 kPadL3 = 0x0200;
+constexpr u16 kPadSelect = 0x0100;
+constexpr u16 kPadSquare = 0x0080;
+constexpr u16 kPadCross = 0x0040;
+constexpr u16 kPadCircle = 0x0020;
+constexpr u16 kPadTriangle = 0x0010;
+constexpr u16 kPadR1 = 0x0008;
+constexpr u16 kPadL1 = 0x0004;
+constexpr u16 kPadR2 = 0x0002;
+constexpr u16 kPadL2 = 0x0001;
+
 class PadSource {
 public:
     virtual ~PadSource() = default;
