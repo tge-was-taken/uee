@@ -97,6 +97,7 @@ public:
     void attachDevices(IopMmio& devices) { mDevices = &devices; }
     void advanceTime(u64 instructions);
     void advanceTimeTo(u64 cycles);
+    u64 getCycles() const { return mCycles; }
     std::optional<u64> nextDelay() const;
     std::vector<IopHandlerCall> takePendingHandlers();
     void raiseInterrupt(u32 line);

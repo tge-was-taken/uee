@@ -1398,7 +1398,7 @@ void Kernel::advanceClock() {
     // A reply lands on a later tick, so a guest that starts a transfer and then
     // waits on its semaphore blocks first, as it would against real hardware.
     mMmio.gs().advanceScanline();
-    mIop.advance(mIopBudgetPerHsync);
+    mIop.advance(kIopInstructionsPerHsync, mIopBudgetPerHsync);
     if (mSif.advance()) {
         log.trace("sif0 reply delivered");
         mMmio.interrupts().raiseDmac(dmac::kSif0);

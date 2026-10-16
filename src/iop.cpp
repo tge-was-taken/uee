@@ -282,8 +282,8 @@ void Iop::endVblank() {
     mKernel.raiseVblankEnd();
 }
 
-// Time moves with the instructions run, and jumps to the next deadline when
-// every thread waits, since the EE is waiting too. What waits on the EE ends it.
+// Runs for free: the EE's clock is what makes IOP time, so a server answers
+// without the clock moving, and a handler that sleeps waits for the next ticks.
 void Iop::runRequested() {
     if (mAdvancing) {
         return;
@@ -293,33 +293,29 @@ void Iop::runRequested() {
     for (u64 executed = 0; mKernel.hasUnansweredCalls() && executed < kInstructionLimit;) {
         const u64 before = mScheduler.getExecuted();
         const Stop stop = mScheduler.run(kCallSlice, IopScheduler::Skipping::Blocked);
-        const u64 ran = mScheduler.getExecuted() - before;
-        executed += ran;
-        mKernel.advanceTime(ran);
+        executed += mScheduler.getExecuted() - before;
         if (dispatchPendingHandlers() || stop.reason == StopReason::ReachedLimit) {
             continue;
         }
         if (stop.reason != StopReason::Deadlocked) {
             log.stub("iop request: {}", describe(stop));
-            break;
         }
-        const std::optional<u64> wake = mKernel.nextDelay();
-        if (!wake) {
-            break;
-        }
-        mKernel.advanceTimeTo(*wake);
+        break;
     }
     mAdvancing = false;
 }
 
 // A tick can land while a call is parked on a coroutine, and resuming it
-// again would run one thread twice.
-void Iop::advance(u64 instructions) {
+// again would run one thread twice. A module entry runs the clock on by itself
+// while the EE is parked, so a tick grants its cycles from wherever that left
+// it rather than from a target the devices would then wait out in silence.
+void Iop::advance(u64 cycles, u64 instructions) {
+    mClockTarget = std::max(mClockTarget, mKernel.getCycles()) + cycles;
     if (mAdvancing) {
         return;
     }
     mAdvancing = true;
-    mKernel.advanceTime(instructions);
+    mKernel.advanceTimeTo(mClockTarget);
     // The host thread is only the EE's way in. Leaving it runnable would hand
     // every slice straight back, since it sits on the address a call returns to.
     mKernel.exitHostThread();

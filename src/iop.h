@@ -52,7 +52,10 @@ public:
     void attachCard(CardStorage* card) { mMmio.attachCard(card); }
     void startVblank();
     void endVblank();
-    void advance(u64 instructions);
+    // Brings the IOP's clock cycles further along with the EE's and runs it for
+    // up to instructions.
+    void advance(u64 cycles, u64 instructions);
+    u64 getCycles() const { return mKernel.getCycles(); }
     // Runs what the EE just handed over for as long as a call waits on it, as
     // fast as it will go rather than on the EE's clock.
     void runRequested();
@@ -95,6 +98,8 @@ private:
     IopMachine mMachine{mInterpreter, mMemory, mKernel, mActive};
     IopScheduler mScheduler{mMachine, mSymbols, mWatched};
     bool mAdvancing = false;
+    // Where the EE's clock has taken the IOP's, in IOP cycles.
+    u64 mClockTarget = 0;
     // The thread entry of the servers answered here: one call into sceSifRpcLoop.
     u32 mRpcLoopEntry = 0;
     u64 mHandlersRun = 0;
