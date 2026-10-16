@@ -21,8 +21,10 @@ set_directory_properties(PROPERTIES COMPILE_OPTIONS "")
 find_package(SDL3 3.2 REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenGL REQUIRED)
-find_package(X11 REQUIRED)
 find_package(Threads REQUIRED)
+# Header-only, and on Linux they come with the system.
+find_path(GLM_INCLUDE_DIR glm/glm.hpp REQUIRED)
+find_path(KHR_INCLUDE_DIR KHR/khrplatform.h REQUIRED)
 
 set(PORT "${SKY2HOOK_DIR}/src")
 set(SKY "${PORT}/runtime/renderware/sky2")
@@ -37,6 +39,7 @@ target_include_directories(pl_mpeg PUBLIC ${pl_mpeg_SOURCE_DIR})
 target_compile_options(pl_mpeg PRIVATE -w)
 
 add_executable(p3fes
+    sdl_runtime.cpp
     uee_hooks.cpp
     uee_runtime.cpp
     movie_decoder.cpp
@@ -92,17 +95,26 @@ add_executable(p3fes
     "${SKY2HOOK_DIR}/thirdparty/imgui/src/imgui_tables.cpp"
     "${SKY2HOOK_DIR}/thirdparty/imgui/src/imgui_widgets.cpp")
 
-# The warnings this build runs with, kept for the two files it owns.
-set_source_files_properties(uee_hooks.cpp uee_runtime.cpp PROPERTIES
-    COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic")
+# The warnings this build runs with, kept for the files it owns.
+if(MSVC)
+    set_source_files_properties(sdl_runtime.cpp uee_hooks.cpp uee_runtime.cpp PROPERTIES
+        COMPILE_OPTIONS "/W4")
+else()
+    set_source_files_properties(sdl_runtime.cpp uee_hooks.cpp uee_runtime.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic")
+endif()
 
 # The port is C++20 and this runtime is C++23; each half keeps its own.
 set_target_properties(p3fes PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 
 # The shaders and per-serial address files are read at runtime from the port.
-target_compile_definitions(p3fes PRIVATE
-    SKYGL_SHADER_DIR="${SKY}/shaders"
-    GAME_CONFIG_DIR="${SKY2HOOK_DIR}/config")
+# A Windows build is copied elsewhere to be played, so it reads them from beside
+# itself, where the port's relative defaults point.
+if(NOT WIN32)
+    target_compile_definitions(p3fes PRIVATE
+        SKYGL_SHADER_DIR="${SKY}/shaders"
+        GAME_CONFIG_DIR="${SKY2HOOK_DIR}/config")
+endif()
 
 target_include_directories(p3fes PRIVATE
     "${PORT}"
@@ -115,6 +127,8 @@ target_include_directories(p3fes PRIVATE
     "${SKY}/common"
     "${SKY}/material"
     "${SKY2HOOK_DIR}/thirdparty/glad/include"
+    "${GLM_INCLUDE_DIR}"
+    "${KHR_INCLUDE_DIR}"
     "${SKY2HOOK_DIR}/thirdparty/imgui/include"
     "${SKY2HOOK_DIR}/thirdparty/tomlplusplus")
 
@@ -147,11 +161,10 @@ endif()
 set_target_properties(p3fes PROPERTIES ENABLE_EXPORTS ON)
 target_link_libraries(p3fes PRIVATE
     uee
+    uee_sdl
     pl_mpeg
     spdlog::spdlog
     SDL3::SDL3
     ZLIB::ZLIB
     OpenGL::GL
-    OpenGL::GLX
-    X11::X11
     Threads::Threads)

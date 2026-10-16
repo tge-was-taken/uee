@@ -1,4 +1,4 @@
-#include "runtime.h"
+#include "uee_runtime.h"
 
 #include "uee_hooks.h"
 
@@ -76,26 +76,24 @@ std::span<uee::TranslatedIrx* const> getTranslatedIopModules() {
 #endif
 }
 
-// libpad reports the buttons as one active-low halfword, the poll response's
-// first data byte in the high half.
 u16 getPadMask(core::PadButton bind) {
     switch (bind) {
-        case core::PAD_LEFT: return 0x8000;
-        case core::PAD_DOWN: return 0x4000;
-        case core::PAD_RIGHT: return 0x2000;
-        case core::PAD_UP: return 0x1000;
-        case core::PAD_START: return 0x0800;
-        case core::PAD_R3: return 0x0400;
-        case core::PAD_L3: return 0x0200;
-        case core::PAD_SELECT: return 0x0100;
-        case core::PAD_SQUARE: return 0x0080;
-        case core::PAD_CROSS: return 0x0040;
-        case core::PAD_CIRCLE: return 0x0020;
-        case core::PAD_TRIANGLE: return 0x0010;
-        case core::PAD_R1: return 0x0008;
-        case core::PAD_L1: return 0x0004;
-        case core::PAD_R2: return 0x0002;
-        case core::PAD_L2: return 0x0001;
+        case core::PAD_LEFT: return uee::kPadLeft;
+        case core::PAD_DOWN: return uee::kPadDown;
+        case core::PAD_RIGHT: return uee::kPadRight;
+        case core::PAD_UP: return uee::kPadUp;
+        case core::PAD_START: return uee::kPadStart;
+        case core::PAD_R3: return uee::kPadR3;
+        case core::PAD_L3: return uee::kPadL3;
+        case core::PAD_SELECT: return uee::kPadSelect;
+        case core::PAD_SQUARE: return uee::kPadSquare;
+        case core::PAD_CROSS: return uee::kPadCross;
+        case core::PAD_CIRCLE: return uee::kPadCircle;
+        case core::PAD_TRIANGLE: return uee::kPadTriangle;
+        case core::PAD_R1: return uee::kPadR1;
+        case core::PAD_L1: return uee::kPadL1;
+        case core::PAD_R2: return uee::kPadR2;
+        case core::PAD_L2: return uee::kPadL2;
         default: return 0;
     }
 }
@@ -149,9 +147,9 @@ std::vector<PadStep> readPadScript(const std::filesystem::path& path) {
 
 // The boot ELF is named after the disc serial, which is what the per-version
 // address file is named after in the other spelling: SLUS_216.21 is SLUS-21621.
-std::string getSerial(const std::filesystem::path& elf) {
+std::string getSerial(const std::string& bootName) {
     std::string serial;
-    for (const char c : elf.filename().string()) {
+    for (const char c : bootName) {
         if (c == '_') {
             serial.push_back('-');
         } else if (c != '.') {
@@ -169,9 +167,36 @@ std::vector<u8> readFile(const std::filesystem::path& path) {
     return std::vector<u8>(std::istreambuf_iterator<char>(file), {});
 }
 
+std::vector<u8> readDiscFile(uee::Disc& disc, const std::string& path) {
+    const std::optional<uee::DiscFile> file = disc.find(path);
+    std::vector<u8> bytes;
+    if (!file || !disc.read(file->sector, (file->size + uee::kSectorBytes - 1) / uee::kSectorBytes,
+                            bytes)) {
+        return {};
+    }
+    bytes.resize(file->size);
+    return bytes;
+}
+
+// SYSTEM.CNF names the program the BIOS would boot: BOOT2 = cdrom0:\SLUS_216.21;1.
+std::string getBootName(uee::Disc& disc) {
+    const std::vector<u8> bytes = readDiscFile(disc, "SYSTEM.CNF");
+    const std::string text(bytes.begin(), bytes.end());
+    const usize key = text.find("BOOT2");
+    const usize device = text.find("cdrom0:", key);
+    if (key == std::string::npos || device == std::string::npos) {
+        return {};
+    }
+    const usize start = text.find_first_not_of("\\/", device + 7);
+    const usize end = text.find_first_of(";\r\n", start);
+    return start == std::string::npos ? std::string{} : text.substr(start, end - start);
+}
+
 // The kernel is HLE, so the game boots straight from its ELF.
 class UeeRuntime final : public core::Runtime, private uee::PadSource, private uee::StopRequest {
 public:
+    explicit UeeRuntime(RuntimeHost host) : mHost(std::move(host)) {}
+
     bool init(int argc, char** argv) override {
         uee::configureLogging();
         std::vector<std::string> positional;
@@ -189,9 +214,7 @@ public:
             }
         }
         if (positional.empty()) {
-            logger.fatal("usage: p3fes <elf> [disc] [patches.toml] [card.mc2] "
-                      "[-surfaceless] [-advance]");
-            return false;
+            return findPlayerFiles();
         }
         mElf = positional[0];
         mDisc = positional.size() > 1 ? positional[1] : "";
@@ -225,11 +248,33 @@ public:
         }
     }
 
-    // The interpreter runs as fast as it can and the guest paces itself off the
-    // display fields, so there is no speed to limit.
-    void setSpeedLimit(bool) override {}
+    void setSpeedLimit(bool enabled) override {
+        if (mHost.limitSpeed) {
+            mHost.limitSpeed(enabled);
+        }
+    }
 
 private:
+    // With nothing on the command line, everything is found beside the
+    // executable, and the port's relative shader and config paths with it.
+    bool findPlayerFiles() {
+        if (!mHost.getPlayerDirectory || !mHost.findDisc) {
+            logger.fatal("usage: p3fes <elf> [disc] [patches.toml] [card.mc2] "
+                         "[-surfaceless] [-advance]");
+            return false;
+        }
+        const std::filesystem::path base = mHost.getPlayerDirectory();
+        std::filesystem::current_path(base);
+        mDisc = mHost.findDisc(base);
+        if (mDisc.empty()) {
+            logger.fatal("no disc: put a .iso beside {} or pick one", base.string());
+            return false;
+        }
+        mCard = base / "card.mc2";
+        mPatchDirectory = base / "patches";
+        return true;
+    }
+
     // Cross every fourth poll walks the boot prompts with nobody at the pad. No
     // direction, so that a measured run is the same scene twice.
     u16 getAdvanceButtons() const {
@@ -264,7 +309,8 @@ private:
         const u16 driven = !mScript.empty() ? getScriptButtons()
                                             : (mWalk ? getWalkButtons()
                                                      : (mAdvance ? getAdvanceButtons() : 0));
-        const u16 held = mHeld.load(std::memory_order_relaxed) | driven;
+        const u16 other = mHost.readButtons ? mHost.readButtons() : 0;
+        const u16 held = mHeld.load(std::memory_order_relaxed) | driven | other;
         return static_cast<u16>(~held);
     }
 
@@ -277,10 +323,34 @@ private:
     }
 
     int boot() {
-        const std::vector<u8> image = readFile(mElf);
-        if (image.empty()) {
-            logger.fatal("cannot read {}", mElf.string());
+        const std::unique_ptr<uee::Disc> disc = uee::openDisc(mDisc.string());
+        if (!mDisc.empty() && !disc->isOpen()) {
+            logger.fatal("cannot open disc {}", mDisc.string());
             return EXIT_FAILURE;
+        }
+
+        std::string bootName = mElf.filename().string();
+        std::vector<u8> image;
+        if (mElf.empty()) {
+            bootName = disc->isOpen() ? getBootName(*disc) : "";
+            if (bootName.empty()) {
+                logger.fatal("{} names no program to boot", mDisc.string());
+                return EXIT_FAILURE;
+            }
+            image = readDiscFile(*disc, bootName);
+        } else {
+            image = readFile(mElf);
+        }
+        if (image.empty()) {
+            logger.fatal("cannot read {}", bootName);
+            return EXIT_FAILURE;
+        }
+        if (mPatches.empty() && !mPatchDirectory.empty()) {
+            const std::filesystem::path patches =
+                mPatchDirectory / (getSerial(bootName) + ".toml");
+            if (std::filesystem::exists(patches)) {
+                mPatches = patches;
+            }
         }
 
         uee::GameConfig config;
@@ -310,15 +380,14 @@ private:
             }
         }
 
-        const std::unique_ptr<uee::Disc> disc = uee::openDisc(mDisc.string());
-        if (!mDisc.empty() && !disc->isOpen()) {
-            logger.fatal("cannot open disc {}", mDisc.string());
-            return EXIT_FAILURE;
-        }
         if (disc->isOpen()) {
             kernel.attachDisc(*disc);
         }
         kernel.attachPad(this);
+        // Only a run someone watches is heard; a headless one runs unlimited.
+        if (mUseWindow && mHost.audio) {
+            kernel.attachAudio(mHost.audio.get());
+        }
 
         std::optional<uee::CardFile> card;
         if (!mCard.empty()) {
@@ -330,7 +399,7 @@ private:
             kernel.attachCard(&*card);
         }
 
-        if (!armRenderer()) {
+        if (!armRenderer(bootName)) {
             return EXIT_FAILURE;
         }
         // The render thread reads guest memory directly, so it has to be joined
@@ -371,8 +440,8 @@ private:
         return EXIT_FAILURE;
     }
 
-    bool armRenderer() {
-        game::loadAddresses(getSerial(mElf));
+    bool armRenderer(const std::string& bootName) {
+        game::loadAddresses(getSerial(bootName));
         if (!app::Config::get().nativeRenderer) {
             return true;
         }
@@ -385,10 +454,12 @@ private:
         return true;
     }
 
+    RuntimeHost mHost;
     std::filesystem::path mElf;
     std::filesystem::path mDisc;
     std::filesystem::path mPatches;
     std::filesystem::path mCard;
+    std::filesystem::path mPatchDirectory;
     std::thread mThread;
     std::atomic<bool> mStopped{false};
     std::atomic<u16> mHeld{0};
@@ -402,6 +473,6 @@ private:
 
 }  // namespace
 
-std::unique_ptr<core::Runtime> core::makeRuntime() {
-    return std::make_unique<UeeRuntime>();
+std::unique_ptr<core::Runtime> makeUeeRuntime(RuntimeHost host) {
+    return std::make_unique<UeeRuntime>(std::move(host));
 }
