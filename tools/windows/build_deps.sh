@@ -20,7 +20,7 @@ fetch() {
     if [ ! -d "$downloads/$directory" ]; then
         case $file in
             *.zip) python3 -m zipfile -e "$downloads/$file" "$downloads" ;;
-            *) tar -xf "$downloads/$file" -C "$downloads" ;;
+            *.tar.*) tar -xf "$downloads/$file" -C "$downloads" ;;
         esac
     fi
 }
@@ -94,3 +94,15 @@ build rapidyaml-0.12.1-src
 fetch DirectX-Headers-1.619.1.zip https://github.com/microsoft/DirectX-Headers/archive/v1.619.1.zip \
     9eb8b102a90a42e4ea72a825f7d249d55ec90d164f030966c9b7784b93374927 DirectX-Headers-1.619.1
 build DirectX-Headers-1.619.1 -DDXHEADERS_BUILD_TEST=OFF -DDXHEADERS_BUILD_GOOGLE_TEST=OFF
+
+# Headers the P3FES port's renderer takes from the system on Linux.
+fetch glm-1.0.1.zip https://github.com/g-truc/glm/archive/refs/tags/1.0.1.zip \
+    09c5716296787e1f7fcb87b1cbdbf26814ec1288ed6259ccd30d5d9795809fa5 glm-1.0.1
+mkdir -p "$prefix/include"
+cp -r "$downloads/glm-1.0.1/glm" "$prefix/include/"
+
+fetch khrplatform.h \
+    https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/5961a7fe64cf8a126890ced6f13d69e0a1e1b83e/api/KHR/khrplatform.h \
+    7b1e01aaa7ad8f6fc34b5c7bdf79ebf5189bb09e2c4d2e79fc5d350623d11e83 khrplatform.h
+mkdir -p "$prefix/include/KHR"
+cp "$downloads/khrplatform.h" "$prefix/include/KHR/"
